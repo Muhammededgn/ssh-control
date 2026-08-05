@@ -1,0 +1,41 @@
+# Maintainer: R.M. Emin "Toyar" Doğan
+#
+# Phase-1 local package build. This PKGBUILD builds directly from the project
+# checkout (no remote source fetch) — run it from within this directory:
+#
+#   cd packaging/arch && makepkg -si
+#
+# Once the project has a public git remote, replace the `source=()`/`build()`/
+# `package()` local-path handling below with a normal
+# `source=("$pkgname-$pkgver.tar.gz::https://.../v$pkgver.tar.gz")` entry.
+
+pkgname=ssh-control
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Local, encrypted SSH connection manager with an interactive TUI"
+arch=('x86_64')
+url="https://github.com/emin/ssh-control"
+license=('MIT')
+depends=('gcc-libs')
+makedepends=('cargo')
+options=('!lto')
+
+# Root of the actual Cargo project, two directories up from this PKGBUILD.
+_projectdir="$startdir/../.."
+
+build() {
+    cd "$_projectdir"
+    cargo build --release --locked
+}
+
+check() {
+    cd "$_projectdir"
+    cargo test --release --locked
+}
+
+package() {
+    cd "$_projectdir"
+    install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+    install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 "README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
