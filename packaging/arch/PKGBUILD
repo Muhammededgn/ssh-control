@@ -14,7 +14,7 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="Local, encrypted SSH connection manager with an interactive TUI"
 arch=('x86_64')
-url="https://github.com/muhammededgn/ssh-control"
+url="https://github.com/Muhammededgn/ssh-control"
 license=('MIT')
 depends=('gcc-libs')
 # cmake is needed by aws-lc-sys, pulled in transitively through russh.
