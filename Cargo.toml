@@ -6,8 +6,8 @@ description = "Local, encrypted SSH connection manager with an interactive TUI"
 authors = ["R.M. Emin \"Toyar\" Doğan"]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/emin/ssh-control"
-homepage = "https://github.com/emin/ssh-control"
+repository = "https://github.com/muhammededgn/ssh-control"
+homepage = "https://github.com/muhammededgn/ssh-control"
 keywords = ["ssh", "tui", "encryption", "sysadmin"]
 categories = ["command-line-utilities"]
 

@@ -1,6 +1,6 @@
 # ssh-control
 
-[![CI](https://github.com/emin/ssh-control/actions/workflows/ci.yml/badge.svg)](https://github.com/emin/ssh-control/actions/workflows/ci.yml)
+[![CI](https://github.com/muhammededgn/ssh-control/actions/workflows/ci.yml/badge.svg)](https://github.com/muhammededgn/ssh-control/actions/workflows/ci.yml)
 
 A local, encrypted SSH connection manager with an interactive terminal UI.
 
@@ -29,7 +29,7 @@ so `vim`, `htop`, `tmux` and Ctrl+C behave exactly as they would under plain
 ### Prebuilt packages
 
 Every tagged release publishes `.deb`, `.rpm`, Arch `.pkg.tar.zst` and a plain
-tarball on the [releases page](https://github.com/emin/ssh-control/releases),
+tarball on the [releases page](https://github.com/muhammededgn/ssh-control/releases),
 alongside a `SHA256SUMS` file. The binaries are built against glibc 2.36, so
 they run on Debian 12+, Ubuntu 22.04+ and Fedora 37+.
 
