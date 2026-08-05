@@ -1,5 +1,7 @@
 # ssh-control
 
+[![CI](https://github.com/emin/ssh-control/actions/workflows/ci.yml/badge.svg)](https://github.com/emin/ssh-control/actions/workflows/ci.yml)
+
 A local, encrypted SSH connection manager with an interactive terminal UI.
 
 Servers, credentials and per-server automation scripts live in a single
@@ -24,7 +26,29 @@ so `vim`, `htop`, `tmux` and Ctrl+C behave exactly as they would under plain
 
 ## Install
 
-### Arch Linux
+### Prebuilt packages
+
+Every tagged release publishes `.deb`, `.rpm`, Arch `.pkg.tar.zst` and a plain
+tarball on the [releases page](https://github.com/emin/ssh-control/releases),
+alongside a `SHA256SUMS` file. The binaries are built against glibc 2.36, so
+they run on Debian 12+, Ubuntu 22.04+ and Fedora 37+.
+
+```sh
+# Debian / Ubuntu
+sudo dpkg -i ssh-control_0.1.0-1_amd64.deb
+
+# Fedora / RHEL
+sudo rpm -i ssh-control-0.1.0-1.x86_64.rpm
+
+# Arch
+sudo pacman -U ssh-control-0.1.0-1-x86_64.pkg.tar.zst
+
+# Anything else
+tar xzf ssh-control-0.1.0-x86_64-linux.tar.gz
+sudo install -Dm755 ssh-control-0.1.0-x86_64-linux/ssh-control /usr/local/bin/ssh-control
+```
+
+### Arch, from source
 
 ```sh
 cd packaging/arch && makepkg -si
@@ -37,7 +61,8 @@ cargo build --release
 ./target/release/ssh-control
 ```
 
-Requires a Rust toolchain (edition 2024) and a unix-like OS.
+Requires a Rust toolchain (edition 2024), CMake, a C compiler, and a unix-like
+OS. CMake and the C compiler are for `aws-lc-sys`, which `russh` depends on.
 
 ## Usage
 
@@ -99,8 +124,20 @@ by your master password. Choose a strong one.
 ## Development
 
 ```sh
-cargo test
-cargo clippy --all-targets
+cargo test --locked
+cargo clippy --all-targets --locked -- -D warnings
+```
+
+These are exactly what CI runs on every push. Note the source is *not*
+rustfmt-formatted — it uses a deliberately compact hand style, so there is no
+`cargo fmt` gate.
+
+Releases are cut by pushing a version tag. The tag, `Cargo.toml` and
+`packaging/arch/PKGBUILD` must all carry the same version or the release
+workflow fails before building anything:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
 ```
 
 `examples/gen_totp_code.rs` prints the current code for a base32 secret, which

@@ -2,6 +2,14 @@
 name = "ssh-control"
 version = "0.1.0"
 edition = "2024"
+description = "Local, encrypted SSH connection manager with an interactive TUI"
+authors = ["R.M. Emin \"Toyar\" Doğan"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/emin/ssh-control"
+homepage = "https://github.com/emin/ssh-control"
+keywords = ["ssh", "tui", "encryption", "sysadmin"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 aes-gcm = "0.11.0"
@@ -22,3 +30,30 @@ zeroize = "1.9.0"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+# Debian packaging (`cargo deb`). Runtime dependencies are derived from the
+# built ELF rather than hardcoded, so a glibc bump doesn't silently produce an
+# uninstallable package.
+[package.metadata.deb]
+section = "net"
+priority = "optional"
+depends = "$auto"
+license-file = "LICENSE"
+extended-description = """\
+Servers, credentials and per-server automation scripts live in a single \
+AES-256-GCM encrypted file on your own machine. Nothing is synced or uploaded. \
+Connecting hands the terminal to a real PTY session, so interactive programs \
+and Ctrl+C behave exactly as they would under plain ssh."""
+assets = [
+    ["target/release/ssh-control", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/ssh-control/README.md", "644"],
+]
+
+# RPM packaging (`cargo generate-rpm`). Unlike cargo-deb this reads absolute
+# destination paths and does not pick up the license automatically.
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/ssh-control", dest = "/usr/bin/ssh-control", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/ssh-control/README.md", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/licenses/ssh-control/LICENSE", mode = "644", doc = true },
+]

@@ -1,0 +1,33 @@
+name: CI
+
+# Version tags are handled by release.yml, which re-runs these same checks as
+# its gate — running both here would just duplicate the work.
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Clippy + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # russh pulls in aws-lc-sys, which compiles a sizeable C library through
+      # CMake. Without this cache every run pays for it again.
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked

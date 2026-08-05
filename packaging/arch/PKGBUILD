@@ -17,7 +17,8 @@ arch=('x86_64')
 url="https://github.com/emin/ssh-control"
 license=('MIT')
 depends=('gcc-libs')
-makedepends=('cargo')
+# cmake is needed by aws-lc-sys, pulled in transitively through russh.
+makedepends=('cargo' 'cmake')
 options=('!lto')
 
 # Root of the actual Cargo project, two directories up from this PKGBUILD.

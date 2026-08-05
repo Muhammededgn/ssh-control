@@ -1,0 +1,169 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Gate. Nothing is built or published unless this passes.
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The tag, Cargo.toml and the PKGBUILD each carry the version
+      # independently. Catch a half-finished bump here rather than shipping a
+      # release whose packages disagree with their own filenames.
+      - name: Check version consistency
+        id: version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          pkgbuild_version=$(grep -m1 '^pkgver=' packaging/arch/PKGBUILD | cut -d= -f2)
+
+          echo "tag=$tag  Cargo.toml=$cargo_version  PKGBUILD=$pkgbuild_version"
+          if [ "$tag" != "$cargo_version" ] || [ "$tag" != "$pkgbuild_version" ]; then
+            echo "::error::version mismatch — bump Cargo.toml and packaging/arch/PKGBUILD to $tag before tagging"
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked
+
+  # Built inside bookworm (glibc 2.36) rather than on the runner image
+  # directly: a binary linked against the runner's newer glibc would refuse to
+  # start on Debian 12 / Ubuntu 22.04. One binary feeds all three formats.
+  linux-packages:
+    name: tar.gz + deb + rpm
+    needs: verify
+    runs-on: ubuntu-latest
+    container: debian:bookworm
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - name: Install build tooling
+        run: |
+          set -eux
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config curl ca-certificates git
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Install packaging tools
+        run: cargo install --locked cargo-deb cargo-generate-rpm
+
+      - name: Build packages
+        run: |
+          set -eux
+          mkdir -p dist
+
+          # Strip up front so all three formats ship the same lean binary —
+          # cargo-deb strips on its own but cargo-generate-rpm does not.
+          strip target/release/ssh-control
+
+          cargo deb --no-build
+          cargo generate-rpm
+          mv target/debian/*.deb dist/
+          mv target/generate-rpm/*.rpm dist/
+
+          # Portable tarball: binary plus the docs, no install step.
+          staging="ssh-control-${VERSION}-x86_64-linux"
+          mkdir -p "$staging"
+          cp target/release/ssh-control README.md LICENSE "$staging/"
+          tar czf "dist/${staging}.tar.gz" "$staging"
+
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: dist/*
+          if-no-files-found: error
+
+  arch-package:
+    name: Arch pkg.tar.zst
+    needs: verify
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install build tooling
+        run: pacman -Syu --noconfirm --needed rust cmake git
+
+      - uses: actions/checkout@v4
+
+      # makepkg refuses to run as root, and the checkout is owned by root.
+      # The sudoers entry is what lets makepkg's -s resolve any makedepends
+      # added to the PKGBUILD later without this job needing an edit too.
+      - name: Build package
+        run: |
+          set -eux
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+          chown -R builder "$GITHUB_WORKSPACE"
+          # --nocheck: the PKGBUILD's check() re-runs the test suite in release
+          # mode, which the verify job already covered — a second full build
+          # would roughly double this job for no extra signal.
+          su builder -c "cd '$GITHUB_WORKSPACE/packaging/arch' && makepkg -sf --noconfirm --nocheck"
+
+          mkdir -p dist
+          # Ship the binary package only; the -debug package is build spoil.
+          find packaging/arch -maxdepth 1 -name '*.pkg.tar.zst' ! -name '*-debug-*' -exec mv {} dist/ \;
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch-package
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: [linux-packages, arch-package]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect and checksum
+        run: |
+          set -eux
+          mkdir -p dist
+          find artifacts -type f -exec mv {} dist/ \;
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
