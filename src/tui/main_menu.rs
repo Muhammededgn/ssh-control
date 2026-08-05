@@ -154,7 +154,7 @@ impl MainMenuState {
     ) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(3)])
+            .constraints([Constraint::Min(3), Constraint::Length(4)])
             .split(area);
 
         let items: Vec<ListItem> = if servers.is_empty() {
@@ -189,9 +189,16 @@ impl MainMenuState {
 
         frame.render_stateful_widget(list, chunks[0], &mut self.list_state);
 
-        let help_text = status
-            .map(|s| Line::from(Span::styled(s.to_string(), Style::default().fg(Color::Yellow))))
-            .unwrap_or_else(|| Line::from(strings.main_menu_hint));
+        let mut help_text = Vec::new();
+
+        if let Some(s) = status {
+            help_text.push(Line::from(Span::styled(
+                s.to_string(),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+        help_text.push(Line::from(strings.main_menu_hint));
+        
         let help = Paragraph::new(help_text).block(Block::default().borders(Borders::ALL));
         frame.render_widget(help, chunks[1]);
     }
