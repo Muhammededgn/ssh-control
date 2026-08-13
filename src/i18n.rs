@@ -150,6 +150,14 @@ pub struct Strings {
     pub status_totp_only_enabled: &'static str,
     pub status_switched_to_password: &'static str,
 
+    // Auto-lock tab
+    pub settings_tab_auto_lock: &'static str,
+    pub settings_auto_lock_hint: &'static str,
+    pub auto_lock_off: &'static str,
+    pub auto_lock_minutes_suffix: &'static str,
+    pub status_auto_lock_saved: &'static str,
+    pub status_auto_locked: &'static str,
+
     // Status messages
     pub status_saved: &'static str,
     pub status_deleted: &'static str,
@@ -283,6 +291,13 @@ pub static EN: Strings = Strings {
     status_totp_only_enabled: "Switched to TOTP-only — password is no longer used",
     status_switched_to_password: "Switched back to password",
 
+    settings_tab_auto_lock: "Auto-lock",
+    settings_auto_lock_hint: "↑/↓: select  Enter: apply  ←/→: switch tab  Esc: back",
+    auto_lock_off: "Off",
+    auto_lock_minutes_suffix: " minutes",
+    status_auto_lock_saved: "Auto-lock timeout saved",
+    status_auto_locked: "Locked after inactivity",
+
     status_saved: "Saved",
     status_deleted: "Deleted",
     save_error_prefix: "Save error: ",
@@ -413,6 +428,13 @@ pub static TR: Strings = Strings {
     status_2fa_disabled: "2FA kapatıldı",
     status_totp_only_enabled: "Sadece TOTP'ye geçildi — şifre artık kullanılmıyor",
     status_switched_to_password: "Şifreye geri dönüldü",
+
+    settings_tab_auto_lock: "Otomatik kilit",
+    settings_auto_lock_hint: "↑/↓: seç  Enter: uygula  ←/→: sekme değiştir  Esc: geri",
+    auto_lock_off: "Kapalı",
+    auto_lock_minutes_suffix: " dakika",
+    status_auto_lock_saved: "Otomatik kilit süresi kaydedildi",
+    status_auto_locked: "Hareketsizlik nedeniyle kilitlendi",
 
     status_saved: "Kaydedildi",
     status_deleted: "Silindi",
@@ -545,6 +567,13 @@ pub static ES: Strings = Strings {
     status_totp_only_enabled: "Cambiado a solo TOTP — la contraseña ya no se usa",
     status_switched_to_password: "Se volvió a usar contraseña",
 
+    settings_tab_auto_lock: "Bloqueo automático",
+    settings_auto_lock_hint: "↑/↓: seleccionar  Enter: aplicar  ←/→: cambiar pestaña  Esc: volver",
+    auto_lock_off: "Desactivado",
+    auto_lock_minutes_suffix: " minutos",
+    status_auto_lock_saved: "Tiempo de bloqueo automático guardado",
+    status_auto_locked: "Bloqueado por inactividad",
+
     status_saved: "Guardado",
     status_deleted: "Eliminado",
     save_error_prefix: "Error al guardar: ",
@@ -675,6 +704,13 @@ pub static RU: Strings = Strings {
     status_2fa_disabled: "2FA отключена",
     status_totp_only_enabled: "Переключено на только TOTP — пароль больше не используется",
     status_switched_to_password: "Возвращено к паролю",
+
+    settings_tab_auto_lock: "Автоблокировка",
+    settings_auto_lock_hint: "↑/↓: выбрать  Enter: применить  ←/→: сменить вкладку  Esc: назад",
+    auto_lock_off: "Выключена",
+    auto_lock_minutes_suffix: " мин.",
+    status_auto_lock_saved: "Время автоблокировки сохранено",
+    status_auto_locked: "Заблокировано из-за бездействия",
 
     status_saved: "Сохранено",
     status_deleted: "Удалено",

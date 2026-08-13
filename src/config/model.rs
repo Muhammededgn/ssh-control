@@ -1,8 +1,14 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::secret::Secret;
+
 pub const DEFAULT_PORT: u16 = 22;
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+/// Idle minutes before the vault re-locks itself. A file written before this
+/// field existed gets the protective default rather than "off" — an old vault
+/// should not stay unlocked forever just because it predates the feature.
+pub const DEFAULT_AUTO_LOCK_MINUTES: u32 = 15;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -15,6 +21,11 @@ pub struct Config {
     /// the master password protects it exactly like everything else here.
     #[serde(default)]
     pub totp: Option<TotpConfig>,
+    /// Minutes of no key input before `App` drops back to the locked state.
+    /// `0` disables it. Lives inside the encrypted config (rather than beside
+    /// it like `prefs.lang`) because nothing needs to read it before unlock.
+    #[serde(default = "default_auto_lock_minutes")]
+    pub auto_lock_minutes: u32,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -32,12 +43,17 @@ fn default_schema_version() -> u32 {
     CURRENT_SCHEMA_VERSION
 }
 
+fn default_auto_lock_minutes() -> u32 {
+    DEFAULT_AUTO_LOCK_MINUTES
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             schema_version: CURRENT_SCHEMA_VERSION,
             servers: Vec::new(),
             totp: None,
+            auto_lock_minutes: DEFAULT_AUTO_LOCK_MINUTES,
         }
     }
 }
@@ -124,10 +140,14 @@ pub struct SystemInfo {
     pub fetched_at_unix: u64,
 }
 
+/// Credentials are held in `Secret`, never `String`, so every copy made along
+/// the way — deserialization, a form submission, the `ssh::Target` a connect
+/// flow carries — wipes itself on drop. `Secret` serializes as a bare string,
+/// so the on-disk shape is unchanged.
 #[derive(Clone, Serialize, Deserialize)]
 pub enum AuthMethod {
-    Password { password: String },
-    SshKey { key_path: String, passphrase: Option<String> },
+    Password { password: Secret },
+    SshKey { key_path: String, passphrase: Option<Secret> },
 }
 
 impl std::fmt::Debug for AuthMethod {
@@ -146,6 +166,12 @@ impl std::fmt::Debug for AuthMethod {
     }
 }
 
+impl AuthMethod {
+    pub fn password(password: impl Into<String>) -> Self {
+        AuthMethod::Password { password: Secret::from(password.into()) }
+    }
+}
+
 impl std::fmt::Debug for ServerEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServerEntry")
@@ -159,5 +185,52 @@ impl std::fmt::Debug for ServerEntry {
             .field("system_info", &self.system_info)
             .field("scripts", &self.scripts)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Exactly what a vault written before `Secret` and `auto_lock_minutes`
+    /// existed contains. Decryption hands this to `serde_json`, so if it stops
+    /// parsing, every already-written vault is unopenable.
+    const LEGACY_CONFIG_JSON: &str = r#"{
+        "schema_version": 1,
+        "servers": [{
+            "id": "6f1e7f3a-0000-4000-8000-00000000cafe",
+            "name": "box",
+            "host": "example.com",
+            "port": 22,
+            "username": "root",
+            "auth": { "Password": { "password": "hunter2" } }
+        }],
+        "totp": null
+    }"#;
+
+    #[test]
+    fn legacy_config_without_the_new_fields_still_loads() {
+        let config: Config = serde_json::from_str(LEGACY_CONFIG_JSON).expect("an existing vault must still deserialize");
+        assert_eq!(config.auto_lock_minutes, DEFAULT_AUTO_LOCK_MINUTES);
+        let AuthMethod::Password { password } = &config.servers[0].auth else {
+            panic!("expected password auth");
+        };
+        assert_eq!(password.as_str(), "hunter2");
+    }
+
+    #[test]
+    fn credentials_serialize_as_bare_strings() {
+        let entry = ServerEntry::new("box".into(), "example.com".into(), DEFAULT_PORT, "root".into(), AuthMethod::password("hunter2"));
+        let json = serde_json::to_string(&entry.auth).unwrap();
+        assert_eq!(json, r#"{"Password":{"password":"hunter2"}}"#);
+
+        let key_auth = AuthMethod::SshKey { key_path: "/k".into(), passphrase: Some(Secret::from("pp".to_string())) };
+        assert_eq!(serde_json::to_string(&key_auth).unwrap(), r#"{"SshKey":{"key_path":"/k","passphrase":"pp"}}"#);
+    }
+
+    #[test]
+    fn debug_never_prints_a_credential() {
+        let entry = ServerEntry::new("box".into(), "example.com".into(), DEFAULT_PORT, "root".into(), AuthMethod::password("hunter2"));
+        assert!(!format!("{entry:?}").contains("hunter2"));
     }
 }

@@ -103,10 +103,16 @@ credentials without the master password. The key is derived with Argon2id
 tampering with the stored KDF parameters fails the authentication tag rather
 than silently weakening the derivation.
 
+**Idle auto-lock.** After 15 minutes without a keypress the vault re-locks
+itself and the master key is wiped from memory; you are back at the unlock
+screen. Change the timeout — Off, 1, 5, 15, 30 or 60 minutes — under
+`F1` → Auto-lock. The timer never interrupts a live SSH session or a running
+script, and `l` still locks immediately.
+
 **What it does not protect against.** While the vault is unlocked, the key and
-the decrypted credentials are in process memory. It is not a defense against
-malware or another process running as your user, and there is currently no
-idle auto-lock — use `l` to lock when you step away.
+the decrypted credentials are in process memory. Credentials are held in
+buffers that are wiped when dropped, but this is not a defense against malware
+or another process running as your user.
 
 **TOTP-only mode is weaker, by design.** In this mode there is no password at
 all, so the vault key is derived from the TOTP secret — which must be stored in

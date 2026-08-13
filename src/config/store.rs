@@ -167,7 +167,10 @@ impl ConfigStore {
             salt: *salt,
         };
         let aad = format::header_aad(&header);
-        let plaintext = serde_json::to_vec(config)?;
+        // Wiped on drop: this buffer holds every credential in the vault in the
+        // clear, and the vault is rewritten on every connect. `cipher::decrypt`
+        // already returns `Zeroizing` for the same reason on the read side.
+        let plaintext = Zeroizing::new(serde_json::to_vec(config)?);
         let nonce = cipher::random_nonce()?;
         let ciphertext = cipher::encrypt(key, &nonce, &aad, &plaintext)?;
         let bytes = format::encode(&header, &nonce, &ciphertext);

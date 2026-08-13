@@ -27,6 +27,9 @@ pub struct UnlockState {
     confirm: Zeroizing<String>,
     focus: Focus,
     pub error: Option<String>,
+    /// Non-failure notice shown in place of the hint — currently only "the
+    /// vault auto-locked", which is not an error and must not be red.
+    pub info: Option<String>,
 }
 
 pub enum UnlockOutcome {
@@ -46,11 +49,13 @@ impl UnlockState {
             confirm: Zeroizing::new(String::new()),
             focus: Focus::Password,
             error: None,
+            info: None,
         }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, strings: &Strings) -> UnlockOutcome {
         self.error = None;
+        self.info = None;
         match key.code {
             KeyCode::Esc => return UnlockOutcome::Quit,
             KeyCode::Tab | KeyCode::Down if self.mode == UnlockMode::FirstRun => {
@@ -146,6 +151,8 @@ impl UnlockState {
         lines.push(Line::from(""));
         if let Some(err) = &self.error {
             lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(Color::Red))));
+        } else if let Some(info) = &self.info {
+            lines.push(Line::from(Span::styled(info.clone(), Style::default().fg(Color::Yellow))));
         } else {
             lines.push(Line::from(Span::styled(
                 strings.unlock_hint,

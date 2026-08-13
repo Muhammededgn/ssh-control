@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
 use uuid::Uuid;
@@ -76,6 +76,7 @@ enum NextStep {
     ConfirmNo,
     SettingsClose,
     SettingsLangSelected(Lang),
+    SettingsAutoLockSelected(u32),
     SettingsChangePassword { current: Zeroizing<String>, new: Zeroizing<String> },
     EnableTwoFactor(String),
     DisableTwoFactor,
@@ -101,6 +102,10 @@ pub struct App {
     state: AppState,
     lang: Lang,
     should_quit: bool,
+    /// When the last key was pressed, for the idle auto-lock. Also re-stamped
+    /// after every `handle_key`, so time spent inside an SSH session or a
+    /// script run does not count as idle.
+    last_activity: Instant,
 }
 
 impl App {
@@ -112,7 +117,7 @@ impl App {
             let mode = if store.exists() { UnlockMode::Unlock } else { UnlockMode::FirstRun };
             AppState::Locked(UnlockState::new(mode))
         };
-        Self { store, state, lang, should_quit: false }
+        Self { store, state, lang, should_quit: false, last_activity: Instant::now() }
     }
 
     pub async fn run(&mut self, terminal: &mut TerminalGuard) -> Result<()> {
@@ -123,10 +128,52 @@ impl App {
                 && let Event::Key(key) = event::read().map_err(AppError::Io)?
                 && key.kind == KeyEventKind::Press
             {
+                self.last_activity = Instant::now();
                 self.handle_key(key, terminal).await?;
+                // The flows reached from here can block for hours (a PTY
+                // session, a long script). Restamping after they return keeps
+                // that time from counting as idle and locking the instant the
+                // user comes back to the TUI.
+                self.last_activity = Instant::now();
             }
+
+            self.auto_lock_if_idle();
         }
         Ok(())
+    }
+
+    /// Drops an idle unlocked session back to the lock screen, which zeroizes
+    /// the master key with `UnlockedState`. Only the 200 ms poll tick drives
+    /// this, so it cannot fire while `connect_flow` or `run_script_flow` is
+    /// awaiting — a live session is never interrupted.
+    fn auto_lock_if_idle(&mut self) {
+        let AppState::Unlocked(u) = &self.state else {
+            return;
+        };
+        let minutes = u.config.auto_lock_minutes;
+        if minutes == 0 || self.last_activity.elapsed() < Duration::from_secs(u64::from(minutes) * 60) {
+            return;
+        }
+
+        let message = self.lang.strings().status_auto_locked.to_string();
+        self.state = self.locked_state();
+        match &mut self.state {
+            AppState::Locked(unlock) => unlock.info = Some(message),
+            AppState::LockedTotpOnly(totp_unlock) => totp_unlock.info = Some(message),
+            AppState::Unlocked(_) => {}
+        }
+    }
+
+    /// The locked state this vault should return to. A TOTP-only vault is
+    /// encrypted under its TOTP secret, not a password, so sending it to the
+    /// password screen would leave it unopenable until restart — every path
+    /// back to "locked" must go through here rather than naming a variant.
+    fn locked_state(&self) -> AppState {
+        if self.store.totp_only_secret_exists() {
+            AppState::LockedTotpOnly(TotpUnlockState::new())
+        } else {
+            AppState::Locked(UnlockState::new(UnlockMode::Unlock))
+        }
     }
 
     fn draw(&mut self, terminal: &mut TerminalGuard) -> Result<()> {
@@ -331,6 +378,7 @@ impl App {
                     SettingsOutcome::None => NextStep::None,
                     SettingsOutcome::Close => NextStep::SettingsClose,
                     SettingsOutcome::LanguageSelected(lang) => NextStep::SettingsLangSelected(lang),
+                    SettingsOutcome::AutoLockSelected(minutes) => NextStep::SettingsAutoLockSelected(minutes),
                     SettingsOutcome::ChangePassword { current, new } => {
                         NextStep::SettingsChangePassword { current, new }
                     }
@@ -382,7 +430,7 @@ impl App {
         match next {
             NextStep::None => {}
             NextStep::Quit => self.should_quit = true,
-            NextStep::Lock => self.state = AppState::Locked(UnlockState::new(UnlockMode::Unlock)),
+            NextStep::Lock => self.state = self.locked_state(),
             NextStep::GoAdd => self.with_unlocked(|u| {
                 u.screen = Screen::ServerForm(ServerFormState::new_add());
             }),
@@ -401,7 +449,8 @@ impl App {
                 let lang = self.lang;
                 let auth_mode = self.current_auth_mode();
                 self.with_unlocked(|u| {
-                    u.screen = Screen::Settings(SettingsState::new(lang, auth_mode));
+                    let auto_lock_minutes = u.config.auto_lock_minutes;
+                    u.screen = Screen::Settings(SettingsState::new(lang, auth_mode, auto_lock_minutes));
                 });
             }
             NextStep::FormCancel => self.with_unlocked(|u| {
@@ -425,6 +474,7 @@ impl App {
                 self.lang = lang;
                 lang.save_to_file(&self.store.prefs_path());
             }
+            NextStep::SettingsAutoLockSelected(minutes) => self.set_auto_lock(minutes),
             NextStep::SettingsChangePassword { current, new } => {
                 self.change_master_password(&current, &new)?;
             }
@@ -433,7 +483,7 @@ impl App {
             NextStep::EnableTotpOnly(secret_base32) => self.enable_totp_only(secret_base32)?,
             NextStep::SwitchToPassword(new) => self.switch_to_password(&new)?,
             NextStep::TotpPromptSubmit(code) => self.verify_totp_prompt(&code),
-            NextStep::TotpPromptCancel => self.state = AppState::Locked(UnlockState::new(UnlockMode::Unlock)),
+            NextStep::TotpPromptCancel => self.state = self.locked_state(),
             NextStep::Connect(id) => self.connect_flow(terminal, id).await?,
             NextStep::GoScripts(server_id) => self.with_unlocked(|u| {
                 if let Some(entry) = u.config.servers.iter().find(|s| s.id == server_id) {
@@ -730,6 +780,29 @@ impl App {
         Ok(())
     }
 
+    /// Persists the idle auto-lock timeout (in minutes; `0` is off) into the
+    /// encrypted config, so it survives a restart. On a failed write the
+    /// in-memory value is rolled back — otherwise the timer would run on a
+    /// setting the user would not see again after relaunching.
+    fn set_auto_lock(&mut self, minutes: u32) {
+        let strings = self.lang.strings();
+        let AppState::Unlocked(u) = &mut self.state else {
+            return;
+        };
+        let previous = u.config.auto_lock_minutes;
+        u.config.auto_lock_minutes = minutes;
+        let result = self.store.save(&u.config, &u.key, &u.salt, u.params);
+        if result.is_err() {
+            u.config.auto_lock_minutes = previous;
+        }
+        if let Screen::Settings(settings) = &mut u.screen {
+            match result {
+                Ok(()) => settings.info = Some(strings.status_auto_lock_saved.to_string()),
+                Err(e) => settings.error = Some(format!("{}{e}", strings.save_error_prefix)),
+            }
+        }
+    }
+
     /// Enables "Password + TOTP (2FA)": the secret rides inside the
     /// already-encrypted config blob, so this is just a field update + save,
     /// no re-encryption needed (same key/salt as before).
@@ -896,16 +969,21 @@ impl App {
 
     async fn connect_flow(&mut self, terminal: &mut TerminalGuard, id: Uuid) -> Result<()> {
         let strings = self.lang.strings();
-        let entry = match &self.state {
-            AppState::Unlocked(u) => u.config.servers.iter().find(|s| s.id == id).cloned(),
+        // Only what the connection itself needs, plus the scripts that run on
+        // connect — never a clone of the whole entry, which would leave an
+        // extra credential copy and every `Script` behind (see `ssh::Target`).
+        let target = match &self.state {
+            AppState::Unlocked(u) => u.config.servers.iter().find(|s| s.id == id).map(|e| {
+                (ssh::Target::from_entry(e), e.scripts.iter().filter(|s| s.run_on_connect).cloned().collect::<Vec<_>>())
+            }),
             AppState::Locked(_) | AppState::LockedTotpOnly(_) => None,
         };
-        let Some(entry) = entry else {
+        let Some((target, on_connect_scripts)) = target else {
             return Ok(());
         };
 
         terminal.suspend()?;
-        let connect_result = ssh::connect(&entry).await;
+        let connect_result = ssh::connect(&target).await;
 
         let status_msg = match connect_result {
             Ok(mut connected) => {
@@ -931,7 +1009,7 @@ impl App {
                 // the (still-suspended) primary screen buffer — same spirit
                 // as the sysinfo probe: best-effort, never blocks the
                 // interactive shell that follows.
-                for script in entry.scripts.iter().filter(|s| s.run_on_connect) {
+                for script in &on_connect_scripts {
                     let mut partial = String::new();
                     script_runner::run_script(&mut connected.handle, script, |event| {
                         print_script_event_plain(event, strings, &mut partial);
@@ -967,21 +1045,20 @@ impl App {
     /// `on_event` callback as it fires.
     async fn run_script_flow(&mut self, terminal: &mut TerminalGuard, server_id: Uuid, script_id: Uuid) -> Result<()> {
         let strings = self.lang.strings();
-        let (entry, script) = match &self.state {
-            AppState::Unlocked(u) => {
-                let entry = u.config.servers.iter().find(|s| s.id == server_id).cloned();
-                let script = entry.as_ref().and_then(|e| e.scripts.iter().find(|s| s.id == script_id).cloned());
-                (entry, script)
-            }
-            AppState::Locked(_) | AppState::LockedTotpOnly(_) => (None, None),
+        let prepared = match &self.state {
+            AppState::Unlocked(u) => u.config.servers.iter().find(|s| s.id == server_id).and_then(|e| {
+                let script = e.scripts.iter().find(|s| s.id == script_id).cloned()?;
+                Some((ssh::Target::from_entry(e), e.name.clone(), script))
+            }),
+            AppState::Locked(_) | AppState::LockedTotpOnly(_) => None,
         };
-        let (Some(entry), Some(script)) = (entry, script) else {
+        let Some((target, server_name, script)) = prepared else {
             return Ok(());
         };
 
-        let mut run_state = ScriptRunState::new(server_id, script_id, entry.name.clone(), script.name.clone());
+        let mut run_state = ScriptRunState::new(server_id, script_id, server_name, script.name.clone());
 
-        match ssh::connect(&entry).await {
+        match ssh::connect(&target).await {
             Ok(mut connected) => {
                 script_runner::run_script(&mut connected.handle, &script, |event| {
                     match event {

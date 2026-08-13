@@ -5,4 +5,4 @@ pub mod session;
 pub mod sysinfo;
 
 pub use client::HostKeyOutcome;
-pub use session::{Connected, connect};
+pub use session::{Connected, Target, connect};

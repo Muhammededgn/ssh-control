@@ -28,7 +28,7 @@ fn save_and_load_roundtrip() {
         "example.com".into(),
         22,
         "root".into(),
-        AuthMethod::Password { password: "hunter2".into() },
+        AuthMethod::password("hunter2"),
     ));
 
     store
@@ -84,7 +84,7 @@ fn a_failed_save_leaves_the_previous_vault_intact() {
         "example.com".into(),
         22,
         "root".into(),
-        AuthMethod::Password { password: "hunter2".into() },
+        AuthMethod::password("hunter2"),
     ));
     store
         .save(&unlocked.config, &unlocked.key, &unlocked.salt, unlocked.params)
