@@ -19,9 +19,15 @@ enum Tab {
     Language,
     Password,
     TwoFactor,
+    AutoLock,
 }
 
-const TABS: [Tab; 3] = [Tab::Language, Tab::Password, Tab::TwoFactor];
+const TABS: [Tab; 4] = [Tab::Language, Tab::Password, Tab::TwoFactor, Tab::AutoLock];
+
+/// Idle auto-lock choices, in minutes. `0` is "off"; anything else is a
+/// timeout. Presets rather than a free-text field so the value can never be
+/// something like `0.5` or a typo'd `1000`.
+const AUTO_LOCK_CHOICES: [u32; 6] = [0, 1, 5, 15, 30, 60];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PwField {
@@ -55,6 +61,10 @@ pub struct SettingsState {
     pub error: Option<String>,
     pub info: Option<String>,
 
+    // Auto-lock tab
+    auto_lock_list_state: ListState,
+    auto_lock_selected: usize,
+
     // Two-Factor tab
     auth_mode: AuthMode,
     tf_view: TwoFactorView,
@@ -70,6 +80,8 @@ pub enum SettingsOutcome {
     None,
     Close,
     LanguageSelected(Lang),
+    /// Idle auto-lock timeout in minutes; `0` disables it.
+    AutoLockSelected(u32),
     ChangePassword { current: Zeroizing<String>, new: Zeroizing<String> },
     EnableTwoFactor { secret_base32: String },
     DisableTwoFactor,
@@ -87,10 +99,17 @@ impl SettingsState {
         self.tf_selected = 0;
     }
 
-    pub fn new(current_lang: Lang, auth_mode: AuthMode) -> Self {
+    pub fn new(current_lang: Lang, auth_mode: AuthMode, auto_lock_minutes: u32) -> Self {
         let lang_selected = LANGS.iter().position(|l| *l == current_lang).unwrap_or(0);
         let mut lang_list_state = ListState::default();
         lang_list_state.select(Some(lang_selected));
+
+        // A stored value outside the preset list (hand-edited, or a preset we
+        // dropped later) falls back to the first entry rather than showing no
+        // selection at all.
+        let auto_lock_selected = AUTO_LOCK_CHOICES.iter().position(|m| *m == auto_lock_minutes).unwrap_or(0);
+        let mut auto_lock_list_state = ListState::default();
+        auto_lock_list_state.select(Some(auto_lock_selected));
 
         Self {
             tab: Tab::Language,
@@ -102,6 +121,9 @@ impl SettingsState {
             confirm_password: Zeroizing::new(String::new()),
             error: None,
             info: None,
+
+            auto_lock_list_state,
+            auto_lock_selected,
 
             auth_mode,
             tf_view: TwoFactorView::Overview,
@@ -129,7 +151,8 @@ impl SettingsState {
                 self.tab = match self.tab {
                     Tab::Language => Tab::Password,
                     Tab::Password => Tab::TwoFactor,
-                    Tab::TwoFactor => Tab::Language,
+                    Tab::TwoFactor => Tab::AutoLock,
+                    Tab::AutoLock => Tab::Language,
                 };
                 self.error = None;
                 self.info = None;
@@ -142,6 +165,7 @@ impl SettingsState {
             Tab::Language => self.handle_language_key(key),
             Tab::Password => self.handle_password_key(key, strings),
             Tab::TwoFactor => self.handle_two_factor_key(key, strings),
+            Tab::AutoLock => self.handle_auto_lock_key(key),
         }
     }
 
@@ -160,6 +184,26 @@ impl SettingsState {
                 }
             }
             KeyCode::Enter => return SettingsOutcome::LanguageSelected(LANGS[self.lang_selected]),
+            _ => {}
+        }
+        SettingsOutcome::None
+    }
+
+    fn handle_auto_lock_key(&mut self, key: KeyEvent) -> SettingsOutcome {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.auto_lock_selected > 0 {
+                    self.auto_lock_selected -= 1;
+                    self.auto_lock_list_state.select(Some(self.auto_lock_selected));
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.auto_lock_selected + 1 < AUTO_LOCK_CHOICES.len() {
+                    self.auto_lock_selected += 1;
+                    self.auto_lock_list_state.select(Some(self.auto_lock_selected));
+                }
+            }
+            KeyCode::Enter => return SettingsOutcome::AutoLockSelected(AUTO_LOCK_CHOICES[self.auto_lock_selected]),
             _ => {}
         }
         SettingsOutcome::None
@@ -380,6 +424,7 @@ impl SettingsState {
                     Tab::Language => strings.settings_tab_language,
                     Tab::Password => strings.settings_tab_password,
                     Tab::TwoFactor => strings.settings_tab_two_factor,
+                    Tab::AutoLock => strings.settings_tab_auto_lock,
                 };
                 let style = if *t == self.tab {
                     Style::default().add_modifier(Modifier::REVERSED)
@@ -399,7 +444,41 @@ impl SettingsState {
             Tab::Language => self.render_language_tab(frame, area, strings),
             Tab::Password => self.render_password_tab(frame, area, strings),
             Tab::TwoFactor => self.render_two_factor_tab(frame, area, strings),
+            Tab::AutoLock => self.render_auto_lock_tab(frame, area, strings),
         }
+    }
+
+    fn render_auto_lock_tab(&mut self, frame: &mut Frame, area: Rect, strings: &Strings) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(1)])
+            .split(area);
+
+        let items: Vec<ListItem> = AUTO_LOCK_CHOICES
+            .iter()
+            .map(|m| {
+                let label = if *m == 0 {
+                    strings.auto_lock_off.to_string()
+                } else {
+                    format!("{m}{}", strings.auto_lock_minutes_suffix)
+                };
+                ListItem::new(label)
+            })
+            .collect();
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title(strings.settings_tab_auto_lock))
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+            .highlight_symbol("> ");
+        frame.render_stateful_widget(list, chunks[0], &mut self.auto_lock_list_state);
+
+        let footer = if let Some(err) = &self.error {
+            Span::styled(err.clone(), Style::default().fg(Color::Red))
+        } else if let Some(info) = &self.info {
+            Span::styled(info.clone(), Style::default().fg(Color::Green))
+        } else {
+            Span::styled(strings.settings_auto_lock_hint, Style::default().fg(Color::DarkGray))
+        };
+        frame.render_widget(Paragraph::new(Line::from(footer)), chunks[1]);
     }
 
     fn render_language_tab(&mut self, frame: &mut Frame, area: Rect, strings: &Strings) {

@@ -8,7 +8,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use super::widgets::mask;
-use crate::config::{AuthMethod, ServerEntry};
+use crate::config::{AuthMethod, Secret, ServerEntry};
 use crate::i18n::Strings;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -84,7 +84,7 @@ impl ServerFormState {
         let (auth_kind, password, key_path, key_passphrase) = match &entry.auth {
             AuthMethod::Password { password } => (
                 AuthKind::Password,
-                Zeroizing::new(password.clone()),
+                Zeroizing::new(password.as_str().to_string()),
                 String::new(),
                 Zeroizing::new(String::new()),
             ),
@@ -92,7 +92,7 @@ impl ServerFormState {
                 AuthKind::SshKey,
                 Zeroizing::new(String::new()),
                 key_path.clone(),
-                Zeroizing::new(passphrase.clone().unwrap_or_default()),
+                Zeroizing::new(passphrase.as_ref().map(|p| p.as_str().to_string()).unwrap_or_default()),
             ),
         };
 
@@ -212,7 +212,7 @@ impl ServerFormState {
                     self.error = Some(strings.err_form_password_empty.to_string());
                     return FormOutcome::None;
                 }
-                AuthMethod::Password { password: self.password.to_string() }
+                AuthMethod::password(self.password.to_string())
             }
             AuthKind::SshKey => {
                 if self.key_path.trim().is_empty() {
@@ -222,7 +222,7 @@ impl ServerFormState {
                 let passphrase = if self.key_passphrase.is_empty() {
                     None
                 } else {
-                    Some(self.key_passphrase.to_string())
+                    Some(Secret::from(self.key_passphrase.to_string()))
                 };
                 AuthMethod::SshKey { key_path: self.key_path.clone(), passphrase }
             }
