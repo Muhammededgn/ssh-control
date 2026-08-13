@@ -2847,6 +2847,7 @@ dependencies = [
  "qrcode",
  "ratatui",
  "russh",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
