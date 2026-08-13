@@ -22,6 +22,27 @@ impl KdfParams {
         t_cost: 2,
         p_cost: 1,
     };
+
+    /// For a password slot that is only reached when the everyday unlock path
+    /// has already failed — a recovery prompt is worth seconds, not
+    /// milliseconds. Deliberately below the 1 GiB header cap in
+    /// `config::format` so it stays inside the range check, and below what a
+    /// small VM would refuse to allocate.
+    pub const RECOVERY: Self = Self {
+        m_cost: 262_144, // 256 MiB
+        t_cost: 4,
+        p_cost: 1,
+    };
+
+    /// Placeholder for slots whose key-encryption key is not stretched at all.
+    /// A device key is already 32 random bytes, so running Argon2 over it buys
+    /// nothing; those slots store zeroes here and `config::format` skips the
+    /// Argon2 range check for them.
+    pub const NONE: Self = Self {
+        m_cost: 0,
+        t_cost: 0,
+        p_cost: 0,
+    };
 }
 
 /// Derives a 32-byte AES-256 key from the master password using Argon2id.

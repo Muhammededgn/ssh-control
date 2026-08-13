@@ -1,14 +1,28 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use totp_rs::{Algorithm, Secret, TOTP};
 
-/// The three mutually-exclusive vault unlock modes. See the plan/docs for the
-/// exact threat model of each — `TotpOnly` in particular provides no
-/// protection against local disk access, only against someone using an
-/// already-open session without the paired authenticator device.
+/// The four mutually-exclusive vault security modes, in increasing order of
+/// what they ask of the user. See the README's security model for the threat
+/// each one actually addresses.
+///
+/// The one thing true of all of them: TOTP never adds *offline* cryptographic
+/// strength, because verifying a code requires holding the shared secret.
+/// It raises the bar for someone at the keyboard, not for someone holding the
+/// file.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AuthMode {
+    /// No prompt at all. The vault is still encrypted — under a device key held
+    /// by the OS credential store — so a copied file opens nowhere else.
+    None,
+    /// Password on every launch.
     Password,
-    TwoFactor,
-    TotpOnly,
+    /// Password on every launch, then a TOTP code.
+    PasswordTotp,
+    /// TOTP day to day, with the password kept as the escalation path: a copied
+    /// vault, too many failures, a replayed code or a long gap all fall back to
+    /// it.
+    TotpDaily,
 }
 
 const ISSUER: &str = "ssh-control";
@@ -37,45 +51,136 @@ pub fn otpauth_url(secret_base32: &str) -> Option<String> {
     build(secret_base32).map(|t| t.get_url())
 }
 
-/// Verifies a user-entered code against the secret at the current time
-/// (within the configured skew window). Returns `false` (not an error) for
-/// any malformed secret or code — callers show a single generic "invalid
-/// code" message either way, never distinguishing the failure reason.
-pub fn verify_code(secret_base32: &str, code: &str) -> bool {
+/// The outcome of the one code check in the app. Every caller goes through
+/// `check_code` so the replay counter can never be advanced from somewhere that
+/// forgot about it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CodeCheck {
+    /// Valid, and newer than anything accepted before. The step is what the
+    /// caller must persist — and only on this outcome.
+    Accepted(u64),
+    /// Valid for the secret, but at a step already used. A code stays valid for
+    /// the whole ~90 s skew window, so without this someone who watched the
+    /// user type one could walk up and reuse it.
+    Replayed,
+    /// Wrong, or the secret is malformed. Callers show one generic message
+    /// either way and never distinguish the reason.
+    Invalid,
+}
+
+/// Verifies a user-entered code and classifies it against `last_step`.
+///
+/// **A rejected code must never advance the stored step.** Otherwise anyone at
+/// the prompt could burn the user's current code by typing it wrong, or replay
+/// detection could be reset by a stranger. The signature enforces that by
+/// handing back the step only on `Accepted`.
+pub fn check_code(secret_base32: &str, code: &str, last_step: u64) -> CodeCheck {
     let Some(totp) = build(secret_base32) else {
-        return false;
+        return CodeCheck::Invalid;
     };
-    totp.check_current(code).unwrap_or(false)
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return CodeCheck::Invalid;
+    };
+
+    let current = now.as_secs() / STEP_SECONDS;
+    let skew = u64::from(SKEW);
+    // Newest step first: a code can be valid at more than one step only in
+    // pathological cases, and taking the highest advances the counter as far as
+    // it legitimately can.
+    for step in (current.saturating_sub(skew)..=current + skew).rev() {
+        if codes_match(&totp.generate(step * STEP_SECONDS), code) {
+            return if step > last_step { CodeCheck::Accepted(step) } else { CodeCheck::Replayed };
+        }
+    }
+    CodeCheck::Invalid
+}
+
+/// Verifies a code where there is no replay history to check against — the
+/// enrolment form, which is only confirming the user's authenticator is set up
+/// correctly before anything is stored.
+pub fn verify_enrollment(secret_base32: &str, code: &str) -> bool {
+    matches!(check_code(secret_base32, code, 0), CodeCheck::Accepted(_))
+}
+
+/// Compares two codes without an early exit on the first differing digit.
+/// The window is small and this is a local prompt, but leaking a prefix match
+/// through timing would hand an attacker the code one digit at a time.
+fn codes_match(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn current_code(secret: &str) -> String {
+        build(secret).expect("valid secret should build a TOTP instance").generate_current().expect("system clock should be readable")
+    }
+
     #[test]
     fn generated_secret_round_trips_through_verify() {
         let secret = generate_secret_base32();
-        let totp = build(&secret).expect("valid secret should build a TOTP instance");
-        let code = totp.generate_current().expect("system clock should be readable");
-        assert!(verify_code(&secret, &code));
+        assert!(matches!(check_code(&secret, &current_code(&secret), 0), CodeCheck::Accepted(_)));
     }
 
     #[test]
     fn wrong_code_is_rejected() {
         let secret = generate_secret_base32();
-        let totp = build(&secret).unwrap();
-        let real_code = totp.generate_current().unwrap();
         // Flip the first digit to guarantee a different, still 6-digit code.
-        let mut bytes = real_code.into_bytes();
+        let mut bytes = current_code(&secret).into_bytes();
         bytes[0] = if bytes[0] == b'0' { b'1' } else { b'0' };
         let wrong = String::from_utf8(bytes).unwrap();
 
-        assert!(!verify_code(&secret, &wrong));
+        assert_eq!(check_code(&secret, &wrong, 0), CodeCheck::Invalid);
     }
 
     #[test]
     fn malformed_secret_is_rejected_not_panicking() {
-        assert!(!verify_code("not valid base32!!", "123456"));
+        assert_eq!(check_code("not valid base32!!", "123456", 0), CodeCheck::Invalid);
+    }
+
+    /// The point of the guard: a code stays valid for the whole skew window, so
+    /// accepting it once has to lock it out for the rest of that window.
+    #[test]
+    fn a_code_cannot_be_used_twice() {
+        let secret = generate_secret_base32();
+        let code = current_code(&secret);
+
+        let CodeCheck::Accepted(step) = check_code(&secret, &code, 0) else {
+            panic!("a fresh code should be accepted");
+        };
+        assert_eq!(check_code(&secret, &code, step), CodeCheck::Replayed);
+    }
+
+    /// A wrong guess must not move the counter, or anyone at the prompt could
+    /// burn the code the user is about to type.
+    #[test]
+    fn a_rejected_code_yields_no_step_to_store() {
+        let secret = generate_secret_base32();
+        assert!(matches!(check_code(&secret, "000000", 0), CodeCheck::Invalid | CodeCheck::Replayed));
+        // The only variant carrying a step is `Accepted`, so there is nothing a
+        // caller could persist from a rejection even by mistake.
+        assert!(matches!(check_code(&secret, &current_code(&secret), 0), CodeCheck::Accepted(_)));
+    }
+
+    #[test]
+    fn an_older_step_is_treated_as_a_replay_not_a_fresh_code() {
+        let secret = generate_secret_base32();
+        let code = current_code(&secret);
+        // Pretend a far newer step was already accepted, as it would be after a
+        // clock jump backwards.
+        assert_eq!(check_code(&secret, &code, u64::MAX), CodeCheck::Replayed);
+    }
+
+    #[test]
+    fn enrollment_accepts_a_live_code_without_replay_history() {
+        let secret = generate_secret_base32();
+        assert!(verify_enrollment(&secret, &current_code(&secret)));
+        assert!(!verify_enrollment(&secret, "000000"));
     }
 
     #[test]

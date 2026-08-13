@@ -46,6 +46,12 @@ pub enum AppError {
 
     #[error("encryption error: {0}")]
     Crypto(String),
+
+    /// The OS credential store could not be reached or did not hold what was
+    /// expected. Deliberately distinct from a missing entry, which is a normal
+    /// outcome that means "this device is not enrolled" rather than a failure.
+    #[error("credential store error: {0}")]
+    Keyring(String),
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;

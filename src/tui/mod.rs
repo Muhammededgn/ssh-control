@@ -4,6 +4,7 @@ pub mod script_form;
 pub mod script_run;
 pub mod scripts_list;
 pub mod server_form;
+pub mod setup;
 pub mod settings;
 pub mod totp_prompt;
 pub mod totp_unlock;

@@ -13,7 +13,7 @@ so `vim`, `htop`, `tmux` and Ctrl+C behave exactly as they would under plain
 ## Features
 
 - **Encrypted vault** — Argon2id-derived key, AES-256-GCM, authenticated header
-- **Three unlock modes** — master password, password + TOTP (2FA), or TOTP-only
+- **Four security modes** — from no prompt at all to a code-only daily unlock with the password as fallback
 - **Full PTY passthrough** — byte-for-byte, with window-resize forwarding
 - **TOFU host keys** — fingerprints are pinned on first connect and a mismatch
   refuses the connection
@@ -87,45 +87,92 @@ Linux), created `0700` with `0600` files:
 
 | File | Contents |
 |---|---|
-| `config.enc` | The encrypted vault: servers, credentials, scripts, 2FA secret |
+| `config.enc` | The encrypted vault: servers, credentials, scripts, TOTP secret |
 | `prefs.lang` | UI language code — plain text, read before unlocking |
-| `totp-only.secret` | TOTP-only mode secret — **plain text**, see below |
+| `vault-id` | An identifier naming this vault's OS credential-store entry — plain text, not a secret |
 
 The vault is rewritten atomically (staged in a sibling `.tmp` file, fsynced,
 then renamed), so an interrupted save can never truncate or corrupt it.
 
 ## Security model
 
-**What it protects against.** Someone who gets a copy of `config.enc` — a stolen
-laptop, a leaked backup, a shared filesystem — cannot read your servers or
-credentials without the master password. The key is derived with Argon2id
-(19 MiB, 2 passes) and the file header is bound as AEAD additional data, so
-tampering with the stored KDF parameters fails the authentication tag rather
-than silently weakening the derivation.
+### The four modes
 
-**Idle auto-lock.** After 15 minutes without a keypress the vault re-locks
-itself and the master key is wiped from memory; you are back at the unlock
-screen. Change the timeout — Off, 1, 5, 15, 30 or 60 minutes — under
-`F1` → Auto-lock. The timer never interrupts a live SSH session or a running
-script, and `l` still locks immediately.
+Chosen on first run, changeable under `F1` → Security. The vault is always
+encrypted; the modes differ in what is asked of you and in what an attacker
+needs.
+
+| Mode | Asked at startup | Someone who copies `config.enc` needs |
+|---|---|---|
+| 1. No prompt | nothing | this machine's credential-store entry — which does not travel with the file |
+| 2. Password | password | your password |
+| 3. Password + code | password, then a code | your password |
+| 4. Code only | a code | your password |
+
+Under the hood every mode is the same shape: a random 32-byte master key
+encrypts the vault, and each unlock method holds that key wrapped under its own
+key-encryption key. Changing your password rewraps 32 bytes; it does not
+re-encrypt the vault.
+
+**What it protects against.** Someone who gets a copy of `config.enc` — a stolen
+laptop, a leaked backup, a synced dotfile repo — cannot read your servers or
+credentials. Password slots are derived with Argon2id and every slot descriptor
+is bound as AEAD additional data, so rolling the stored KDF parameters back to
+something cheap fails the authentication tag rather than silently weakening the
+derivation.
+
+**Modes 1 and 4 bind the vault to this machine.** Their key material lives in
+the OS credential store (Secret Service on Linux, Keychain on macOS), *outside*
+the config directory. Copy the vault elsewhere and that key does not come with
+it, so the copy falls back to the password — which is exactly why mode 4 keeps
+one. These two modes are offered only when a credential store is actually
+reachable; on a headless server there usually is none, and the setup screen says
+so rather than quietly downgrading you.
+
+**Mode 1 has no fallback unless you set one.** Setup offers an optional recovery
+password. Skip it and losing the credential-store entry — an OS reinstall, a
+cleared keyring — loses the vault permanently.
+
+**When mode 4 asks for the password.** When this machine has no credential-store
+entry for the vault, after five wrong codes in a row, when a code is reused, and
+once every 30 days so the password does not quietly rot in your memory.
+
+**TOTP is not cryptographic strength.** Verifying a code means holding the
+shared secret, so anyone who holds the file holds the secret too. A code stops
+someone at your keyboard; it does nothing against someone with a copy of the
+vault. That is why every mode with a code also has a password behind it, and why
+mode 4's real security is the password, not the code. A code is accepted once —
+reusing one inside its ~90-second validity window is refused and escalates to
+the password.
+
+**Idle auto-lock.** After 15 minutes without a keypress the vault re-locks and
+the master key is wiped from memory. Change the timeout — Off, 1, 5, 15, 30 or
+60 minutes — under `F1` → Auto-lock. The timer never interrupts a live SSH
+session or a running script, and `l` still locks immediately.
 
 **What it does not protect against.** While the vault is unlocked, the key and
-the decrypted credentials are in process memory. Credentials are held in
-buffers that are wiped when dropped, but this is not a defense against malware
-or another process running as your user.
-
-**TOTP-only mode is weaker, by design.** In this mode there is no password at
-all, so the vault key is derived from the TOTP secret — which must be stored in
-the clear in `totp-only.secret` for the app to read it before you type
-anything. Anyone with read access to that file can decrypt the vault. It
-protects against someone using an already-open machine without your
-authenticator device; it does *not* protect the file at rest. Use the master
-password or 2FA mode if disk access is part of your threat model.
+the decrypted credentials are in process memory. Credentials are held in buffers
+that are wiped when dropped, but this is not a defense against malware or
+another process running as your user — which can also simply ask the credential
+store for the device key.
 
 **Credentials are stored, not referenced.** Passwords and key passphrases are
 kept inside the encrypted vault so connecting requires no further prompting.
-They are redacted from all debug output, but they are on disk, encrypted only
-by your master password. Choose a strong one.
+They are redacted from all debug output, but they are on disk. In any mode with
+a password slot, the vault at rest is exactly as strong as that password.
+Choose a strong one.
+
+### Upgrading from the old TOTP-only mode
+
+Earlier versions had a TOTP-only mode that kept its secret in plain text in
+`totp-only.secret`, because the app had to read it before you typed anything.
+Anyone who could read that file could open the vault without ever producing a
+code.
+
+That mode is gone. The first launch after upgrading asks you to set a password,
+then converts the vault to mode 4: the secret moves into the OS credential
+store, the password becomes the fallback, and the plaintext file is deleted —
+only after the replacement has been written and proved to open.
 
 ## Development
 

@@ -4,10 +4,12 @@ use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::config::store::{ConfigStore, Unlocked};
-use crate::config::{Config, Script, ServerEntry, TotpConfig};
-use crate::crypto::kdf::{KEY_LEN, KdfParams, SALT_LEN};
-use crate::crypto::{cipher, kdf};
+use crate::config::device::{self, DeviceState};
+use crate::config::format::{SLOT_DEVICE, SLOT_PASSWORD, Slot};
+use crate::config::keyslot::{self, MasterKey};
+use crate::config::store::{ConfigStore, Unlocked, VaultShape};
+use crate::config::{Config, Script, Secret, ServerEntry, TotpConfig};
+use crate::crypto::kdf::KdfParams;
 use crate::error::{AppError, Result};
 use crate::i18n::{Lang, Strings};
 use crate::ssh;
@@ -21,6 +23,7 @@ use crate::tui::script_run::{ScriptRunOutcome, ScriptRunState};
 use crate::tui::scripts_list::{ScriptsListAction, ScriptsListState};
 use crate::tui::server_form::{FormMode, FormOutcome, ServerFormData, ServerFormState};
 use crate::tui::settings::{SettingsOutcome, SettingsState};
+use crate::tui::setup::{SetupOutcome, SetupState};
 use crate::tui::totp_prompt::{TotpPromptOutcome, TotpPromptState};
 use crate::tui::totp_unlock::{TotpUnlockOutcome, TotpUnlockState};
 use crate::tui::unlock::{UnlockMode, UnlockOutcome, UnlockState};
@@ -41,19 +44,27 @@ enum Screen {
 
 struct UnlockedState {
     config: Config,
-    key: Zeroizing<[u8; KEY_LEN]>,
-    salt: [u8; SALT_LEN],
-    params: KdfParams,
+    master_key: MasterKey,
+    slots: Vec<Slot>,
     screen: Screen,
     status: Option<String>,
 }
 
 enum AppState {
+    /// First run: choose a security mode and set it up.
+    Setup(SetupState),
+    /// Password prompt. Also where every escalation out of `LockedTotpDaily`
+    /// lands, so a copied vault, a burnt-out attempt counter and a replayed
+    /// code all converge on the same screen.
     Locked(UnlockState),
-    /// "TOTP-only" mode: no password is ever asked, the sibling
-    /// `totp-only.secret` file exists. See `crate::totp::AuthMode::TotpOnly`
-    /// for the (reduced) threat model this mode provides.
-    LockedTotpOnly(TotpUnlockState),
+    /// The everyday screen of `AuthMode::TotpDaily`: a code, checked against
+    /// device-bound state, opens the device slot.
+    LockedTotpDaily(TotpUnlockState),
+    /// A vault whose only slot is a device slot this machine cannot supply —
+    /// mode 1 carried somewhere else. There is deliberately no prompt here:
+    /// nothing the user could type would help, and offering a box that can
+    /// never succeed is worse than saying so.
+    Unopenable,
     /// Boxed so the enum isn't sized by its largest variant — the locked
     /// variants are tiny and this one carries the whole decrypted config.
     Unlocked(Box<UnlockedState>),
@@ -78,10 +89,7 @@ enum NextStep {
     SettingsLangSelected(Lang),
     SettingsAutoLockSelected(u32),
     SettingsChangePassword { current: Zeroizing<String>, new: Zeroizing<String> },
-    EnableTwoFactor(String),
-    DisableTwoFactor,
-    EnableTotpOnly(String),
-    SwitchToPassword(Zeroizing<String>),
+    ChangeSecurityMode { mode: AuthMode, password: Option<Zeroizing<String>>, totp_secret: Option<String> },
     TotpPromptSubmit(String),
     TotpPromptCancel,
     GoScripts(Uuid),
@@ -108,16 +116,110 @@ pub struct App {
     last_activity: Instant,
 }
 
+/// How many wrong codes in a row before the everyday TOTP path is refused and
+/// the password is demanded instead.
+const MAX_TOTP_FAILURES: u32 = 5;
+/// How long a vault may go without seeing its password before asking for it
+/// again. Guards against the user quietly forgetting the one credential that
+/// can recover the vault from another machine.
+const PASSWORD_CHECK_DAYS: u32 = 30;
+
 impl App {
     pub fn new(store: ConfigStore) -> Self {
         let lang = Lang::load_from_file(&store.prefs_path());
-        let state = if store.totp_only_secret_exists() {
-            AppState::LockedTotpOnly(TotpUnlockState::new())
-        } else {
-            let mode = if store.exists() { UnlockMode::Unlock } else { UnlockMode::FirstRun };
-            AppState::Locked(UnlockState::new(mode))
+        let mut app = Self {
+            store,
+            state: AppState::Locked(UnlockState::new(UnlockMode::Unlock)),
+            lang,
+            should_quit: false,
+            last_activity: Instant::now(),
         };
-        Self { store, state, lang, should_quit: false, last_activity: Instant::now() }
+        app.state = app.resolve_initial_state();
+        app
+    }
+
+    /// Decides which screen the app opens on, from what is on disk and in the
+    /// OS credential store — before any user input exists.
+    fn resolve_initial_state(&mut self) -> AppState {
+        let strings = self.lang.strings();
+
+        // A vault left over from the old TOTP-only mode keeps its secret in
+        // plaintext beside the vault, which is exactly the weakness the
+        // security modes replace. Convert it before anything else, and make the
+        // user set a real password in the process — otherwise the upgraded
+        // vault would have no recovery path at all.
+        if self.store.totp_only_secret_exists() {
+            return AppState::Locked(UnlockState::new(UnlockMode::MigrateTotpOnly));
+        }
+
+        if !self.store.exists() {
+            return AppState::Setup(SetupState::new(device::credential_store_available()));
+        }
+
+        match self.store.peek_shape() {
+            Ok(VaultShape::Password) => AppState::Locked(UnlockState::new(UnlockMode::Unlock)),
+            Ok(shape) => self.device_backed_initial_state(shape),
+            Err(e) => {
+                let mut unlock = UnlockState::new(UnlockMode::Unlock);
+                unlock.error = Some(format!("{}{e}", strings.save_error_prefix));
+                AppState::Locked(unlock)
+            }
+        }
+    }
+
+    /// The startup path for a vault carrying a device slot.
+    ///
+    /// Everything hinges on whether this machine still has the vault's entry in
+    /// the credential store. If it does not — a copied vault, a reinstalled OS,
+    /// a cleared keyring — there is nothing to unlock with, and the password
+    /// slot is the only way in. That fallback *is* the copy detection.
+    fn device_backed_initial_state(&mut self, shape: VaultShape) -> AppState {
+        let strings = self.lang.strings();
+        let has_password = shape == VaultShape::DeviceAndPassword;
+
+        let state = match self.store.device_store().and_then(|d| d.read()) {
+            Ok(Some(state)) => state,
+            // No entry, or the store could not be reached at all. Both mean the
+            // everyday path is unavailable right now.
+            Ok(None) | Err(_) => {
+                return if has_password {
+                    let mut unlock = UnlockState::new(UnlockMode::Unlock);
+                    unlock.error = Some(strings.err_device_not_enrolled.to_string());
+                    AppState::Locked(unlock)
+                } else {
+                    // Mode 1 without a recovery password: nothing on this
+                    // machine can open the vault, and saying so plainly beats a
+                    // password prompt that can never succeed.
+                    AppState::Unopenable
+                };
+            }
+        };
+
+        // A device state carrying a TOTP secret means mode 4: the code gates
+        // the device slot. Without one it is mode 1, which opens silently.
+        let Some(secret) = state.totp_secret.clone() else {
+            return match state.device_key().and_then(|k| self.store.load_with_device(&k)) {
+                Ok(unlocked) => Self::unlocked_state(unlocked),
+                Err(e) => {
+                    if has_password {
+                        let mut unlock = UnlockState::new(UnlockMode::Unlock);
+                        unlock.error = Some(format!("{}{e}", strings.save_error_prefix));
+                        AppState::Locked(unlock)
+                    } else {
+                        AppState::Unopenable
+                    }
+                }
+            };
+        };
+        let _ = secret;
+
+        if has_password && state.must_escalate(MAX_TOTP_FAILURES, PASSWORD_CHECK_DAYS) {
+            let mut unlock = UnlockState::new(UnlockMode::Unlock);
+            unlock.error = Some(strings.err_password_required_now.to_string());
+            return AppState::Locked(unlock);
+        }
+
+        AppState::LockedTotpDaily(TotpUnlockState::new())
     }
 
     pub async fn run(&mut self, terminal: &mut TerminalGuard) -> Result<()> {
@@ -159,21 +261,21 @@ impl App {
         self.state = self.locked_state();
         match &mut self.state {
             AppState::Locked(unlock) => unlock.info = Some(message),
-            AppState::LockedTotpOnly(totp_unlock) => totp_unlock.info = Some(message),
-            AppState::Unlocked(_) => {}
+            AppState::LockedTotpDaily(totp_unlock) => totp_unlock.info = Some(message),
+            // Mode 1 re-opens with no prompt, so there is no screen to annotate
+            // — the lock still did its job of zeroizing the decrypted config.
+            AppState::Setup(_) | AppState::Unopenable | AppState::Unlocked(_) => {}
         }
     }
 
-    /// The locked state this vault should return to. A TOTP-only vault is
-    /// encrypted under its TOTP secret, not a password, so sending it to the
-    /// password screen would leave it unopenable until restart — every path
-    /// back to "locked" must go through here rather than naming a variant.
-    fn locked_state(&self) -> AppState {
-        if self.store.totp_only_secret_exists() {
-            AppState::LockedTotpOnly(TotpUnlockState::new())
-        } else {
-            AppState::Locked(UnlockState::new(UnlockMode::Unlock))
-        }
+    /// The locked state this vault should return to. Every path back to
+    /// "locked" must go through here rather than naming a variant.
+    ///
+    /// Re-derives the lock screen from scratch rather than remembering which
+    /// one was shown at startup: the security mode may have been changed during
+    /// the session, and a device enrolled then may not be enrolled now.
+    fn locked_state(&mut self) -> AppState {
+        self.resolve_initial_state()
     }
 
     fn draw(&mut self, terminal: &mut TerminalGuard) -> Result<()> {
@@ -185,10 +287,22 @@ impl App {
                     unlock.render(frame, area, strings);
                 })?;
             }
-            AppState::LockedTotpOnly(totp_unlock) => {
+            AppState::LockedTotpDaily(totp_unlock) => {
                 terminal.terminal.draw(|frame| {
                     let area = frame.area();
                     totp_unlock.render(frame, area, strings);
+                })?;
+            }
+            AppState::Setup(setup) => {
+                terminal.terminal.draw(|frame| {
+                    let area = frame.area();
+                    setup.render(frame, area, strings);
+                })?;
+            }
+            AppState::Unopenable => {
+                terminal.terminal.draw(|frame| {
+                    let area = frame.area();
+                    crate::tui::setup::render_unopenable(frame, area, strings);
                 })?;
             }
             AppState::Unlocked(u) => {
@@ -263,26 +377,173 @@ impl App {
 
     async fn handle_key(&mut self, key: KeyEvent, terminal: &mut TerminalGuard) -> Result<()> {
         match &mut self.state {
-            AppState::Locked(unlock) => match unlock.handle_key(key, self.lang.strings()) {
-                UnlockOutcome::None => {}
-                UnlockOutcome::Quit => self.should_quit = true,
-                UnlockOutcome::SetPassword(password) => self.try_unlock(&password, true),
-                UnlockOutcome::TryPassword(password) => self.try_unlock(&password, false),
+            AppState::Setup(setup) => match setup.handle_key(key, self.lang.strings()) {
+                SetupOutcome::None => {}
+                SetupOutcome::Quit => self.should_quit = true,
+                SetupOutcome::Create { mode, password, totp_secret } => {
+                    self.create_vault(mode, password.as_ref().map(|p| p.as_str()), totp_secret)
+                }
             },
-            AppState::LockedTotpOnly(totp_unlock) => match totp_unlock.handle_key(key) {
+            AppState::Unopenable => {
+                if key.code == crossterm::event::KeyCode::Esc {
+                    self.should_quit = true;
+                }
+            }
+            AppState::Locked(unlock) => {
+                let migrating = unlock.mode == UnlockMode::MigrateTotpOnly;
+                match unlock.handle_key(key, self.lang.strings()) {
+                    UnlockOutcome::None => {}
+                    UnlockOutcome::Quit => self.should_quit = true,
+                    UnlockOutcome::SetPassword(password) if migrating => self.migrate_totp_only(&password),
+                    UnlockOutcome::SetPassword(password) => self.try_unlock(&password, true),
+                    UnlockOutcome::TryPassword(password) => self.try_unlock(&password, false),
+                }
+            }
+            AppState::LockedTotpDaily(totp_unlock) => match totp_unlock.handle_key(key) {
                 TotpUnlockOutcome::None => {}
                 TotpUnlockOutcome::Quit => self.should_quit = true,
-                TotpUnlockOutcome::Submit(code) => self.try_totp_only_unlock(&code),
+                TotpUnlockOutcome::Submit(code) => self.try_totp_daily_unlock(&code),
             },
             AppState::Unlocked(_) => self.handle_unlocked_key(key, terminal).await?,
         }
         Ok(())
     }
 
+    /// Builds the slot set the chosen mode calls for and writes a brand-new
+    /// vault.
+    ///
+    /// The credential-store entry is written *before* the vault, so a failure
+    /// half way leaves a stray entry rather than a vault nothing can open — the
+    /// same "reversible half first" rule the rest of the app follows.
+    fn create_vault(&mut self, mode: AuthMode, password: Option<&str>, totp_secret: Option<String>) {
+        let strings = self.lang.strings();
+        let wants_device = matches!(mode, AuthMode::None | AuthMode::TotpDaily);
+
+        let result = (|| -> Result<Unlocked> {
+            let mut device_state = None;
+            if wants_device {
+                let mut state = DeviceState::new()?;
+                // Only mode 4 puts the secret in the credential store; mode 3
+                // keeps it inside the vault, where the password already
+                // protects it.
+                if mode == AuthMode::TotpDaily {
+                    state.totp_secret = totp_secret.clone().map(Secret::from);
+                }
+                self.store.device_store()?.write(&state)?;
+                device_state = Some(state);
+            }
+
+            let mut unlocked = self.store.init_slots(|mk| {
+                let mut slots = Vec::new();
+                if let Some(password) = password {
+                    slots.push(keyslot::wrap_password(password, KdfParams::RECOVERY, mk)?);
+                }
+                if let Some(state) = &device_state {
+                    slots.push(keyslot::wrap_device(&state.device_key()?, mk)?);
+                }
+                Ok(slots)
+            })?;
+
+            // Modes 3 and 4 both keep a copy inside the vault: mode 3 needs it
+            // for its second factor, and mode 4 needs it so the escalation path
+            // on a *new* machine can still ask for a code after the password.
+            if matches!(mode, AuthMode::PasswordTotp | AuthMode::TotpDaily)
+                && let Some(secret) = totp_secret
+            {
+                unlocked.config.totp = Some(TotpConfig { secret_base32: Secret::from(secret) });
+                self.store.save(&unlocked.config, &unlocked.master_key, &unlocked.slots)?;
+            }
+            Ok(unlocked)
+        })();
+
+        match result {
+            Ok(unlocked) => {
+                // Mode 3's prompt is driven by `config.totp`, but the user just
+                // proved a live code during enrolment; asking again immediately
+                // would be pure friction.
+                self.state = Self::unlocked_state_skipping_totp(unlocked);
+            }
+            Err(e) => {
+                if wants_device && let Ok(store) = self.store.device_store() {
+                    store.delete();
+                }
+                if let AppState::Setup(setup) = &mut self.state {
+                    setup.error = Some(format!("{}{e}", strings.save_error_prefix));
+                }
+            }
+        }
+    }
+
+    /// The everyday unlock of `AuthMode::TotpDaily`.
+    ///
+    /// Every outcome other than a fresh, valid code lands on the password
+    /// screen. That is the whole design: the code is convenience, the password
+    /// is the thing that actually holds.
+    fn try_totp_daily_unlock(&mut self, code: &str) {
+        let strings = self.lang.strings();
+
+        let Ok(device_store) = self.store.device_store() else {
+            return self.escalate(strings.err_device_not_enrolled);
+        };
+        let Ok(Some(mut state)) = device_store.read() else {
+            return self.escalate(strings.err_device_not_enrolled);
+        };
+        let Some(secret) = state.totp_secret.clone() else {
+            return self.escalate(strings.err_device_not_enrolled);
+        };
+
+        match totp::check_code(secret.as_str(), code, state.replay_step) {
+            totp::CodeCheck::Accepted(step) => {
+                // Persist the step *before* unlocking, so a crash between the
+                // two cannot leave a used code replayable.
+                state.replay_step = step;
+                state.failed_attempts = 0;
+                let _ = device_store.write(&state);
+
+                match state.device_key().and_then(|key| self.store.load_with_device(&key)) {
+                    Ok(unlocked) => self.state = Self::unlocked_state_skipping_totp(unlocked),
+                    Err(e) => self.set_totp_daily_error(format!("{}{e}", strings.save_error_prefix)),
+                }
+            }
+            // A code that was already accepted is not a typo — someone read it
+            // over a shoulder or off a screen. Go straight to the password.
+            totp::CodeCheck::Replayed => {
+                state.failed_attempts = state.failed_attempts.saturating_add(1);
+                let _ = device_store.write(&state);
+                self.escalate(strings.err_totp_replayed);
+            }
+            totp::CodeCheck::Invalid => {
+                state.failed_attempts = state.failed_attempts.saturating_add(1);
+                let _ = device_store.write(&state);
+                if state.failed_attempts >= MAX_TOTP_FAILURES {
+                    self.escalate(strings.err_totp_too_many_failures);
+                } else {
+                    self.set_totp_daily_error(strings.err_totp_invalid_code.to_string());
+                }
+            }
+        }
+    }
+
+    fn set_totp_daily_error(&mut self, message: String) {
+        if let AppState::LockedTotpDaily(totp_unlock) = &mut self.state {
+            totp_unlock.error = Some(message);
+        }
+    }
+
+    /// Falls back to the password screen, saying why.
+    fn escalate(&mut self, reason: &str) {
+        let mut unlock = UnlockState::new(UnlockMode::Unlock);
+        unlock.error = Some(reason.to_string());
+        self.state = AppState::Locked(unlock);
+    }
+
     fn try_unlock(&mut self, password: &str, first_run: bool) {
         let result = if first_run { self.store.init(password) } else { self.store.load(password) };
         match result {
-            Ok(unlocked) => self.enter_unlocked(unlocked),
+            Ok(unlocked) => {
+                self.reconcile_device_state(&unlocked);
+                self.enter_unlocked(unlocked);
+            }
             Err(e) => {
                 if let AppState::Locked(unlock) = &mut self.state {
                     unlock.error = Some(e.to_string());
@@ -291,41 +552,105 @@ impl App {
         }
     }
 
-    /// TOTP-only mode: no password exists at all — the secret string itself
-    /// is used wherever `derive_key` would normally take a password (see
-    /// `ConfigStore::load`, which is generic over "some string + salt").
-    fn try_totp_only_unlock(&mut self, code: &str) {
-        let Ok(secret) = self.store.read_totp_only_secret() else {
-            if let AppState::LockedTotpOnly(totp_unlock) = &mut self.state {
-                totp_unlock.error = Some(self.lang.strings().err_totp_invalid_code.to_string());
-            }
+    /// After a password unlock, bring this machine's device state back in line
+    /// with the vault.
+    ///
+    /// Two cases matter. A vault with a device slot but no credential-store
+    /// entry has been copied here, or the entry was lost — re-enrol so the
+    /// everyday path works again from the next launch. A vault whose entry is
+    /// present just had its password verified, which clears the failure counter
+    /// and the periodic timer.
+    ///
+    /// All of it is best-effort: the vault is open either way, and refusing to
+    /// proceed because a keyring write failed would be worse than running with
+    /// the password path for one more session.
+    fn reconcile_device_state(&mut self, unlocked: &Unlocked) {
+        if !keyslot::has(&unlocked.slots, SLOT_DEVICE) {
+            return;
+        }
+        let Ok(device_store) = self.store.device_store() else {
             return;
         };
 
-        if !totp::verify_code(&secret, code) {
-            if let AppState::LockedTotpOnly(totp_unlock) = &mut self.state {
-                totp_unlock.error = Some(self.lang.strings().err_totp_invalid_code.to_string());
+        match device_store.read() {
+            Ok(Some(mut state)) => {
+                state.record_password_check();
+                let _ = device_store.write(&state);
             }
-            return;
-        }
+            Ok(None) => {
+                let Ok(mut state) = DeviceState::new() else {
+                    return;
+                };
+                state.totp_secret = unlocked.config.totp.as_ref().map(|t| t.secret_base32.clone());
 
-        match self.store.load(&secret) {
-            Ok(unlocked) => self.enter_unlocked(unlocked),
-            // The code was valid but the secret does not open the vault, so
-            // the secret file and the config disagree — the only way that
-            // happens is a mode switch interrupted between its two writes
-            // (see `enable_totp_only`). Drop the stale secret file and fall
-            // back to the master password, which is what the config is still
-            // encrypted under. Without this the vault would be unopenable.
-            Err(AppError::WrongPasswordOrCorrupt) => {
+                // The existing device slot was wrapped under a key this machine
+                // does not have, so it has to be replaced, not reused.
+                let Ok(device_key) = state.device_key() else {
+                    return;
+                };
+                let Ok(slot) = keyslot::wrap_device(&device_key, &unlocked.master_key) else {
+                    return;
+                };
+                let mut slots = unlocked.slots.clone();
+                keyslot::replace(&mut slots, SLOT_DEVICE, slot);
+
+                // Entry first, then the vault: a stray entry is harmless, a
+                // vault pointing at an entry that was never written is not.
+                if device_store.write(&state).is_ok()
+                    && self.store.save(&unlocked.config, &unlocked.master_key, &slots).is_err()
+                {
+                    device_store.delete();
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// Converts a vault from the retired TOTP-only mode.
+    ///
+    /// The old vault is keyed by the base32 secret sitting in plaintext beside
+    /// it. That secret becomes the device-bound one, `new_password` becomes the
+    /// recovery slot, and the plaintext file goes away — but only once the
+    /// replacement has been written and proved to open.
+    fn migrate_totp_only(&mut self, new_password: &str) {
+        let strings = self.lang.strings();
+
+        let result = (|| -> Result<Unlocked> {
+            let secret = self.store.read_totp_only_secret()?;
+            // Opening it also upgrades the envelope to v2 with a password slot
+            // keyed by the secret; the slots are rebuilt below regardless.
+            let mut unlocked = self.store.load(&secret)?;
+
+            let mut slots = vec![keyslot::wrap_password(new_password, KdfParams::RECOVERY, &unlocked.master_key)?];
+
+            // Without a credential store there is nowhere device-bound to put
+            // the secret, so the vault becomes mode 3 rather than mode 4. Both
+            // are a strict improvement on plaintext beside the vault.
+            if device::credential_store_available() {
+                let mut state = DeviceState::new()?;
+                state.totp_secret = Some(Secret::from(secret.clone()));
+                self.store.device_store()?.write(&state)?;
+                slots.push(keyslot::wrap_device(&state.device_key()?, &unlocked.master_key)?);
+            }
+
+            unlocked.config.totp = Some(TotpConfig { secret_base32: Secret::from(secret) });
+            unlocked.slots = slots;
+            self.store.save(&unlocked.config, &unlocked.master_key, &unlocked.slots)?;
+            Ok(unlocked)
+        })();
+
+        match result {
+            Ok(unlocked) => {
+                // Only now is the plaintext secret expendable.
                 self.store.discard_totp_only_secret();
-                let mut unlock = UnlockState::new(UnlockMode::Unlock);
-                unlock.error = Some(self.lang.strings().err_totp_only_vault_mismatch.to_string());
-                self.state = AppState::Locked(unlock);
+                self.state = Self::unlocked_state_skipping_totp(unlocked);
             }
             Err(e) => {
-                if let AppState::LockedTotpOnly(totp_unlock) = &mut self.state {
-                    totp_unlock.error = Some(e.to_string());
+                if let Ok(store) = self.store.device_store() {
+                    store.delete();
+                }
+                if let AppState::Locked(unlock) = &mut self.state {
+                    unlock.error = Some(format!("{}{e}", strings.save_error_prefix));
                 }
             }
         }
@@ -337,13 +662,35 @@ impl App {
     /// never reaches this branch with `config.totp` set (mutually exclusive
     /// with 2FA), so no second prompt is ever stacked on top of another.
     fn enter_unlocked(&mut self, unlocked: Unlocked) {
-        let Unlocked { config, key, salt, params } = unlocked;
+        self.state = Self::unlocked_state(unlocked);
+    }
+
+    /// Goes straight to `MainMenu`, except when the vault carries a TOTP secret
+    /// — then a second factor is required first. Mode 4 reaches this only on
+    /// its escalation path, where asking for the code after the password is the
+    /// documented behaviour.
+    fn unlocked_state(unlocked: Unlocked) -> AppState {
+        let Unlocked { config, master_key, slots } = unlocked;
         let screen = if config.totp.is_some() {
             Screen::TotpPrompt(TotpPromptState::new())
         } else {
             Screen::MainMenu(MainMenuState::new())
         };
-        self.state = AppState::Unlocked(Box::new(UnlockedState { config, key, salt, params, screen, status: None }));
+        AppState::Unlocked(Box::new(UnlockedState { config, master_key, slots, screen, status: None }))
+    }
+
+    /// For the paths that have *just* checked a live code — enrolment and the
+    /// mode 4 daily unlock. Asking for a second code a moment later would be
+    /// friction with no security value.
+    fn unlocked_state_skipping_totp(unlocked: Unlocked) -> AppState {
+        let Unlocked { config, master_key, slots } = unlocked;
+        AppState::Unlocked(Box::new(UnlockedState {
+            config,
+            master_key,
+            slots,
+            screen: Screen::MainMenu(MainMenuState::new()),
+            status: None,
+        }))
     }
 
     async fn handle_unlocked_key(&mut self, key: KeyEvent, terminal: &mut TerminalGuard) -> Result<()> {
@@ -382,10 +729,9 @@ impl App {
                     SettingsOutcome::ChangePassword { current, new } => {
                         NextStep::SettingsChangePassword { current, new }
                     }
-                    SettingsOutcome::EnableTwoFactor { secret_base32 } => NextStep::EnableTwoFactor(secret_base32),
-                    SettingsOutcome::DisableTwoFactor => NextStep::DisableTwoFactor,
-                    SettingsOutcome::EnableTotpOnly { secret_base32 } => NextStep::EnableTotpOnly(secret_base32),
-                    SettingsOutcome::SwitchToPassword { new } => NextStep::SwitchToPassword(new),
+                    SettingsOutcome::ChangeSecurityMode { mode, password, totp_secret } => {
+                        NextStep::ChangeSecurityMode { mode, password, totp_secret }
+                    }
                 },
                 Screen::TotpPrompt(state) => match state.handle_key(key) {
                     TotpPromptOutcome::None => NextStep::None,
@@ -450,7 +796,7 @@ impl App {
                 let auth_mode = self.current_auth_mode();
                 self.with_unlocked(|u| {
                     let auto_lock_minutes = u.config.auto_lock_minutes;
-                    u.screen = Screen::Settings(SettingsState::new(lang, auth_mode, auto_lock_minutes));
+                    u.screen = Screen::Settings(SettingsState::new(lang, auth_mode, device::credential_store_available(), auto_lock_minutes));
                 });
             }
             NextStep::FormCancel => self.with_unlocked(|u| {
@@ -478,10 +824,9 @@ impl App {
             NextStep::SettingsChangePassword { current, new } => {
                 self.change_master_password(&current, &new)?;
             }
-            NextStep::EnableTwoFactor(secret_base32) => self.enable_two_factor(secret_base32),
-            NextStep::DisableTwoFactor => self.disable_two_factor(),
-            NextStep::EnableTotpOnly(secret_base32) => self.enable_totp_only(secret_base32)?,
-            NextStep::SwitchToPassword(new) => self.switch_to_password(&new)?,
+            NextStep::ChangeSecurityMode { mode, password, totp_secret } => {
+                self.change_security_mode(mode, password.as_ref().map(|p| p.as_str()), totp_secret)
+            }
             NextStep::TotpPromptSubmit(code) => self.verify_totp_prompt(&code),
             NextStep::TotpPromptCancel => self.state = self.locked_state(),
             NextStep::Connect(id) => self.connect_flow(terminal, id).await?,
@@ -586,13 +931,18 @@ impl App {
 
     /// Computed fresh each time, rather than cached, since it depends on both
     /// on-disk state (`totp_only_secret_exists`) and the decrypted config.
+    /// Derived, never stored: the slot set plus `config.totp` already say
+    /// which mode a vault is in, and a separate persisted field could only
+    /// disagree with them.
     fn current_auth_mode(&self) -> AuthMode {
-        if self.store.totp_only_secret_exists() {
-            return AuthMode::TotpOnly;
-        }
-        match &self.state {
-            AppState::Unlocked(u) if u.config.totp.is_some() => AuthMode::TwoFactor,
-            _ => AuthMode::Password,
+        let AppState::Unlocked(u) = &self.state else {
+            return AuthMode::Password;
+        };
+        match (keyslot::has(&u.slots, SLOT_DEVICE), u.config.totp.is_some()) {
+            (true, true) => AuthMode::TotpDaily,
+            (true, false) => AuthMode::None,
+            (false, true) => AuthMode::PasswordTotp,
+            (false, false) => AuthMode::Password,
         }
     }
 
@@ -622,7 +972,7 @@ impl App {
             }
         }
 
-        match self.store.save(&u.config, &u.key, &u.salt, u.params) {
+        match self.store.save(&u.config, &u.master_key, &u.slots) {
             Ok(()) => {
                 let mut menu = MainMenuState::new();
                 menu.clamp_selection(&u.config.servers);
@@ -649,7 +999,7 @@ impl App {
         let target = *target;
         u.config.servers.retain(|s| s.id != target);
 
-        let save_result = self.store.save(&u.config, &u.key, &u.salt, u.params);
+        let save_result = self.store.save(&u.config, &u.master_key, &u.slots);
         let mut menu = MainMenuState::new();
         menu.clamp_selection(&u.config.servers);
         u.status = Some(match save_result {
@@ -694,7 +1044,7 @@ impl App {
             }
         }
 
-        match self.store.save(&u.config, &u.key, &u.salt, u.params) {
+        match self.store.save(&u.config, &u.master_key, &u.slots) {
             Ok(()) => {
                 let mut list = ScriptsListState::new(server_id, server_name);
                 if let Some(entry) = u.config.servers.iter().find(|s| s.id == server_id) {
@@ -726,7 +1076,7 @@ impl App {
             entry.scripts.retain(|s| s.id != script_id);
         }
 
-        let save_result = self.store.save(&u.config, &u.key, &u.salt, u.params);
+        let save_result = self.store.save(&u.config, &u.master_key, &u.slots);
         let server_name = u.config.servers.iter().find(|s| s.id == server_id).map(|e| e.name.clone()).unwrap_or_default();
         let mut list = ScriptsListState::new(server_id, server_name);
         if let Some(entry) = u.config.servers.iter().find(|s| s.id == server_id) {
@@ -752,21 +1102,27 @@ impl App {
             return Ok(());
         };
 
-        let candidate = kdf::derive_key(current, &u.salt, u.params)?;
-        if *candidate != *u.key {
+        // Unwrapping the password slot *is* the check that `current` is right:
+        // the AES-GCM tag decides, so there is no key comparison here to leak a
+        // timing signal, and no verifier field that would double as a cheaper
+        // offline brute-force oracle.
+        let wrong_password = match keyslot::find(&u.slots, SLOT_PASSWORD) {
+            Some(slot) => keyslot::unwrap_password(slot, current).is_err(),
+            None => true,
+        };
+        if wrong_password {
             settings.error = Some(strings.err_current_password_wrong.to_string());
             return Ok(());
         }
 
-        let new_salt = cipher::random_salt()?;
-        let new_params = KdfParams::INTERACTIVE;
-        let new_key = kdf::derive_key(new, &new_salt, new_params)?;
+        // The vault body is untouched — only this one slot's wrapped copy of
+        // the master key is replaced.
+        let mut slots = u.slots.clone();
+        keyslot::replace(&mut slots, SLOT_PASSWORD, keyslot::wrap_password(new, KdfParams::INTERACTIVE, &u.master_key)?);
 
-        match self.store.save(&u.config, &new_key, &new_salt, new_params) {
+        match self.store.save(&u.config, &u.master_key, &slots) {
             Ok(()) => {
-                u.key = new_key;
-                u.salt = new_salt;
-                u.params = new_params;
+                u.slots = slots;
                 if let Screen::Settings(settings) = &mut u.screen {
                     settings.info = Some(strings.status_password_changed.to_string());
                 }
@@ -791,7 +1147,7 @@ impl App {
         };
         let previous = u.config.auto_lock_minutes;
         u.config.auto_lock_minutes = minutes;
-        let result = self.store.save(&u.config, &u.key, &u.salt, u.params);
+        let result = self.store.save(&u.config, &u.master_key, &u.slots);
         if result.is_err() {
             u.config.auto_lock_minutes = previous;
         }
@@ -803,149 +1159,105 @@ impl App {
         }
     }
 
-    /// Enables "Password + TOTP (2FA)": the secret rides inside the
-    /// already-encrypted config blob, so this is just a field update + save,
-    /// no re-encryption needed (same key/salt as before).
-    fn enable_two_factor(&mut self, secret_base32: String) {
-        let strings = self.lang.strings();
-        let AppState::Unlocked(u) = &mut self.state else {
-            return;
-        };
-        u.config.totp = Some(TotpConfig { secret_base32 });
-        let result = self.store.save(&u.config, &u.key, &u.salt, u.params);
-        if let Screen::Settings(settings) = &mut u.screen {
-            match result {
-                Ok(()) => {
-                    settings.set_auth_mode(AuthMode::TwoFactor);
-                    settings.info = Some(strings.status_2fa_enabled.to_string());
-                }
-                Err(e) => settings.error = Some(format!("{}{e}", strings.save_error_prefix)),
-            }
-        }
-    }
-
-    fn disable_two_factor(&mut self) {
-        let strings = self.lang.strings();
-        let AppState::Unlocked(u) = &mut self.state else {
-            return;
-        };
-        u.config.totp = None;
-        let result = self.store.save(&u.config, &u.key, &u.salt, u.params);
-        if let Screen::Settings(settings) = &mut u.screen {
-            match result {
-                Ok(()) => {
-                    settings.set_auth_mode(AuthMode::Password);
-                    settings.info = Some(strings.status_2fa_disabled.to_string());
-                }
-                Err(e) => settings.error = Some(format!("{}{e}", strings.save_error_prefix)),
-            }
-        }
-    }
-
-    /// Switches the vault to "TOTP-only" mode: the config is re-encrypted
-    /// under a key derived from the TOTP secret itself (same `kdf::derive_key`
-    /// used for passwords — the secret string just takes the password's
-    /// place), and the secret is written in the clear to the sibling
-    /// `totp-only.secret` file so it's readable before any user input. This
-    /// is the accepted tradeoff of this mode, not an oversight.
+    /// Rebuilds the vault's slot set for a different security mode.
     ///
-    /// Ordering matters: the secret file is written *first* because it is the
-    /// only cheaply reversible half of the switch. If re-encrypting then
-    /// fails, deleting it puts the vault back exactly where it started. The
-    /// reverse order has no such recovery — a config already re-encrypted
-    /// under a secret that never reached disk would be unopenable forever.
-    fn enable_totp_only(&mut self, secret_base32: String) -> Result<()> {
+    /// The master key never changes, so the vault body is not re-encrypted —
+    /// only the wrapped copies of that key, plus whatever the new mode needs in
+    /// the credential store.
+    ///
+    /// Write order matters and is the same rule as everywhere else: the
+    /// credential-store entry goes first, because a stray entry is harmless
+    /// while a vault whose device slot points at an entry that was never
+    /// written is unopenable.
+    fn change_security_mode(&mut self, mode: AuthMode, password: Option<&str>, totp_secret: Option<String>) {
         let strings = self.lang.strings();
         let AppState::Unlocked(u) = &mut self.state else {
-            return Ok(());
+            return;
+        };
+        let wants_device = matches!(mode, AuthMode::None | AuthMode::TotpDaily);
+
+        let result = (|| -> Result<(Vec<Slot>, Option<TotpConfig>)> {
+            let mut slots = Vec::new();
+
+            if let Some(password) = password {
+                slots.push(keyslot::wrap_password(password, KdfParams::RECOVERY, &u.master_key)?);
+            } else if let Some(existing) = keyslot::find(&u.slots, SLOT_PASSWORD) {
+                // No new password typed: keep the one already on the vault
+                // rather than silently dropping the user's recovery path.
+                slots.push(existing.clone());
+            }
+
+            // Modes 3 and 4 keep the secret inside the vault as well: mode 3
+            // needs it for its second factor, mode 4 for the escalation path on
+            // a machine that has no device entry yet.
+            let totp = match (&totp_secret, mode) {
+                (Some(secret), AuthMode::PasswordTotp | AuthMode::TotpDaily) => {
+                    Some(TotpConfig { secret_base32: Secret::from(secret.clone()) })
+                }
+                (None, AuthMode::PasswordTotp | AuthMode::TotpDaily) => u.config.totp.clone(),
+                _ => None,
+            };
+
+            if wants_device {
+                let mut state = DeviceState::new()?;
+                if mode == AuthMode::TotpDaily {
+                    state.totp_secret = totp.as_ref().map(|t| t.secret_base32.clone());
+                }
+                self.store.device_store()?.write(&state)?;
+                slots.push(keyslot::wrap_device(&state.device_key()?, &u.master_key)?);
+            }
+
+            if slots.is_empty() {
+                return Err(AppError::Crypto("that mode would leave the vault with no way in".into()));
+            }
+            Ok((slots, totp))
+        })();
+
+        let (slots, totp) = match result {
+            Ok(pair) => pair,
+            Err(e) => {
+                if wants_device && let Ok(store) = self.store.device_store() {
+                    store.delete();
+                }
+                if let Screen::Settings(settings) = &mut u.screen {
+                    settings.error = Some(format!("{}{e}", strings.save_error_prefix));
+                }
+                return;
+            }
         };
 
-        let new_salt = cipher::random_salt()?;
-        let new_params = KdfParams::INTERACTIVE;
-        let new_key = kdf::derive_key(&secret_base32, &new_salt, new_params)?;
-        let previous_totp = u.config.totp.take();
+        let previous_totp = u.config.totp.clone();
+        u.config.totp = totp;
 
-        let result = self
-            .store
-            .write_totp_only_secret(&secret_base32)
-            .and_then(|()| self.store.save(&u.config, &new_key, &new_salt, new_params));
-
-        match result {
+        match self.store.save(&u.config, &u.master_key, &slots) {
             Ok(()) => {
-                u.key = new_key;
-                u.salt = new_salt;
-                u.params = new_params;
-                if let Screen::Settings(settings) = &mut u.screen {
-                    settings.set_auth_mode(AuthMode::TotpOnly);
-                    settings.info = Some(strings.status_totp_only_enabled.to_string());
+                u.slots = slots;
+                // The vault no longer has a device slot, so the entry left in
+                // the credential store is dead weight — and a secret that would
+                // outlive its purpose.
+                if !wants_device && let Ok(store) = self.store.device_store() {
+                    store.delete();
+                }
+                let auth_mode = self.current_auth_mode();
+                if let AppState::Unlocked(u) = &mut self.state
+                    && let Screen::Settings(settings) = &mut u.screen
+                {
+                    settings.set_auth_mode(auth_mode);
+                    settings.info = Some(strings.status_mode_changed.to_string());
                 }
             }
             Err(e) => {
-                // Roll back both halves: the on-disk config was never
-                // replaced (writes are atomic), so dropping the secret file
-                // and restoring the in-memory 2FA field leaves the vault
-                // byte-for-byte as it was before this attempt.
-                self.store.discard_totp_only_secret();
+                // The on-disk vault was never replaced (writes are atomic), so
+                // undoing the in-memory half restores the previous state whole.
                 u.config.totp = previous_totp;
-                if let Screen::Settings(settings) = &mut u.screen {
-                    settings.error = Some(format!("{}{e}", strings.save_error_prefix));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Switches a "TOTP-only" vault back to normal password protection: a
-    /// fresh salt + password-derived key re-encrypts the config, and the
-    /// sibling secret file is removed so the app goes back to asking for a
-    /// password on the next launch.
-    ///
-    /// The secret file is stashed (renamed aside) before re-encrypting rather
-    /// than deleted after it, so a failed save can put it back. Leaving the
-    /// file in place while the config moves to a password key would strand
-    /// the vault: the next launch would see TOTP-only mode and unlock with a
-    /// secret that no longer opens anything.
-    fn switch_to_password(&mut self, new_password: &str) -> Result<()> {
-        let strings = self.lang.strings();
-        let AppState::Unlocked(u) = &mut self.state else {
-            return Ok(());
-        };
-
-        let new_salt = cipher::random_salt()?;
-        let new_params = KdfParams::INTERACTIVE;
-        let new_key = kdf::derive_key(new_password, &new_salt, new_params)?;
-
-        let stashed = match self.store.stash_totp_only_secret() {
-            Ok(stashed) => stashed,
-            Err(e) => {
-                if let Screen::Settings(settings) = &mut u.screen {
-                    settings.error = Some(format!("{}{e}", strings.save_error_prefix));
-                }
-                return Ok(());
-            }
-        };
-
-        match self.store.save(&u.config, &new_key, &new_salt, new_params) {
-            Ok(()) => {
-                self.store.discard_stashed_totp_only_secret();
-                u.key = new_key;
-                u.salt = new_salt;
-                u.params = new_params;
-                if let Screen::Settings(settings) = &mut u.screen {
-                    settings.set_auth_mode(AuthMode::Password);
-                    settings.info = Some(strings.status_switched_to_password.to_string());
-                }
-            }
-            Err(e) => {
-                if stashed {
-                    let _ = self.store.restore_totp_only_secret();
+                if wants_device && let Ok(store) = self.store.device_store() {
+                    store.delete();
                 }
                 if let Screen::Settings(settings) = &mut u.screen {
                     settings.error = Some(format!("{}{e}", strings.save_error_prefix));
                 }
             }
         }
-        Ok(())
     }
 
     fn verify_totp_prompt(&mut self, code: &str) {
@@ -958,7 +1270,7 @@ impl App {
             return;
         };
 
-        if totp::verify_code(&totp_config.secret_base32, code) {
+        if totp::verify_enrollment(totp_config.secret_base32.as_str(), code) {
             let mut menu = MainMenuState::new();
             menu.clamp_selection(&u.config.servers);
             u.screen = Screen::MainMenu(menu);
@@ -976,7 +1288,7 @@ impl App {
             AppState::Unlocked(u) => u.config.servers.iter().find(|s| s.id == id).map(|e| {
                 (ssh::Target::from_entry(e), e.scripts.iter().filter(|s| s.run_on_connect).cloned().collect::<Vec<_>>())
             }),
-            AppState::Locked(_) | AppState::LockedTotpOnly(_) => None,
+            AppState::Setup(_) | AppState::Unopenable | AppState::Locked(_) | AppState::LockedTotpDaily(_) => None,
         };
         let Some((target, on_connect_scripts)) = target else {
             return Ok(());
@@ -992,7 +1304,7 @@ impl App {
                         if let Some(e) = u.config.servers.iter_mut().find(|s| s.id == id) {
                             e.host_key_fingerprint = Some(fingerprint.clone());
                         }
-                        let _ = self.store.save(&u.config, &u.key, &u.salt, u.params);
+                        let _ = self.store.save(&u.config, &u.master_key, &u.slots);
                     }
 
                 // Best-effort: a probe failure (restricted shell, no tools
@@ -1002,7 +1314,7 @@ impl App {
                         if let Some(e) = u.config.servers.iter_mut().find(|s| s.id == id) {
                             e.system_info = Some(info);
                         }
-                        let _ = self.store.save(&u.config, &u.key, &u.salt, u.params);
+                        let _ = self.store.save(&u.config, &u.master_key, &u.slots);
                     }
 
                 // Auto-run scripts flagged `run_on_connect`, printed plain to
@@ -1050,7 +1362,7 @@ impl App {
                 let script = e.scripts.iter().find(|s| s.id == script_id).cloned()?;
                 Some((ssh::Target::from_entry(e), e.name.clone(), script))
             }),
-            AppState::Locked(_) | AppState::LockedTotpOnly(_) => None,
+            AppState::Setup(_) | AppState::Unopenable | AppState::Locked(_) | AppState::LockedTotpDaily(_) => None,
         };
         let Some((target, server_name, script)) = prepared else {
             return Ok(());

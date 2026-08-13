@@ -38,6 +38,17 @@ pub fn random_nonce() -> Result<[u8; NONCE_LEN]> {
     Ok(buf)
 }
 
+/// A fresh master key. This is the key the vault body is actually encrypted
+/// under; every keyslot stores a wrapped copy of it. It is generated once, at
+/// vault creation, and never derived from anything the user types — which is
+/// what lets a password change rewrap 32 bytes instead of re-encrypting the
+/// whole vault.
+pub fn random_master_key() -> Result<Zeroizing<[u8; super::kdf::KEY_LEN]>> {
+    let mut buf = Zeroizing::new([0u8; super::kdf::KEY_LEN]);
+    getrandom::fill(buf.as_mut_slice()).map_err(|e| AppError::Crypto(e.to_string()))?;
+    Ok(buf)
+}
+
 pub fn random_salt() -> Result<[u8; super::kdf::SALT_LEN]> {
     let mut buf = [0u8; super::kdf::SALT_LEN];
     getrandom::fill(&mut buf).map_err(|e| AppError::Crypto(e.to_string()))?;

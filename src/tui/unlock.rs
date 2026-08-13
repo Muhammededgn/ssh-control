@@ -3,7 +3,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use zeroize::Zeroizing;
 
 use super::widgets::{centered_rect, mask};
@@ -13,6 +13,19 @@ use crate::i18n::Strings;
 pub enum UnlockMode {
     FirstRun,
     Unlock,
+    /// A vault carried over from the old TOTP-only mode. Behaves like
+    /// `FirstRun` — the user is setting a password that does not exist yet —
+    /// but says why it is being asked, since from the user's point of view the
+    /// app has suddenly started demanding something it never did before.
+    MigrateTotpOnly,
+}
+
+impl UnlockMode {
+    /// Whether this mode is collecting a *new* password (two fields, length and
+    /// match checks) rather than trying an existing one.
+    fn is_new_password(self) -> bool {
+        matches!(self, Self::FirstRun | Self::MigrateTotpOnly)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -58,13 +71,13 @@ impl UnlockState {
         self.info = None;
         match key.code {
             KeyCode::Esc => return UnlockOutcome::Quit,
-            KeyCode::Tab | KeyCode::Down if self.mode == UnlockMode::FirstRun => {
+            KeyCode::Tab | KeyCode::Down if self.mode.is_new_password() => {
                 self.focus = match self.focus {
                     Focus::Password => Focus::Confirm,
                     Focus::Confirm => Focus::Password,
                 };
             }
-            KeyCode::Up if self.mode == UnlockMode::FirstRun => {
+            KeyCode::Up if self.mode.is_new_password() => {
                 self.focus = match self.focus {
                     Focus::Password => Focus::Confirm,
                     Focus::Confirm => Focus::Password,
@@ -85,10 +98,9 @@ impl UnlockState {
     }
 
     fn active_buffer_mut(&mut self) -> &mut Zeroizing<String> {
-        match (self.mode, self.focus) {
-            (UnlockMode::Unlock, _) => &mut self.password,
-            (UnlockMode::FirstRun, Focus::Password) => &mut self.password,
-            (UnlockMode::FirstRun, Focus::Confirm) => &mut self.confirm,
+        match self.focus {
+            Focus::Confirm if self.mode.is_new_password() => &mut self.confirm,
+            _ => &mut self.password,
         }
     }
 
@@ -101,7 +113,7 @@ impl UnlockState {
                 }
                 UnlockOutcome::TryPassword(std::mem::replace(&mut self.password, Zeroizing::new(String::new())))
             }
-            UnlockMode::FirstRun => {
+            UnlockMode::FirstRun | UnlockMode::MigrateTotpOnly => {
                 if self.password.len() < 8 {
                     self.error = Some(strings.err_password_too_short.to_string());
                     return UnlockOutcome::None;
@@ -117,15 +129,26 @@ impl UnlockState {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, strings: &Strings) {
-        let height = if self.mode == UnlockMode::FirstRun { 10 } else { 8 };
-        let box_area = centered_rect(50, height, area);
+        // The migration screen carries a paragraph explaining why a password is
+        // suddenly being asked for, so it needs noticeably more room.
+        let (width, height) = match self.mode {
+            UnlockMode::MigrateTotpOnly => (72, 16),
+            UnlockMode::FirstRun => (50, 10),
+            UnlockMode::Unlock => (50, 8),
+        };
+        let box_area = centered_rect(width, height, area);
 
         let title = match self.mode {
             UnlockMode::FirstRun => strings.unlock_title_first_run,
             UnlockMode::Unlock => strings.unlock_title_unlock,
+            UnlockMode::MigrateTotpOnly => strings.migrate_totp_only_title,
         };
 
-        let mut lines = vec![
+        let mut lines = Vec::new();
+        if self.mode == UnlockMode::MigrateTotpOnly {
+            lines.push(Line::from(Span::styled(strings.migrate_totp_only_message, Style::default().fg(Color::Yellow))));
+        }
+        lines.extend([
             Line::from(""),
             Line::from(vec![
                 Span::raw(format!("{}: ", strings.unlock_password_label)),
@@ -135,9 +158,9 @@ impl UnlockState {
                     Style::default(),
                 ),
             ]),
-        ];
+        ]);
 
-        if self.mode == UnlockMode::FirstRun {
+        if self.mode.is_new_password() {
             lines.push(Line::from(vec![
                 Span::raw(format!("{}: ", strings.unlock_confirm_label)),
                 Span::raw(mask(&self.confirm)),
@@ -161,7 +184,7 @@ impl UnlockState {
         }
 
         let block = Block::default().borders(Borders::ALL).title(title);
-        let paragraph = Paragraph::new(lines).block(block);
+        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false }).block(block);
         frame.render_widget(paragraph, box_area);
     }
 }

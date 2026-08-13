@@ -17,6 +17,12 @@ arch=('x86_64')
 url="https://github.com/Muhammededgn/ssh-control"
 license=('MIT')
 depends=('gcc-libs')
+# The two security modes that unlock without a password keep their device key
+# in a Secret Service provider. The app talks to it over D-Bus via zbus (pure
+# Rust — no extra makedepends), and offers those modes only when one is
+# actually running, so this stays optional rather than a hard dependency.
+optdepends=('gnome-keyring: Secret Service provider, for the passwordless security modes'
+            'kwallet: Secret Service provider, for the passwordless security modes')
 # cmake is needed by aws-lc-sys, pulled in transitively through russh.
 makedepends=('cargo' 'cmake')
 options=('!lto')

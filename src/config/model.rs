@@ -30,7 +30,10 @@ pub struct Config {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TotpConfig {
-    pub secret_base32: String,
+    /// The shared secret, base32. `Secret` rather than `String` because in the
+    /// TOTP-daily mode this is what the vault's device slot is gated on, and a
+    /// copy of it also lives in the OS credential store.
+    pub secret_base32: Secret,
 }
 
 impl std::fmt::Debug for TotpConfig {

@@ -1,4 +1,7 @@
+use qrcode::QrCode;
+use qrcode::render::unicode;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::text::Line;
 
 /// Returns a rect of `width`x`height` centered within `area`, clamped so it
 /// never exceeds `area`'s bounds. Used for popups/overlays (unlock screen,
@@ -32,4 +35,19 @@ pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 /// password/passphrase input fields.
 pub fn mask(s: &str) -> String {
     "*".repeat(s.chars().count())
+}
+
+/// Renders `data` as a QR code in half-block characters, for scanning an
+/// `otpauth://` URI with a phone. An unencodable string yields one blank line
+/// rather than an error: the secret is always shown as text beside the code, so
+/// a missing QR degrades to retyping rather than to a dead end.
+pub fn qr_lines(data: &str) -> Vec<Line<'static>> {
+    if data.is_empty() {
+        return vec![Line::from("")];
+    }
+    let Ok(code) = QrCode::new(data.as_bytes()) else {
+        return vec![Line::from("")];
+    };
+    let rendered = code.render::<unicode::Dense1x2>().quiet_zone(false).build();
+    rendered.lines().map(|l| Line::from(l.to_string())).collect()
 }
