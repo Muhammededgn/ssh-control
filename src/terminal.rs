@@ -1,7 +1,8 @@
 use std::io::{self, Stdout};
 
+use crossterm::cursor::MoveTo;
 use crossterm::execute;
-use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
@@ -25,8 +26,14 @@ impl TerminalGuard {
 
     /// Leave the alternate screen so a real interactive SSH session can take over
     /// the primary screen buffer, exactly like a normal `ssh` invocation would.
+    ///
+    /// The primary buffer still holds whatever was on screen before the app
+    /// started — the user's own shell — so it is wiped and the cursor homed
+    /// before handing over. `ClearType::All` only erases the visible screen;
+    /// the terminal's scrollback is deliberately left alone (`Purge` would
+    /// throw away history the app never owned).
     pub fn suspend(&mut self) -> Result<()> {
-        execute!(io::stdout(), LeaveAlternateScreen)?;
+        execute!(io::stdout(), LeaveAlternateScreen, Clear(ClearType::All), MoveTo(0, 0))?;
         Ok(())
     }
 
