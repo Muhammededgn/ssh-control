@@ -2,7 +2,7 @@
 name = "ssh-control"
 version = "0.1.0"
 edition = "2024"
-description = "Local, encrypted SSH connection manager with an interactive TUI"
+description = "Local, encrypted SSH connection manager with an interactive TUI (unix only)"
 authors = ["R.M. Emin \"Toyar\" Doğan"]
 license = "MIT"
 readme = "README.md"

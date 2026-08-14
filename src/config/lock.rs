@@ -75,7 +75,6 @@ impl VaultLock {
     }
 }
 
-#[cfg(unix)]
 fn take_exclusive(file: &File) -> Result<()> {
     use rustix::fs::{FlockOperation, flock};
 
@@ -87,16 +86,7 @@ fn take_exclusive(file: &File) -> Result<()> {
     }
 }
 
-/// No advisory locking off unix, matching the permission stubs in `store.rs`.
-/// See issue #22 — the crate does not currently build for Windows anyway, so
-/// this is a placeholder for a decision that has not been made rather than a
-/// claim that concurrent instances are safe there.
-#[cfg(not(unix))]
-fn take_exclusive(_file: &File) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
