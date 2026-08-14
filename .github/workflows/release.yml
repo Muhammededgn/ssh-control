@@ -18,7 +18,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The tag, Cargo.toml and the PKGBUILD each carry the version
       # independently. Catch a half-finished bump here rather than shipping a
@@ -68,7 +68,7 @@ jobs:
           apt-get install -y --no-install-recommends \
             build-essential cmake pkg-config curl ca-certificates git
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -102,7 +102,7 @@ jobs:
 
           ls -la dist/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-packages
           path: dist/*
@@ -117,7 +117,7 @@ jobs:
       - name: Install build tooling
         run: pacman -Syu --noconfirm --needed rust cmake git
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # makepkg refuses to run as root, and the checkout is owned by root.
       # The sudoers entry is what lets makepkg's -s resolve any makedepends
@@ -138,7 +138,7 @@ jobs:
           find packaging/arch -maxdepth 1 -name '*.pkg.tar.zst' ! -name '*-debug-*' -exec mv {} dist/ \;
           ls -la dist/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: arch-package
           path: dist/*
@@ -149,7 +149,7 @@ jobs:
     needs: [linux-packages, arch-package]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
 
