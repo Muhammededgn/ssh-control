@@ -393,6 +393,18 @@ pub fn render_unopenable(frame: &mut Frame, area: Rect, strings: &Strings) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), rect);
 }
 
+/// A second instance of a vault that opens with no prompt. Unlike
+/// `render_unopenable` this state is temporary — closing the other window fixes
+/// it — so it is yellow rather than red and says what to do.
+pub fn render_vault_in_use(frame: &mut Frame, area: Rect, strings: &Strings) {
+    let lines = vec![
+        Line::from(Span::styled(strings.vault_in_use_message, Style::default().fg(Color::Yellow))),
+    ];
+    let rect = centered_rect(70, 10, area);
+    let block = Block::default().borders(Borders::ALL).title(strings.vault_in_use_title);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), rect);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,6 +537,32 @@ mod tests {
         // `qr_lines` draws in half-block characters; their presence means the
         // URI encoded rather than falling through to the blank-line path.
         assert!(rendered.contains('\u{2580}') || rendered.contains('\u{2584}'), "the QR code should have rendered");
+    }
+
+    /// The two dead-end screens must not be confusable: one says the vault
+    /// cannot be opened on this machine at all, the other that it is open in
+    /// another window right now. Showing the wrong one sends the user hunting
+    /// for a recovery password they do not need.
+    #[test]
+    fn the_two_dead_end_screens_say_different_things() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let draw = |f: fn(&mut ratatui::Frame, ratatui::layout::Rect, &Strings)| {
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test backend");
+            terminal.draw(|frame| f(frame, frame.area(), &EN)).expect("render");
+            terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect::<String>()
+        };
+
+        // Single words, not phrases: the buffer is row-major over the whole
+        // terminal, so a wrapped message is interleaved with the padding either
+        // side of the centred box. Words survive a wrap; phrases do not.
+        let unopenable = draw(render_unopenable);
+        let in_use = draw(render_vault_in_use);
+
+        assert!(unopenable.contains("recovery"), "the permanent one explains the missing fallback");
+        assert!(in_use.contains("Close"), "the transient one says what to do about it");
+        assert!(!in_use.contains("recovery"), "a contended vault is not a missing-credential problem");
     }
 
     /// Without this the user could enrol a secret their authenticator cannot

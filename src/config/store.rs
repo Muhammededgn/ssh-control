@@ -5,6 +5,7 @@ use directories::ProjectDirs;
 use zeroize::Zeroizing;
 
 use super::device;
+use super::lock::VaultLock;
 use super::format::{self, AnyEnvelope, SLOT_PASSWORD, Slot};
 use super::keyslot::{self, MasterKey};
 use super::model::Config;
@@ -46,6 +47,10 @@ pub struct Unlocked {
 
 pub struct ConfigStore {
     path: PathBuf,
+    /// Taken by whichever of the four vault-opening methods runs first, and
+    /// then held for the rest of the process. Lives here rather than in `App`
+    /// so no future unlock path can be added that forgets to take it.
+    lock: VaultLock,
 }
 
 impl ConfigStore {
@@ -55,7 +60,7 @@ impl ConfigStore {
     }
 
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self { path, lock: VaultLock::new() }
     }
 
     pub fn exists(&self) -> bool {
@@ -76,6 +81,22 @@ impl ConfigStore {
     /// could read this file could open the vault without ever producing a code.
     /// The app now only reads it once, to migrate the vault onto a device-bound
     /// secret and a password, and then deletes it. Nothing writes it any more.
+    /// A sibling of the vault, never the vault itself: `save` replaces
+    /// `config.enc` by rename, so a descriptor held on it would pin an unlinked
+    /// inode and stop contending with anyone. Empty by design — the descriptor
+    /// carries the lock, not the contents.
+    fn lock_path(&self) -> PathBuf {
+        let mut name = self.path.file_name().unwrap_or_default().to_os_string();
+        name.push(".lock");
+        self.path.with_file_name(name)
+    }
+
+    /// Claims the vault for this process. Called by every method that produces
+    /// an `Unlocked`, and a no-op once held.
+    fn claim(&self) -> Result<()> {
+        self.lock.acquire(&self.lock_path())
+    }
+
     fn totp_only_secret_path(&self) -> PathBuf {
         self.path.with_file_name(TOTP_ONLY_FILE_NAME)
     }
@@ -148,6 +169,8 @@ impl ConfigStore {
     where
         F: FnOnce(&MasterKey) -> Result<Vec<Slot>>,
     {
+        self.claim()?;
+
         let master_key = cipher::random_master_key()?;
         let slots = build_slots(&master_key)?;
         let config = Config::default();
@@ -160,6 +183,8 @@ impl ConfigStore {
     /// Opens a vault through its device slot — mode 1's silent unlock, and the
     /// everyday path of mode 4 once the TOTP gate has been passed.
     pub fn load_with_device(&self, device_key: &Zeroizing<[u8; 32]>) -> Result<Unlocked> {
+        self.claim()?;
+
         let bytes = self.read_file()?;
         let envelope = match format::decode_any(&bytes)? {
             AnyEnvelope::V2(envelope) => envelope,
@@ -181,7 +206,13 @@ impl ConfigStore {
     /// separate verifier field.
     ///
     /// A v1 file is upgraded in place first, transparently.
+    ///
+    /// Claims the vault before touching the password, so a contended vault says
+    /// "another instance has this open" rather than letting the user conclude
+    /// they mistyped.
     pub fn load(&self, master_password: &str) -> Result<Unlocked> {
+        self.claim()?;
+
         let bytes = self.read_file()?;
 
         let envelope = match format::decode_any(&bytes)? {

@@ -65,6 +65,14 @@ enum AppState {
     /// nothing the user could type would help, and offering a box that can
     /// never succeed is worse than saying so.
     Unopenable,
+    /// Another instance already holds the vault lock, and this one has no
+    /// prompt it could offer instead — mode 1, which opens without asking.
+    ///
+    /// Deliberately separate from `Unopenable`: that one is permanent and says
+    /// the vault cannot be opened *here*, while this one clears the moment the
+    /// other window is closed. Telling the user the wrong one of those sends
+    /// them looking for a recovery password they do not need.
+    VaultInUse,
     /// Boxed so the enum isn't sized by its largest variant — the locked
     /// variants are tiny and this one carries the whole decrypted config.
     Unlocked(Box<UnlockedState>),
@@ -200,6 +208,10 @@ impl App {
         let Some(secret) = state.totp_secret.clone() else {
             return match state.device_key().and_then(|k| self.store.load_with_device(&k)) {
                 Ok(unlocked) => Self::unlocked_state(unlocked),
+                // A contended lock is not a broken vault: the password would
+                // not help either, since the other instance holds the lock
+                // whatever this one types.
+                Err(AppError::VaultInUse) => AppState::VaultInUse,
                 Err(e) => {
                     if has_password {
                         let mut unlock = UnlockState::new(UnlockMode::Unlock);
@@ -264,7 +276,7 @@ impl App {
             AppState::LockedTotpDaily(totp_unlock) => totp_unlock.info = Some(message),
             // Mode 1 re-opens with no prompt, so there is no screen to annotate
             // — the lock still did its job of zeroizing the decrypted config.
-            AppState::Setup(_) | AppState::Unopenable | AppState::Unlocked(_) => {}
+            AppState::Setup(_) | AppState::Unopenable | AppState::VaultInUse | AppState::Unlocked(_) => {}
         }
     }
 
@@ -303,6 +315,12 @@ impl App {
                 terminal.terminal.draw(|frame| {
                     let area = frame.area();
                     crate::tui::setup::render_unopenable(frame, area, strings);
+                })?;
+            }
+            AppState::VaultInUse => {
+                terminal.terminal.draw(|frame| {
+                    let area = frame.area();
+                    crate::tui::setup::render_vault_in_use(frame, area, strings);
                 })?;
             }
             AppState::Unlocked(u) => {
@@ -384,7 +402,8 @@ impl App {
                     self.create_vault(mode, password.as_ref().map(|p| p.as_str()), totp_secret)
                 }
             },
-            AppState::Unopenable => {
+            // Both are dead ends with nothing to type: Esc is the only key.
+            AppState::Unopenable | AppState::VaultInUse => {
                 if key.code == crossterm::event::KeyCode::Esc {
                     self.should_quit = true;
                 }
@@ -467,8 +486,12 @@ impl App {
                 if wants_device && let Ok(store) = self.store.device_store() {
                     store.delete();
                 }
+                let message = match e {
+                    AppError::VaultInUse => strings.err_vault_in_use.to_string(),
+                    other => format!("{}{other}", strings.save_error_prefix),
+                };
                 if let AppState::Setup(setup) = &mut self.state {
-                    setup.error = Some(format!("{}{e}", strings.save_error_prefix));
+                    setup.error = Some(message);
                 }
             }
         }
@@ -502,6 +525,10 @@ impl App {
 
                 match state.device_key().and_then(|key| self.store.load_with_device(&key)) {
                     Ok(unlocked) => self.state = Self::unlocked_state_skipping_totp(unlocked),
+                    // The code was right and has already been spent; the vault
+                    // just belongs to another instance. Say that plainly rather
+                    // than dressing it up as a save failure.
+                    Err(AppError::VaultInUse) => self.set_totp_daily_error(strings.err_vault_in_use.to_string()),
                     Err(e) => self.set_totp_daily_error(format!("{}{e}", strings.save_error_prefix)),
                 }
             }
@@ -545,10 +572,24 @@ impl App {
                 self.enter_unlocked(unlocked);
             }
             Err(e) => {
+                let message = self.error_text(&e);
                 if let AppState::Locked(unlock) = &mut self.state {
-                    unlock.error = Some(e.to_string());
+                    unlock.error = Some(message);
                 }
             }
+        }
+    }
+
+    /// Error text for a lock screen.
+    ///
+    /// Only one error gets a translated message: a contended vault lock is the
+    /// one failure here the user can actually act on, and "close the other
+    /// window" is useless advice if they cannot read it. Everything else keeps
+    /// its `Display` text, as it always has.
+    fn error_text(&self, e: &AppError) -> String {
+        match e {
+            AppError::VaultInUse => self.lang.strings().err_vault_in_use.to_string(),
+            other => other.to_string(),
         }
     }
 
@@ -649,8 +690,12 @@ impl App {
                 if let Ok(store) = self.store.device_store() {
                     store.delete();
                 }
+                let message = match e {
+                    AppError::VaultInUse => strings.err_vault_in_use.to_string(),
+                    other => format!("{}{other}", strings.save_error_prefix),
+                };
                 if let AppState::Locked(unlock) = &mut self.state {
-                    unlock.error = Some(format!("{}{e}", strings.save_error_prefix));
+                    unlock.error = Some(message);
                 }
             }
         }
@@ -1288,7 +1333,7 @@ impl App {
             AppState::Unlocked(u) => u.config.servers.iter().find(|s| s.id == id).map(|e| {
                 (ssh::Target::from_entry(e), e.scripts.iter().filter(|s| s.run_on_connect).cloned().collect::<Vec<_>>())
             }),
-            AppState::Setup(_) | AppState::Unopenable | AppState::Locked(_) | AppState::LockedTotpDaily(_) => None,
+            AppState::Setup(_) | AppState::Unopenable | AppState::VaultInUse | AppState::Locked(_) | AppState::LockedTotpDaily(_) => None,
         };
         let Some((target, on_connect_scripts)) = target else {
             return Ok(());
@@ -1362,7 +1407,7 @@ impl App {
                 let script = e.scripts.iter().find(|s| s.id == script_id).cloned()?;
                 Some((ssh::Target::from_entry(e), e.name.clone(), script))
             }),
-            AppState::Setup(_) | AppState::Unopenable | AppState::Locked(_) | AppState::LockedTotpDaily(_) => None,
+            AppState::Setup(_) | AppState::Unopenable | AppState::VaultInUse | AppState::Locked(_) | AppState::LockedTotpDaily(_) => None,
         };
         let Some((target, server_name, script)) = prepared else {
             return Ok(());

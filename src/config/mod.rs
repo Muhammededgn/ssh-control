@@ -1,6 +1,7 @@
 pub mod device;
 pub mod format;
 pub mod keyslot;
+pub mod lock;
 pub mod model;
 pub mod secret;
 pub mod store;

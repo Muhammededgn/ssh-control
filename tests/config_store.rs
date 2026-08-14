@@ -340,3 +340,80 @@ fn changing_a_slot_does_not_re_encrypt_the_vault_body() {
     assert!(matches!(store.load("first password"), Err(AppError::WrongPasswordOrCorrupt)));
     assert_eq!(format_version_of(&path), 2);
 }
+
+/// The bug this guards: `save` rewrites the whole envelope from whatever
+/// `Config` that instance holds, so two open instances are last-writer-wins and
+/// one set of edits vanishes with no error. The lock makes the second instance
+/// fail to open at all.
+#[test]
+fn a_second_instance_cannot_open_a_vault_that_is_already_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.enc");
+
+    let first = ConfigStore::new(path.clone());
+    first.init("a strong password").unwrap();
+
+    let second = ConfigStore::new(path);
+    assert!(matches!(second.load("a strong password"), Err(AppError::VaultInUse)));
+}
+
+/// A contended vault must not look like a typo. `load` claims the lock before
+/// it touches the password, so the message stays actionable even when the
+/// password is right — and when it is wrong.
+#[test]
+fn a_contended_vault_reports_the_lock_not_a_wrong_password() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.enc");
+
+    let first = ConfigStore::new(path.clone());
+    first.init("a strong password").unwrap();
+
+    let second = ConfigStore::new(path);
+    assert!(matches!(second.load("entirely the wrong password"), Err(AppError::VaultInUse)));
+}
+
+/// The lock lives on a sibling file for exactly this reason: every save
+/// replaces `config.enc` by rename, so a descriptor held on the vault itself
+/// would be left pinning an unlinked inode that nobody else could contend with.
+#[test]
+fn the_lock_survives_the_rename_that_every_save_performs() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.enc");
+
+    let first = ConfigStore::new(path.clone());
+    let unlocked = first.init("a strong password").unwrap();
+    for _ in 0..3 {
+        first.save(&unlocked.config, &unlocked.master_key, &unlocked.slots).unwrap();
+    }
+
+    let second = ConfigStore::new(path);
+    assert!(matches!(second.load("a strong password"), Err(AppError::VaultInUse)));
+}
+
+/// Releasing is the process exiting. Nothing needs to clean up after a crash,
+/// which is the whole reason this is an advisory lock rather than a marker
+/// file.
+#[test]
+fn the_lock_is_released_when_the_holder_goes_away() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.enc");
+
+    {
+        let first = ConfigStore::new(path.clone());
+        first.init("a strong password").unwrap();
+    }
+
+    let second = ConfigStore::new(path);
+    second.load("a strong password").expect("the lock should have gone with its holder");
+}
+
+/// One instance opening the same vault repeatedly — a lock, then a re-unlock —
+/// must not lock itself out.
+#[test]
+fn one_instance_can_reopen_its_own_vault() {
+    let (_dir, store) = temp_store();
+    store.init("a strong password").unwrap();
+
+    store.load("a strong password").expect("the same store must not contend with itself");
+    store.load("a strong password").expect("nor on a third open");
+}

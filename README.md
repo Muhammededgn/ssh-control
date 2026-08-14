@@ -90,9 +90,18 @@ Linux), created `0700` with `0600` files:
 | `config.enc` | The encrypted vault: servers, credentials, scripts, TOTP secret |
 | `prefs.lang` | UI language code — plain text, read before unlocking |
 | `vault-id` | An identifier naming this vault's OS credential-store entry — plain text, not a secret |
+| `config.enc.lock` | Always empty. Only one running instance may hold the vault open, and this is what they contend on |
 
 The vault is rewritten atomically (staged in a sibling `.tmp` file, fsynced,
 then renamed), so an interrupted save can never truncate or corrupt it.
+
+**Only one instance at a time.** Every save rewrites the whole vault from the
+copy that instance holds in memory, so two running at once would be
+last-writer-wins — add a server in one, save in the other, and the first edit
+would be gone with nothing to show for it. The second instance is refused with
+an explicit message instead. The lock is taken the first time a vault is
+actually opened, so a window sitting on the password screen blocks nothing, and
+it is an advisory `flock`, so a crash releases it rather than stranding it.
 
 ## Security model
 
