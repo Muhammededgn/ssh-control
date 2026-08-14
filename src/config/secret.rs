@@ -1,7 +1,7 @@
 use std::ops::Deref;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// A credential string that wipes its heap buffer when dropped.
 ///
@@ -31,6 +31,20 @@ impl Secret {
 impl From<String> for Secret {
     fn from(s: String) -> Self {
         Self(s)
+    }
+}
+
+/// The bridge from a form buffer to a stored credential. Screens accumulate
+/// keystrokes in a `Zeroizing<String>`, and this is how that buffer becomes the
+/// `Secret` that goes into the vault.
+///
+/// Takes a reference rather than the value on purpose: `Zeroizing` has no
+/// `into_inner`, so a by-value impl would have to copy the string out anyway —
+/// it would buy ergonomics, not one fewer copy. Borrowing instead lets callers
+/// keep their buffer and drops a `.clone()` at the call site.
+impl From<&Zeroizing<String>> for Secret {
+    fn from(s: &Zeroizing<String>) -> Self {
+        Self(s.as_str().to_owned())
     }
 }
 
@@ -88,6 +102,15 @@ mod tests {
         let rendered = format!("{secret:?}");
         assert_eq!(rendered, "<redacted>");
         assert!(!rendered.contains("hunter2"));
+    }
+
+    #[test]
+    fn converts_from_a_zeroizing_form_buffer() {
+        let buffer = Zeroizing::new("hunter2".to_string());
+        let secret = Secret::from(&buffer);
+        assert_eq!(secret.as_str(), "hunter2");
+        // The caller keeps its buffer — that is the point of borrowing.
+        assert_eq!(buffer.as_str(), "hunter2");
     }
 
     #[test]

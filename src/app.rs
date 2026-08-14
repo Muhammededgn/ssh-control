@@ -89,7 +89,7 @@ enum NextStep {
     SettingsLangSelected(Lang),
     SettingsAutoLockSelected(u32),
     SettingsChangePassword { current: Zeroizing<String>, new: Zeroizing<String> },
-    ChangeSecurityMode { mode: AuthMode, password: Option<Zeroizing<String>>, totp_secret: Option<String> },
+    ChangeSecurityMode { mode: AuthMode, password: Option<Zeroizing<String>>, totp_secret: Option<Zeroizing<String>> },
     TotpPromptSubmit(String),
     TotpPromptCancel,
     GoScripts(Uuid),
@@ -415,7 +415,7 @@ impl App {
     /// The credential-store entry is written *before* the vault, so a failure
     /// half way leaves a stray entry rather than a vault nothing can open — the
     /// same "reversible half first" rule the rest of the app follows.
-    fn create_vault(&mut self, mode: AuthMode, password: Option<&str>, totp_secret: Option<String>) {
+    fn create_vault(&mut self, mode: AuthMode, password: Option<&str>, totp_secret: Option<Zeroizing<String>>) {
         let strings = self.lang.strings();
         let wants_device = matches!(mode, AuthMode::None | AuthMode::TotpDaily);
 
@@ -427,7 +427,7 @@ impl App {
                 // keeps it inside the vault, where the password already
                 // protects it.
                 if mode == AuthMode::TotpDaily {
-                    state.totp_secret = totp_secret.clone().map(Secret::from);
+                    state.totp_secret = totp_secret.as_ref().map(Secret::from);
                 }
                 self.store.device_store()?.write(&state)?;
                 device_state = Some(state);
@@ -450,7 +450,7 @@ impl App {
             if matches!(mode, AuthMode::PasswordTotp | AuthMode::TotpDaily)
                 && let Some(secret) = totp_secret
             {
-                unlocked.config.totp = Some(TotpConfig { secret_base32: Secret::from(secret) });
+                unlocked.config.totp = Some(TotpConfig { secret_base32: Secret::from(&secret) });
                 self.store.save(&unlocked.config, &unlocked.master_key, &unlocked.slots)?;
             }
             Ok(unlocked)
@@ -628,12 +628,12 @@ impl App {
             // are a strict improvement on plaintext beside the vault.
             if device::credential_store_available() {
                 let mut state = DeviceState::new()?;
-                state.totp_secret = Some(Secret::from(secret.clone()));
+                state.totp_secret = Some(Secret::from(&secret));
                 self.store.device_store()?.write(&state)?;
                 slots.push(keyslot::wrap_device(&state.device_key()?, &unlocked.master_key)?);
             }
 
-            unlocked.config.totp = Some(TotpConfig { secret_base32: Secret::from(secret) });
+            unlocked.config.totp = Some(TotpConfig { secret_base32: Secret::from(&secret) });
             unlocked.slots = slots;
             self.store.save(&unlocked.config, &unlocked.master_key, &unlocked.slots)?;
             Ok(unlocked)
@@ -1169,7 +1169,7 @@ impl App {
     /// credential-store entry goes first, because a stray entry is harmless
     /// while a vault whose device slot points at an entry that was never
     /// written is unopenable.
-    fn change_security_mode(&mut self, mode: AuthMode, password: Option<&str>, totp_secret: Option<String>) {
+    fn change_security_mode(&mut self, mode: AuthMode, password: Option<&str>, totp_secret: Option<Zeroizing<String>>) {
         let strings = self.lang.strings();
         let AppState::Unlocked(u) = &mut self.state else {
             return;
@@ -1192,7 +1192,7 @@ impl App {
             // a machine that has no device entry yet.
             let totp = match (&totp_secret, mode) {
                 (Some(secret), AuthMode::PasswordTotp | AuthMode::TotpDaily) => {
-                    Some(TotpConfig { secret_base32: Secret::from(secret.clone()) })
+                    Some(TotpConfig { secret_base32: Secret::from(secret) })
                 }
                 (None, AuthMode::PasswordTotp | AuthMode::TotpDaily) => u.config.totp.clone(),
                 _ => None,

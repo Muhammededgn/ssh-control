@@ -11,7 +11,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::i18n::Strings;
 use crate::totp::{self, AuthMode};
@@ -22,7 +22,10 @@ const MIN_PASSWORD_LEN: usize = 8;
 /// The modes in the order they are offered, weakest first.
 const MODES: [AuthMode; 4] = [AuthMode::None, AuthMode::Password, AuthMode::PasswordTotp, AuthMode::TotpDaily];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// `Debug` is safe here and only here among this screen's types: a step name
+/// carries no credential. `SetupState` and `SetupOutcome` deliberately stay
+/// undebuggable.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Step {
     ChooseMode,
     /// Mode 1 only: a recovery password is optional there, so it is offered
@@ -40,7 +43,7 @@ pub enum SetupOutcome {
     Create {
         mode: AuthMode,
         password: Option<Zeroizing<String>>,
-        totp_secret: Option<String>,
+        totp_secret: Option<Zeroizing<String>>,
     },
 }
 
@@ -52,11 +55,18 @@ pub struct SetupState {
     credential_store: bool,
     selected: usize,
     mode: AuthMode,
-    password: String,
-    confirm: String,
+    /// Wiping buffers, like every other credential form (`unlock.rs`,
+    /// `settings.rs`, `server_form.rs`). Wrapping only on the way out would
+    /// miss the copies `String::push` leaves behind when it reallocates, and
+    /// would leave everything typed here intact if the user backs out with Esc.
+    password: Zeroizing<String>,
+    confirm: Zeroizing<String>,
     focus_confirm: bool,
     want_recovery: bool,
-    pending_secret: String,
+    /// The enrolled TOTP secret. A credential, not a display string: in
+    /// `TotpDaily` this is what the device slot is gated on.
+    pending_secret: Zeroizing<String>,
+    /// Not wrapped: a six-digit single-use code, not a lasting secret.
     code: String,
     pub error: Option<String>,
 }
@@ -69,11 +79,11 @@ impl SetupState {
             // Land on "password only": the safe default that works everywhere.
             selected: 1,
             mode: AuthMode::Password,
-            password: String::new(),
-            confirm: String::new(),
+            password: Zeroizing::new(String::new()),
+            confirm: Zeroizing::new(String::new()),
             focus_confirm: false,
             want_recovery: true,
-            pending_secret: String::new(),
+            pending_secret: Zeroizing::new(String::new()),
             code: String::new(),
             error: None,
         }
@@ -178,7 +188,7 @@ impl SetupState {
                     self.error = Some(strings.err_password_too_short.to_string());
                     return SetupOutcome::None;
                 }
-                if self.password != self.confirm {
+                if *self.password != *self.confirm {
                     self.error = Some(strings.err_passwords_dont_match.to_string());
                     return SetupOutcome::None;
                 }
@@ -228,13 +238,16 @@ impl SetupState {
         let password = if self.password.is_empty() {
             None
         } else {
-            Some(Zeroizing::new(std::mem::take(&mut self.password)))
+            // `mem::replace`, not `mem::take`: `Zeroizing` has no `Default`.
+            Some(std::mem::replace(&mut self.password, Zeroizing::new(String::new())))
         };
         let totp_secret = match self.mode {
-            AuthMode::PasswordTotp | AuthMode::TotpDaily => Some(std::mem::take(&mut self.pending_secret)),
+            AuthMode::PasswordTotp | AuthMode::TotpDaily => {
+                Some(std::mem::replace(&mut self.pending_secret, Zeroizing::new(String::new())))
+            }
             _ => None,
         };
-        self.confirm.zeroize();
+        self.confirm.clear();
         SetupOutcome::Create { mode: self.mode, password, totp_secret }
     }
 
@@ -320,11 +333,14 @@ impl SetupState {
     }
 
     fn render_totp_enroll(&self, frame: &mut Frame, area: Rect, strings: &Strings) {
-        let qr = qr_lines(&totp::otpauth_url(&self.pending_secret).unwrap_or_default());
+        // `Zeroizing` has no `Default`, so no `unwrap_or_default` here. An
+        // unencodable secret still degrades to the one blank line `qr_lines`
+        // returns for empty input, exactly as before.
+        let qr = totp::otpauth_url(&self.pending_secret).map_or_else(|| qr_lines(""), |url| qr_lines(&url));
         let qr_height = qr.len() as u16 + 1;
 
         let top = vec![
-            Line::from(format!("{}: {}", strings.tf_secret_label, self.pending_secret)),
+            Line::from(format!("{}: {}", strings.tf_secret_label, self.pending_secret.as_str())),
             Line::from(Span::styled(strings.tf_scan_hint, Style::default().fg(Color::DarkGray))),
         ];
 
@@ -375,4 +391,156 @@ pub fn render_unopenable(frame: &mut Frame, area: Rect, strings: &Strings) {
     let rect = centered_rect(70, 10, area);
     let block = Block::default().borders(Borders::ALL).title(strings.unopenable_title);
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), rect);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::i18n::EN;
+
+    /// Drives the screen the way a user would. Being in the same module, these
+    /// tests can then read the private buffers directly — which is the point:
+    /// what matters is not only what `finish` hands out, but what it leaves
+    /// behind.
+    fn press(state: &mut SetupState, code: KeyCode) -> SetupOutcome {
+        state.handle_key(KeyEvent::from(code), &EN)
+    }
+
+    fn type_str(state: &mut SetupState, s: &str) {
+        for c in s.chars() {
+            press(state, KeyCode::Char(c));
+        }
+    }
+
+    /// Selects `mode` on the chooser and lands on the password step.
+    fn choose(mode: AuthMode) -> SetupState {
+        // A credential store is claimed so all four modes are selectable.
+        let mut state = SetupState::new(true);
+        let target = MODES.iter().position(|m| *m == mode).expect("mode is offered");
+        while state.selected < target {
+            press(&mut state, KeyCode::Down);
+        }
+        while state.selected > target {
+            press(&mut state, KeyCode::Up);
+        }
+        press(&mut state, KeyCode::Enter);
+        state
+    }
+
+    /// Types the password into both fields and confirms.
+    fn enter_password(state: &mut SetupState, password: &str) -> SetupOutcome {
+        type_str(state, password);
+        press(state, KeyCode::Enter);
+        type_str(state, password);
+        press(state, KeyCode::Enter)
+    }
+
+    #[test]
+    fn a_password_only_setup_hands_out_the_password_and_keeps_no_copy() {
+        let mut state = choose(AuthMode::Password);
+        assert_eq!(state.step, Step::Password);
+
+        let outcome = enter_password(&mut state, "correct horse");
+
+        let SetupOutcome::Create { mode, password, totp_secret } = outcome else {
+            panic!("a confirmed password should finish the setup");
+        };
+        assert_eq!(mode, AuthMode::Password);
+        assert_eq!(password.expect("a password was typed").as_str(), "correct horse");
+        assert!(totp_secret.is_none(), "mode 2 has no TOTP secret");
+
+        // The whole point of the change: nothing typed is still sitting in the
+        // screen's buffers afterwards.
+        assert!(state.password.is_empty());
+        assert!(state.confirm.is_empty());
+    }
+
+    #[test]
+    fn a_password_shorter_than_the_minimum_is_refused() {
+        let mut state = choose(AuthMode::Password);
+        let outcome = enter_password(&mut state, "short");
+
+        assert!(matches!(outcome, SetupOutcome::None));
+        assert!(state.error.is_some());
+        assert_eq!(state.step, Step::Password, "the user stays on the password step");
+    }
+
+    #[test]
+    fn a_mismatched_confirmation_emits_nothing() {
+        let mut state = choose(AuthMode::Password);
+        type_str(&mut state, "correct horse");
+        press(&mut state, KeyCode::Enter);
+        type_str(&mut state, "correct hose");
+        let outcome = press(&mut state, KeyCode::Enter);
+
+        assert!(matches!(outcome, SetupOutcome::None), "a mismatch must not create a vault");
+        assert!(state.error.is_some());
+    }
+
+    #[test]
+    fn totp_enrolment_hands_out_the_secret_and_keeps_no_copy() {
+        let mut state = choose(AuthMode::PasswordTotp);
+        assert!(matches!(enter_password(&mut state, "correct horse"), SetupOutcome::None));
+
+        // The password step generates the secret and moves on to enrolment
+        // rather than finishing.
+        assert_eq!(state.step, Step::TotpEnroll);
+        assert!(!state.pending_secret.is_empty());
+        let enrolled = state.pending_secret.to_string();
+
+        type_str(&mut state, &crate::totp::current_code(&enrolled));
+        let outcome = press(&mut state, KeyCode::Enter);
+
+        let SetupOutcome::Create { mode, password, totp_secret } = outcome else {
+            panic!("a live code should finish the setup");
+        };
+        assert_eq!(mode, AuthMode::PasswordTotp);
+        assert_eq!(password.expect("a password was typed").as_str(), "correct horse");
+        assert_eq!(totp_secret.expect("mode 3 carries a secret").as_str(), enrolled);
+
+        assert!(state.password.is_empty());
+        assert!(state.confirm.is_empty());
+        assert!(state.pending_secret.is_empty());
+    }
+
+    /// The enrolment screen is the one place the secret is deliberately on
+    /// screen, and both of its render paths had to change shape when the buffer
+    /// became `Zeroizing` — `otpauth_url` lost its `Default`, and the secret
+    /// line lost its `Display`. This pins that the user can still read and scan
+    /// what they are enrolling.
+    #[test]
+    fn the_enrolment_screen_still_shows_the_secret_and_a_qr() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut state = choose(AuthMode::PasswordTotp);
+        enter_password(&mut state, "correct horse");
+        let enrolled = state.pending_secret.to_string();
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 60)).expect("test backend");
+        terminal.draw(|frame| state.render(frame, frame.area(), &EN)).expect("render");
+
+        let rendered: String = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(rendered.contains(&enrolled), "the base32 secret must stay readable for hand entry");
+        // `qr_lines` draws in half-block characters; their presence means the
+        // URI encoded rather than falling through to the blank-line path.
+        assert!(rendered.contains('\u{2580}') || rendered.contains('\u{2584}'), "the QR code should have rendered");
+    }
+
+    /// Without this the user could enrol a secret their authenticator cannot
+    /// produce codes for, and end up with a vault they cannot open.
+    #[test]
+    fn a_wrong_code_does_not_finish_enrolment() {
+        let mut state = choose(AuthMode::PasswordTotp);
+        enter_password(&mut state, "correct horse");
+        assert_eq!(state.step, Step::TotpEnroll);
+
+        type_str(&mut state, "000000");
+        let outcome = press(&mut state, KeyCode::Enter);
+
+        assert!(matches!(outcome, SetupOutcome::None));
+        assert!(state.error.is_some());
+        assert_eq!(state.step, Step::TotpEnroll);
+        assert!(!state.pending_secret.is_empty(), "the secret survives a wrong code");
+    }
 }
