@@ -42,12 +42,29 @@ enum Screen {
     ScriptRun(ScriptRunState),
 }
 
+/// A transient footer message ("Saved.", "Deleted."), with the moment it was
+/// shown so the run loop can take it away again.
+///
+/// Without the timestamp a message sits there until the screen changes, so a
+/// "Saved." from ten minutes ago still reads as if it describes whatever the
+/// user is looking at now.
+struct StatusMessage {
+    text: String,
+    shown_at: Instant,
+}
+
+impl StatusMessage {
+    fn new(text: String) -> Self {
+        Self { text, shown_at: Instant::now() }
+    }
+}
+
 struct UnlockedState {
     config: Config,
     master_key: MasterKey,
     slots: Vec<Slot>,
     screen: Screen,
-    status: Option<String>,
+    status: Option<StatusMessage>,
 }
 
 enum AppState {
@@ -131,6 +148,10 @@ const MAX_TOTP_FAILURES: u32 = 5;
 /// again. Guards against the user quietly forgetting the one credential that
 /// can recover the vault from another machine.
 const PASSWORD_CHECK_DAYS: u32 = 30;
+/// How long a footer status message stays up. Long enough to read, short enough
+/// that it is gone before the user could mistake it for a description of what
+/// they are now looking at.
+const STATUS_TTL: Duration = Duration::from_secs(4);
 
 impl App {
     pub fn new(store: ConfigStore) -> Self {
@@ -251,9 +272,21 @@ impl App {
                 self.last_activity = Instant::now();
             }
 
+            self.expire_status();
             self.auto_lock_if_idle();
         }
         Ok(())
+    }
+
+    /// Drops a footer status message once it has had its time. Driven by the
+    /// same 200 ms poll tick as the auto-lock, so the message disappears on its
+    /// own rather than waiting for the next screen change.
+    fn expire_status(&mut self) {
+        if let AppState::Unlocked(u) = &mut self.state
+            && u.status.as_ref().is_some_and(|s| s.shown_at.elapsed() >= STATUS_TTL)
+        {
+            u.status = None;
+        }
     }
 
     /// Drops an idle unlocked session back to the lock screen, which zeroizes
@@ -324,7 +357,7 @@ impl App {
                 })?;
             }
             AppState::Unlocked(u) => {
-                let status = u.status.clone();
+                let status = u.status.as_ref().map(|s| s.text.clone());
                 let config = &u.config;
                 match &mut u.screen {
                     Screen::MainMenu(state) => {
@@ -1021,7 +1054,7 @@ impl App {
             Ok(()) => {
                 let mut menu = MainMenuState::new();
                 menu.clamp_selection(&u.config.servers);
-                u.status = Some(strings.status_saved.to_string());
+                u.status = Some(StatusMessage::new(strings.status_saved.to_string()));
                 u.screen = Screen::MainMenu(menu);
             }
             Err(e) => {
@@ -1047,10 +1080,10 @@ impl App {
         let save_result = self.store.save(&u.config, &u.master_key, &u.slots);
         let mut menu = MainMenuState::new();
         menu.clamp_selection(&u.config.servers);
-        u.status = Some(match save_result {
+        u.status = Some(StatusMessage::new(match save_result {
             Ok(()) => strings.status_deleted.to_string(),
             Err(e) => format!("{}{e}", strings.delete_error_prefix),
-        });
+        }));
         u.screen = Screen::MainMenu(menu);
         Ok(())
     }
@@ -1095,7 +1128,7 @@ impl App {
                 if let Some(entry) = u.config.servers.iter().find(|s| s.id == server_id) {
                     list.clamp_selection(&entry.scripts);
                 }
-                u.status = Some(strings.status_script_saved.to_string());
+                u.status = Some(StatusMessage::new(strings.status_script_saved.to_string()));
                 u.screen = Screen::Scripts(list);
             }
             Err(e) => {
@@ -1127,10 +1160,10 @@ impl App {
         if let Some(entry) = u.config.servers.iter().find(|s| s.id == server_id) {
             list.clamp_selection(&entry.scripts);
         }
-        u.status = Some(match save_result {
+        u.status = Some(StatusMessage::new(match save_result {
             Ok(()) => strings.status_script_deleted.to_string(),
             Err(e) => format!("{}{e}", strings.delete_error_prefix),
-        });
+        }));
         u.screen = Screen::Scripts(list);
         Ok(())
     }
@@ -1389,7 +1422,7 @@ impl App {
         terminal.resume()?;
 
         if let AppState::Unlocked(u) = &mut self.state {
-            u.status = status_msg;
+            u.status = status_msg.map(StatusMessage::new);
         }
 
         Ok(())
