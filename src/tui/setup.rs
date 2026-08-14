@@ -393,15 +393,14 @@ pub fn render_unopenable(frame: &mut Frame, area: Rect, strings: &Strings) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), rect);
 }
 
-/// A second instance of a vault that opens with no prompt. Unlike
-/// `render_unopenable` this state is temporary — closing the other window fixes
-/// it — so it is yellow rather than red and says what to do.
-pub fn render_vault_in_use(frame: &mut Frame, area: Rect, strings: &Strings) {
-    let lines = vec![
-        Line::from(Span::styled(strings.vault_in_use_message, Style::default().fg(Color::Yellow))),
-    ];
+/// A vault that cannot be opened *right now* — another instance holds it, or a
+/// newer build wrote it. Unlike `render_unopenable` these clear by themselves
+/// once the user does the thing the message names, so they are yellow rather
+/// than red and the caller supplies the wording.
+pub fn render_cannot_open(frame: &mut Frame, area: Rect, title: &str, message: &str) {
+    let lines = vec![Line::from(Span::styled(message.to_string(), Style::default().fg(Color::Yellow)))];
     let rect = centered_rect(70, 10, area);
-    let block = Block::default().borders(Borders::ALL).title(strings.vault_in_use_title);
+    let block = Block::default().borders(Borders::ALL).title(title.to_string());
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), rect);
 }
 
@@ -558,7 +557,13 @@ mod tests {
         // terminal, so a wrapped message is interleaved with the padding either
         // side of the centred box. Words survive a wrap; phrases do not.
         let unopenable = draw(render_unopenable);
-        let in_use = draw(render_vault_in_use);
+        let in_use = {
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test backend");
+            terminal
+                .draw(|frame| render_cannot_open(frame, frame.area(), EN.vault_in_use_title, EN.vault_in_use_message))
+                .expect("render");
+            terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect::<String>()
+        };
 
         assert!(unopenable.contains("recovery"), "the permanent one explains the missing fallback");
         assert!(in_use.contains("Close"), "the transient one says what to do about it");

@@ -6,6 +6,7 @@ use zeroize::Zeroizing;
 
 use super::device;
 use super::lock::VaultLock;
+use super::migrate;
 use super::format::{self, AnyEnvelope, SLOT_PASSWORD, Slot};
 use super::keyslot::{self, MasterKey};
 use super::model::Config;
@@ -300,7 +301,10 @@ pub fn shape_of(slots: &[Slot]) -> VaultShape {
 fn decrypt_body(envelope: &format::Envelope, master_key: &MasterKey) -> Result<Config> {
     let aad = format::header_aad(&envelope.slots);
     let plaintext = cipher::decrypt(master_key, &envelope.nonce, &aad, &envelope.ciphertext)?;
-    serde_json::from_slice(&plaintext).map_err(|e| AppError::CorruptFile(e.to_string()))
+    // Not `serde_json::from_slice` directly: a config from a newer build has to
+    // be refused rather than silently stripped of the fields this one does not
+    // know about. See `config::migrate`.
+    migrate::config_from_slice(&plaintext)
 }
 
 /// Writes `bytes` to `path` without ever leaving a partially-written file
@@ -351,26 +355,18 @@ fn tmp_sibling(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-#[cfg(unix)]
+/// The config directory is the user's own and nobody else's business. No
+/// `cfg` pair around these any more: the crate is unix-only (see `lib.rs`), and
+/// the no-op stubs that used to sit here implied a portability that never
+/// existed while quietly promising permissions nothing would have applied.
 fn set_dir_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn set_dir_permissions(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
 fn set_file_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_file_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }

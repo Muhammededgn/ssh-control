@@ -82,14 +82,16 @@ enum AppState {
     /// nothing the user could type would help, and offering a box that can
     /// never succeed is worse than saying so.
     Unopenable,
-    /// Another instance already holds the vault lock, and this one has no
-    /// prompt it could offer instead — mode 1, which opens without asking.
+    /// A vault this instance cannot open right now, where there is nothing
+    /// useful to prompt for — reached from mode 1, which opens without asking,
+    /// so there is no password box to put an error on.
     ///
-    /// Deliberately separate from `Unopenable`: that one is permanent and says
-    /// the vault cannot be opened *here*, while this one clears the moment the
-    /// other window is closed. Telling the user the wrong one of those sends
-    /// them looking for a recovery password they do not need.
-    VaultInUse,
+    /// Carries its own text because the reasons are not interchangeable and
+    /// `Unopenable` is none of them: that one is permanent and says the vault
+    /// cannot be opened on *this machine*, while these clear by closing another
+    /// window or installing a newer build. Showing the wrong one sends the user
+    /// looking for a recovery password they do not need.
+    CannotOpen { title: &'static str, message: &'static str },
     /// Boxed so the enum isn't sized by its largest variant — the locked
     /// variants are tiny and this one carries the whole decrypted config.
     Unlocked(Box<UnlockedState>),
@@ -232,7 +234,16 @@ impl App {
                 // A contended lock is not a broken vault: the password would
                 // not help either, since the other instance holds the lock
                 // whatever this one types.
-                Err(AppError::VaultInUse) => AppState::VaultInUse,
+                Err(AppError::VaultInUse) => AppState::CannotOpen {
+                    title: strings.vault_in_use_title,
+                    message: strings.vault_in_use_message,
+                },
+                // Same shape, different reason: opening it would strip the
+                // fields the newer build stored.
+                Err(AppError::SchemaTooNew { .. }) => AppState::CannotOpen {
+                    title: strings.schema_too_new_title,
+                    message: strings.schema_too_new_message,
+                },
                 Err(e) => {
                     if has_password {
                         let mut unlock = UnlockState::new(UnlockMode::Unlock);
@@ -309,7 +320,7 @@ impl App {
             AppState::LockedTotpDaily(totp_unlock) => totp_unlock.info = Some(message),
             // Mode 1 re-opens with no prompt, so there is no screen to annotate
             // — the lock still did its job of zeroizing the decrypted config.
-            AppState::Setup(_) | AppState::Unopenable | AppState::VaultInUse | AppState::Unlocked(_) => {}
+            AppState::Setup(_) | AppState::Unopenable | AppState::CannotOpen { .. } | AppState::Unlocked(_) => {}
         }
     }
 
@@ -350,10 +361,11 @@ impl App {
                     crate::tui::setup::render_unopenable(frame, area, strings);
                 })?;
             }
-            AppState::VaultInUse => {
+            AppState::CannotOpen { title, message } => {
+                let (title, message) = (*title, *message);
                 terminal.terminal.draw(|frame| {
                     let area = frame.area();
-                    crate::tui::setup::render_vault_in_use(frame, area, strings);
+                    crate::tui::setup::render_cannot_open(frame, area, title, message);
                 })?;
             }
             AppState::Unlocked(u) => {
@@ -436,7 +448,7 @@ impl App {
                 }
             },
             // Both are dead ends with nothing to type: Esc is the only key.
-            AppState::Unopenable | AppState::VaultInUse => {
+            AppState::Unopenable | AppState::CannotOpen { .. } => {
                 if key.code == crossterm::event::KeyCode::Esc {
                     self.should_quit = true;
                 }
@@ -1366,7 +1378,7 @@ impl App {
             AppState::Unlocked(u) => u.config.servers.iter().find(|s| s.id == id).map(|e| {
                 (ssh::Target::from_entry(e), e.scripts.iter().filter(|s| s.run_on_connect).cloned().collect::<Vec<_>>())
             }),
-            AppState::Setup(_) | AppState::Unopenable | AppState::VaultInUse | AppState::Locked(_) | AppState::LockedTotpDaily(_) => None,
+            AppState::Setup(_) | AppState::Unopenable | AppState::CannotOpen { .. } | AppState::Locked(_) | AppState::LockedTotpDaily(_) => None,
         };
         let Some((target, on_connect_scripts)) = target else {
             return Ok(());
@@ -1448,7 +1460,7 @@ impl App {
                 let script = e.scripts.iter().find(|s| s.id == script_id).cloned()?;
                 Some((ssh::Target::from_entry(e), e.name.clone(), script))
             }),
-            AppState::Setup(_) | AppState::Unopenable | AppState::VaultInUse | AppState::Locked(_) | AppState::LockedTotpDaily(_) => None,
+            AppState::Setup(_) | AppState::Unopenable | AppState::CannotOpen { .. } | AppState::Locked(_) | AppState::LockedTotpDaily(_) => None,
         };
         let Some((target, server_name, script)) = prepared else {
             return Ok(());

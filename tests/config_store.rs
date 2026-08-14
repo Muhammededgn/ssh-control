@@ -443,3 +443,62 @@ fn a_vault_written_before_last_connected_existed_still_loads() {
     assert_eq!(reloaded.config.servers.len(), 1);
     assert_eq!(reloaded.config.servers[0].last_connected_unix, None);
 }
+
+/// The failure this closes: serde drops unknown fields and every save rewrites
+/// the whole config, so a build that opened a newer vault would destroy
+/// whatever the newer version had stored — while leaving `schema_version`
+/// reading as the newer number, so the file would go on claiming to be
+/// something it no longer was.
+///
+/// Driven through the real store rather than against the parser, so the refusal
+/// is shown to survive decryption and land as an error the unlock path can
+/// display.
+#[test]
+fn a_vault_from_a_newer_build_is_refused_instead_of_being_quietly_stripped() {
+    use ssh_control::config::format;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.enc");
+    let store = ConfigStore::new(path.clone());
+    let unlocked = store.init("a strong password").unwrap();
+
+    // Stand in for a future build: bump the schema and add a field this binary
+    // knows nothing about, then re-encrypt under the same key and slots.
+    let mut body: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&unlocked.config).unwrap()).unwrap();
+    body["schema_version"] = serde_json::json!(2);
+    body["tags_added_in_v2"] = serde_json::json!(["prod", "eu"]);
+
+    let plaintext = serde_json::to_vec(&body).unwrap();
+    let nonce = cipher::random_nonce().unwrap();
+    let aad = format::header_aad(&unlocked.slots);
+    let ciphertext = cipher::encrypt(&unlocked.master_key, &nonce, &aad, &plaintext).unwrap();
+    std::fs::write(&path, format::encode(&unlocked.slots, &nonce, &ciphertext)).unwrap();
+
+    match store.load("a strong password").err() {
+        Some(AppError::SchemaTooNew { found, supported }) => {
+            assert_eq!(found, 2);
+            assert_eq!(supported, ssh_control::config::model::CURRENT_SCHEMA_VERSION);
+        }
+        Some(other) => panic!("expected a schema refusal, got {other:?}"),
+        None => panic!("a newer vault must not open"),
+    }
+
+    // The refusal has to be non-destructive: the unknown field is still on disk
+    // afterwards, which is the entire point of refusing.
+    let raw = std::fs::read(&path).unwrap();
+    let envelope = match format::decode_any(&raw).unwrap() {
+        format::AnyEnvelope::V2(e) => e,
+        format::AnyEnvelope::V1(_) => panic!("expected a v2 envelope"),
+    };
+    let recovered = cipher::decrypt(
+        &unlocked.master_key,
+        &envelope.nonce,
+        &format::header_aad(&envelope.slots),
+        &envelope.ciphertext,
+    )
+    .unwrap();
+    let still: serde_json::Value = serde_json::from_slice(&recovered).unwrap();
+    assert_eq!(still["tags_added_in_v2"], serde_json::json!(["prod", "eu"]));
+    assert_eq!(still["schema_version"], 2);
+}

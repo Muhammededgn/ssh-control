@@ -47,6 +47,14 @@ pub enum AppError {
     #[error("encryption error: {0}")]
     Crypto(String),
 
+    /// The decrypted config was written by a newer version of ssh-control.
+    ///
+    /// Refused rather than opened: serde drops fields it does not know and
+    /// every save rewrites the whole config, so opening it would quietly
+    /// destroy whatever the newer version had stored.
+    #[error("this vault was written by a newer version of ssh-control (schema {found}, this build understands {supported}) — upgrade to open it")]
+    SchemaTooNew { found: u32, supported: u32 },
+
     /// Another running instance holds this vault's advisory lock. Transient by
     /// nature — deliberately distinct from the errors that mean the vault
     /// itself cannot be opened, because the fix is "close the other window",

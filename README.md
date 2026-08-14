@@ -24,6 +24,13 @@ so `vim`, `htop`, `tmux` and Ctrl+C behave exactly as they would under plain
   connect
 - **Four UI languages** — English, Turkish, Spanish, Russian
 
+## Platform
+
+Unix only — Linux, macOS and the BSDs. The PTY bridge is built on unix signals
+and non-blocking file descriptors, so the crate does not compile on Windows and
+says so rather than failing somewhere confusing. Packaging is deb, rpm, Arch and
+a portable tarball.
+
 ## Install
 
 ### Prebuilt packages
