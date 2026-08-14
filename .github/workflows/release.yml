@@ -17,24 +17,39 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v7
 
       # The tag, Cargo.toml and the PKGBUILD each carry the version
       # independently. Catch a half-finished bump here rather than shipping a
       # release whose packages disagree with their own filenames.
+      #
+      # A pre-release suffix (v0.1.0-rc1) is compared on its base version only,
+      # so the whole packaging pipeline can be exercised end to end before the
+      # real tag. Without that, the first time these jobs ever run is the
+      # release itself — and a failure half way through leaves a pushed tag and
+      # a partly-published release to clean up. The suffix carries through to
+      # the artefact names and marks the GitHub release as a prerelease.
       - name: Check version consistency
         id: version
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME#v}"
+          base="${tag%%-*}"
           cargo_version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
           pkgbuild_version=$(grep -m1 '^pkgver=' packaging/arch/PKGBUILD | cut -d= -f2)
 
-          echo "tag=$tag  Cargo.toml=$cargo_version  PKGBUILD=$pkgbuild_version"
-          if [ "$tag" != "$cargo_version" ] || [ "$tag" != "$pkgbuild_version" ]; then
-            echo "::error::version mismatch — bump Cargo.toml and packaging/arch/PKGBUILD to $tag before tagging"
+          echo "tag=$tag  base=$base  Cargo.toml=$cargo_version  PKGBUILD=$pkgbuild_version"
+          if [ "$base" != "$cargo_version" ] || [ "$base" != "$pkgbuild_version" ]; then
+            echo "::error::version mismatch — bump Cargo.toml and packaging/arch/PKGBUILD to $base before tagging"
             exit 1
+          fi
+
+          if [ "$tag" != "$base" ]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
           echo "version=$tag" >> "$GITHUB_OUTPUT"
 
@@ -146,7 +161,9 @@ jobs:
 
   release:
     name: Publish release
-    needs: [linux-packages, arch-package]
+    # `verify` is in here for its outputs, not for ordering — the other two
+    # already depend on it.
+    needs: [verify, linux-packages, arch-package]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
@@ -167,3 +184,4 @@ jobs:
           files: dist/*
           generate_release_notes: true
           fail_on_unmatched_files: true
+          prerelease: ${{ needs.verify.outputs.prerelease }}

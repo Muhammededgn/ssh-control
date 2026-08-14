@@ -76,6 +76,10 @@ OS. CMake and the C compiler are for `aws-lc-sys`, which `russh` depends on.
 Run `ssh-control`. On first launch you set a master password (minimum 8
 characters); afterwards it asks for that password to unlock.
 
+`--version` and `--help` are the only flags; everything else is configured from
+inside the app. It is an interactive TUI and needs a terminal, so it says so
+rather than failing obscurely when piped or run from a service manager.
+
 | Screen | Keys |
 |---|---|
 | Server list | `Enter` connect · `a` add · `e` edit · `d` delete · `s` scripts · `l` lock · `F1` settings · `q` quit |
