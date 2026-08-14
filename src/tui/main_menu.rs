@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::config::{ServerEntry, SystemInfo};
 use crate::i18n::Strings;
+use crate::tui::widgets::{list_title_with_position, render_list_scrollbar};
 
 fn gib(bytes: u64) -> f64 {
     bytes as f64 / 1_073_741_824.0
@@ -182,12 +183,14 @@ impl MainMenuState {
                 .collect()
         };
 
+        let title = list_title_with_position(strings.main_menu_title, self.selected, servers.len());
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(strings.main_menu_title))
+            .block(Block::default().borders(Borders::ALL).title(title))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
             .highlight_symbol("> ");
 
         frame.render_stateful_widget(list, chunks[0], &mut self.list_state);
+        render_list_scrollbar(frame, chunks[0], self.selected, servers.len());
 
         let mut help_text = Vec::new();
 
@@ -201,5 +204,68 @@ impl MainMenuState {
         
         let help = Paragraph::new(help_text).block(Block::default().borders(Borders::ALL));
         frame.render_widget(help, chunks[1]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AuthMethod;
+    use crate::i18n::EN;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn servers(n: usize) -> Vec<ServerEntry> {
+        (0..n)
+            .map(|i| ServerEntry {
+                id: Uuid::new_v4(),
+                name: format!("host-{i}"),
+                host: format!("10.0.0.{i}"),
+                port: 22,
+                username: "root".to_string(),
+                auth: AuthMethod::password("hunter2".to_string()),
+                host_key_fingerprint: None,
+                system_info: None,
+                scripts: Vec::new(),
+            })
+            .collect()
+    }
+
+    fn render(state: &mut MainMenuState, servers: &[ServerEntry], height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(80, height)).expect("test backend");
+        terminal
+            .draw(|frame| state.render(frame, frame.area(), servers, None, &EN))
+            .expect("render");
+        terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    /// The issue's acceptance criterion: 40 servers on a 20-row terminal must
+    /// make it visually clear that the list scrolls and where you are in it.
+    #[test]
+    fn a_long_list_shows_where_you_are_and_that_there_is_more() {
+        let entries = servers(40);
+        let mut state = MainMenuState::new();
+
+        let top = render(&mut state, &entries, 20);
+        assert!(top.contains("(1/40)"), "the title should say which entry is selected");
+
+        for _ in 0..12 {
+            state.handle_key(KeyEvent::from(KeyCode::Down), &entries);
+        }
+        let moved = render(&mut state, &entries, 20);
+        assert!(moved.contains("(13/40)"), "the counter should follow the selection");
+        // The scrollbar track ratatui draws for a list this long.
+        assert!(moved.contains('█') || moved.contains('║'), "a scrollbar should be drawn");
+    }
+
+    /// A list that fits needs no scrollbar, but the counter still orients you.
+    #[test]
+    fn a_single_entry_gets_a_counter_but_no_scrollbar() {
+        let entries = servers(1);
+        let mut state = MainMenuState::new();
+
+        let rendered = render(&mut state, &entries, 20);
+        assert!(rendered.contains("(1/1)"));
+        assert!(!rendered.contains('█'), "one item cannot scroll, so the track is just noise");
     }
 }

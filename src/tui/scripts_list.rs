@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::config::Script;
 use crate::i18n::Strings;
+use crate::tui::widgets::{list_title_with_position, render_list_scrollbar};
 
 pub struct ScriptsListState {
     pub server_id: Uuid,
@@ -96,13 +97,18 @@ impl ScriptsListState {
                 .collect()
         };
 
-        let title = format!(" {} — {} ", strings.scripts_list_title, self.server_name);
+        let title = list_title_with_position(
+            &format!(" {} — {} ", strings.scripts_list_title, self.server_name),
+            self.selected,
+            scripts.len(),
+        );
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(title))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
             .highlight_symbol("> ");
 
         frame.render_stateful_widget(list, chunks[0], &mut self.list_state);
+        render_list_scrollbar(frame, chunks[0], self.selected, scripts.len());
 
         // The status goes on its own line and the hint is always pushed, so a
         // "Saved." never takes the keybindings away — which is exactly when
