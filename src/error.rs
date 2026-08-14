@@ -47,6 +47,13 @@ pub enum AppError {
     #[error("encryption error: {0}")]
     Crypto(String),
 
+    /// Another running instance holds this vault's advisory lock. Transient by
+    /// nature — deliberately distinct from the errors that mean the vault
+    /// itself cannot be opened, because the fix is "close the other window",
+    /// not "find your password".
+    #[error("another instance of ssh-control already has this vault open")]
+    VaultInUse,
+
     /// The OS credential store could not be reached or did not hold what was
     /// expected. Deliberately distinct from a missing entry, which is a normal
     /// outcome that means "this device is not enrolled" rather than a failure.
