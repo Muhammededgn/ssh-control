@@ -77,7 +77,7 @@ pub enum SettingsOutcome {
     /// Rebuild the vault's key slots for a different security mode. One
     /// outcome covers every transition — the old per-transition variants were
     /// four ways of saying the same thing.
-    ChangeSecurityMode { mode: AuthMode, password: Option<Zeroizing<String>>, totp_secret: Option<String> },
+    ChangeSecurityMode { mode: AuthMode, password: Option<Zeroizing<String>>, totp_secret: Option<Zeroizing<String>> },
 }
 
 impl SettingsState {

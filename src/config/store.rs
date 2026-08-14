@@ -84,8 +84,11 @@ impl ConfigStore {
         self.totp_only_secret_path().exists()
     }
 
-    pub fn read_totp_only_secret(&self) -> Result<String> {
-        Ok(fs::read_to_string(self.totp_only_secret_path())?)
+    /// Wrapped rather than bare: this is the key to the old vault, and it stays
+    /// in memory across the whole of `App::migrate_totp_only` while the
+    /// replacement is built.
+    pub fn read_totp_only_secret(&self) -> Result<Zeroizing<String>> {
+        Ok(Zeroizing::new(fs::read_to_string(self.totp_only_secret_path())?))
     }
 
     /// Deletes the migrated secret. Called only after the replacement vault has

@@ -1,6 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use totp_rs::{Algorithm, Secret, TOTP};
+use zeroize::Zeroizing;
 
 /// The four mutually-exclusive vault security modes, in increasing order of
 /// what they ask of the user. See the README's security model for the threat
@@ -35,8 +36,13 @@ const STEP_SECONDS: u64 = 30;
 
 /// Generates a fresh random 160-bit TOTP secret, base32-encoded for display
 /// and for pasting/scanning into an authenticator app.
-pub fn generate_secret_base32() -> String {
-    Secret::generate_secret().to_encoded().to_string()
+///
+/// Returns a wiping buffer rather than a bare `String` so the secret is
+/// protected from the moment it exists. In `TotpDaily` this value is what the
+/// device slot is gated on, so it is a credential in its own right — handing it
+/// out unprotected would put the burden on every caller to remember that.
+pub fn generate_secret_base32() -> Zeroizing<String> {
+    Zeroizing::new(Secret::generate_secret().to_encoded().to_string())
 }
 
 fn build(secret_base32: &str) -> Option<TOTP> {
@@ -47,8 +53,12 @@ fn build(secret_base32: &str) -> Option<TOTP> {
 /// `otpauth://` URI for the given secret — encodes into a QR code so an
 /// authenticator app can scan it directly instead of the user retyping the
 /// base32 secret by hand.
-pub fn otpauth_url(secret_base32: &str) -> Option<String> {
-    build(secret_base32).map(|t| t.get_url())
+///
+/// The URI embeds the secret, so it is a credential too, and the enrolment
+/// screen rebuilds it on every frame. A bare `String` here would leave one
+/// unwiped copy per redraw.
+pub fn otpauth_url(secret_base32: &str) -> Option<Zeroizing<String>> {
+    build(secret_base32).map(|t| Zeroizing::new(t.get_url()))
 }
 
 /// The outcome of the one code check in the app. Every caller goes through
@@ -102,6 +112,15 @@ pub fn verify_enrollment(secret_base32: &str, code: &str) -> bool {
     matches!(check_code(secret_base32, code, 0), CodeCheck::Accepted(_))
 }
 
+/// The code an authenticator would be showing right now. Test-only, and here
+/// rather than inside `mod tests` because `src/tui/setup.rs` needs it to drive
+/// the enrolment screen — `build` is private, so there is no other way to
+/// produce a live code from outside this module.
+#[cfg(test)]
+pub(crate) fn current_code(secret_base32: &str) -> String {
+    build(secret_base32).expect("valid secret should build a TOTP instance").generate_current().expect("system clock should be readable")
+}
+
 /// Compares two codes without an early exit on the first differing digit.
 /// The window is small and this is a local prompt, but leaking a prefix match
 /// through timing would hand an attacker the code one digit at a time.
@@ -116,10 +135,6 @@ fn codes_match(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn current_code(secret: &str) -> String {
-        build(secret).expect("valid secret should build a TOTP instance").generate_current().expect("system clock should be readable")
-    }
 
     #[test]
     fn generated_secret_round_trips_through_verify() {
