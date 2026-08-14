@@ -417,3 +417,29 @@ fn one_instance_can_reopen_its_own_vault() {
     store.load("a strong password").expect("the same store must not contend with itself");
     store.load("a strong password").expect("nor on a third open");
 }
+
+/// A pure additive field: a vault written before `last_connected_unix` existed
+/// must still open, with the field reading as "never connected" rather than
+/// failing to deserialize. This is why #10 needed no schema migration.
+#[test]
+fn a_vault_written_before_last_connected_existed_still_loads() {
+    let (_dir, store) = temp_store();
+    let unlocked = store.init("a strong password").unwrap();
+
+    // The shape an older binary wrote: a server entry with no
+    // `last_connected_unix` key at all.
+    let mut config = unlocked.config.clone();
+    config.servers.push(
+        serde_json::from_str::<ServerEntry>(
+            r#"{"id":"11111111-1111-1111-1111-111111111111","name":"old","host":"h",
+                "port":22,"username":"root",
+                "auth":{"Password":{"password":"hunter2"}}}"#,
+        )
+        .expect("an entry without the field must still deserialize"),
+    );
+    store.save(&config, &unlocked.master_key, &unlocked.slots).unwrap();
+
+    let reloaded = store.load("a strong password").unwrap();
+    assert_eq!(reloaded.config.servers.len(), 1);
+    assert_eq!(reloaded.config.servers[0].last_connected_unix, None);
+}

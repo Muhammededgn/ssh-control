@@ -76,6 +76,13 @@ pub struct ServerEntry {
     /// everything else here — no separate storage/crypto needed.
     #[serde(default)]
     pub system_info: Option<SystemInfo>,
+    /// When the user last connected, unix seconds.
+    ///
+    /// Separate from `system_info.fetched_at_unix`, which only moves when the
+    /// sysinfo probe succeeds — a connect to a host with a restricted shell
+    /// would otherwise never register as a connect at all.
+    #[serde(default)]
+    pub last_connected_unix: Option<u64>,
     /// User-defined automation for this server (see `ssh::script_runner`).
     /// Only the definitions are persisted here — a run's live output is
     /// ephemeral and never written back to the encrypted config.
@@ -94,6 +101,7 @@ impl ServerEntry {
             auth,
             host_key_fingerprint: None,
             system_info: None,
+            last_connected_unix: None,
             scripts: Vec::new(),
         }
     }

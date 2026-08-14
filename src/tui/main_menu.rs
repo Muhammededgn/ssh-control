@@ -6,6 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use uuid::Uuid;
 
+use crate::config::device::now_unix;
 use crate::config::{ServerEntry, SystemInfo};
 use crate::i18n::Strings;
 use crate::tui::widgets::{list_title_with_position, render_list_scrollbar};
@@ -63,6 +64,29 @@ fn format_system_info(info: &SystemInfo, strings: &Strings) -> String {
     }
 
     parts.join("  |  ")
+}
+
+/// "3m ago", "5h ago", "2d ago" — coarse on purpose. The question this answers
+/// is "which of these do I actually use", and to the minute is more precision
+/// than that needs.
+///
+/// A timestamp in the future (a clock corrected backwards, a vault carried
+/// across timezones badly) reads as "just now" rather than a negative age.
+fn format_relative_time(then_unix: u64, now_unix: u64, strings: &Strings) -> String {
+    let seconds = now_unix.saturating_sub(then_unix);
+    let minutes = seconds / 60;
+    let hours = minutes / 60;
+    let days = hours / 24;
+
+    if days > 0 {
+        format!("{days}{}", strings.time_days_suffix)
+    } else if hours > 0 {
+        format!("{hours}{}", strings.time_hours_suffix)
+    } else if minutes > 0 {
+        format!("{minutes}{}", strings.time_minutes_suffix)
+    } else {
+        strings.time_just_now.to_string()
+    }
 }
 
 pub struct MainMenuState {
@@ -158,6 +182,10 @@ impl MainMenuState {
             .constraints([Constraint::Min(3), Constraint::Length(4)])
             .split(area);
 
+        // Once per frame, not once per row: forty rows must not disagree about
+        // what "now" is.
+        let now = now_unix();
+
         let items: Vec<ListItem> = if servers.is_empty() {
             vec![ListItem::new(strings.main_menu_empty)]
         } else {
@@ -172,9 +200,24 @@ impl MainMenuState {
                         "{}  ({}@{}:{}, {})",
                         s.name, s.username, s.host, s.port, auth_label
                     ))];
+                    // One dim detail line carrying whatever is known. Built
+                    // from parts rather than keyed off `system_info` alone: a
+                    // host whose sysinfo probe never succeeds still has a
+                    // last-connected time worth showing.
+                    let mut details = Vec::new();
+                    if let Some(ts) = s.last_connected_unix {
+                        details.push(format!(
+                            "{}: {}",
+                            strings.last_connected_label,
+                            format_relative_time(ts, now, strings)
+                        ));
+                    }
                     if let Some(info) = &s.system_info {
+                        details.push(format_system_info(info, strings));
+                    }
+                    if !details.is_empty() {
                         lines.push(Line::from(Span::styled(
-                            format!("    {}", format_system_info(info, strings)),
+                            format!("    {}", details.join("  |  ")),
                             Style::default().fg(Color::DarkGray),
                         )));
                     }
@@ -226,6 +269,7 @@ mod tests {
                 auth: AuthMethod::password("hunter2".to_string()),
                 host_key_fingerprint: None,
                 system_info: None,
+                last_connected_unix: None,
                 scripts: Vec::new(),
             })
             .collect()
@@ -267,5 +311,44 @@ mod tests {
         let rendered = render(&mut state, &entries, 20);
         assert!(rendered.contains("(1/1)"));
         assert!(!rendered.contains('█'), "one item cannot scroll, so the track is just noise");
+    }
+
+    #[test]
+    fn relative_times_are_coarse_and_read_left_to_right() {
+        let m = 60;
+        let h = 60 * m;
+        let d = 24 * h;
+
+        assert_eq!(format_relative_time(1_000, 1_000 + 30, &EN), "just now");
+        assert_eq!(format_relative_time(1_000, 1_000 + 3 * m, &EN), "3m ago");
+        assert_eq!(format_relative_time(1_000, 1_000 + 5 * h, &EN), "5h ago");
+        assert_eq!(format_relative_time(1_000, 1_000 + 2 * d, &EN), "2d ago");
+    }
+
+    /// A clock corrected backwards must not produce a negative age or panic on
+    /// the subtraction.
+    #[test]
+    fn a_future_timestamp_reads_as_just_now() {
+        assert_eq!(format_relative_time(9_000, 1_000, &EN), "just now");
+    }
+
+    /// The issue's point: `fetched_at_unix` only moves when the sysinfo probe
+    /// succeeds, so a host with a restricted shell would otherwise look like it
+    /// had never been connected to.
+    #[test]
+    fn a_host_with_no_system_info_still_shows_when_it_was_last_reached() {
+        let mut entries = servers(1);
+        entries[0].last_connected_unix = Some(now_unix().saturating_sub(2 * 60 * 60));
+        assert!(entries[0].system_info.is_none());
+
+        let rendered = render(&mut MainMenuState::new(), &entries, 20);
+        assert!(rendered.contains("2h ago"), "the detail line must appear without system info");
+    }
+
+    #[test]
+    fn a_host_never_connected_to_gets_no_detail_line() {
+        let entries = servers(1);
+        let rendered = render(&mut MainMenuState::new(), &entries, 20);
+        assert!(!rendered.contains(EN.last_connected_label));
     }
 }

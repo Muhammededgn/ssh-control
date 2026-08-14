@@ -187,7 +187,10 @@ impl DeviceStore {
     }
 }
 
-fn now_unix() -> u64 {
+/// Wall-clock seconds, saturating to 0 rather than panicking on a clock set
+/// before the epoch. Shared with `app.rs`, which stamps the same kind of
+/// timestamp onto a server entry after a connect.
+pub(crate) fn now_unix() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 

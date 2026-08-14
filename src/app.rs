@@ -1387,13 +1387,21 @@ impl App {
 
                 // Best-effort: a probe failure (restricted shell, no tools
                 // installed, timeout) never blocks the interactive session.
-                if let Ok(info) = ssh::sysinfo::fetch(&mut connected.handle).await
-                    && let AppState::Unlocked(u) = &mut self.state {
-                        if let Some(e) = u.config.servers.iter_mut().find(|s| s.id == id) {
-                            e.system_info = Some(info);
+                //
+                // The timestamp is stamped either way, and outside the `if let`
+                // for that reason — a host whose probe never succeeds is still
+                // a host the user connects to, and would otherwise show as
+                // never having been reached.
+                let info = ssh::sysinfo::fetch(&mut connected.handle).await.ok();
+                if let AppState::Unlocked(u) = &mut self.state {
+                    if let Some(e) = u.config.servers.iter_mut().find(|s| s.id == id) {
+                        e.last_connected_unix = Some(device::now_unix());
+                        if info.is_some() {
+                            e.system_info = info;
                         }
-                        let _ = self.store.save(&u.config, &u.master_key, &u.slots);
                     }
+                    let _ = self.store.save(&u.config, &u.master_key, &u.slots);
+                }
 
                 // Auto-run scripts flagged `run_on_connect`, printed plain to
                 // the (still-suspended) primary screen buffer — same spirit
