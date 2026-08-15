@@ -1,9 +1,10 @@
 pub mod client;
 pub mod pty_bridge;
 pub mod script_runner;
-pub mod sftp;
 pub mod session;
+pub mod sftp;
 pub mod sysinfo;
+pub mod transfer;
 
 pub use client::HostKeyOutcome;
 pub use session::{Connected, Target, connect};

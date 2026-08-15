@@ -139,6 +139,33 @@ impl PaneState {
     }
 }
 
+/// What the transfer flow is doing right now, drawn over the panes.
+///
+/// Rendered from inside this screen's `render` rather than as a second draw
+/// call — the frame is cleared each time, so anything drawn separately would
+/// land on an empty screen or be wiped by the next redraw.
+pub struct TransferProgress {
+    pub title: String,
+    pub name: String,
+    pub file_index: usize,
+    pub file_count: usize,
+    pub done_bytes: u64,
+    pub total_bytes: u64,
+    /// The walk runs before any byte moves and has no denominator yet.
+    pub scanning: bool,
+}
+
+impl TransferProgress {
+    /// Percent complete, clamped, and defined when there is nothing to do —
+    /// an empty transfer is finished, not a division by zero.
+    pub fn percent(&self) -> u16 {
+        if self.total_bytes == 0 {
+            return 100;
+        }
+        ((self.done_bytes.min(self.total_bytes) as f64 / self.total_bytes as f64) * 100.0) as u16
+    }
+}
+
 pub struct FileBrowserState {
     pub server_id: Uuid,
     pub server_name: String,
@@ -147,6 +174,7 @@ pub struct FileBrowserState {
     pub focus: Side,
     show_hidden: bool,
     pub status: Option<String>,
+    pub progress: Option<TransferProgress>,
 }
 
 pub enum FileBrowserOutcome {
@@ -169,6 +197,7 @@ impl FileBrowserState {
             focus: Side::Local,
             show_hidden: false,
             status: None,
+            progress: None,
         };
         state.reload_local();
         state
@@ -329,7 +358,47 @@ impl FileBrowserState {
         }
         footer.push(Line::from(strings.file_browser_hint));
         frame.render_widget(Paragraph::new(footer).block(Block::default().borders(Borders::ALL)), rows[1]);
+
+        if let Some(progress) = &self.progress {
+            render_progress(frame, area, progress, strings);
+        }
     }
+}
+
+fn render_progress(frame: &mut Frame, area: Rect, progress: &TransferProgress, strings: &Strings) {
+    let mut lines = vec![Line::from(Span::styled(
+        ellipsize_middle(&progress.name, 54),
+        Style::default().add_modifier(Modifier::BOLD),
+    ))];
+
+    if progress.scanning {
+        lines.push(Line::from(format!(
+            "{}{} · {}",
+            strings.transfer_scanning_prefix,
+            progress.file_count,
+            format_size(progress.total_bytes)
+        )));
+    } else {
+        // A bar drawn from block characters rather than ratatui's Gauge: the
+        // same information, and it stays legible on a terminal with no colour.
+        let filled = (progress.percent() as usize * 40) / 100;
+        lines.push(Line::from(format!("[{}{}] {:>3}%", "█".repeat(filled), "░".repeat(40 - filled), progress.percent())));
+        lines.push(Line::from(format!(
+            "{}/{}  ·  {} / {}",
+            progress.file_index,
+            progress.file_count,
+            format_size(progress.done_bytes),
+            format_size(progress.total_bytes)
+        )));
+    }
+    lines.push(Line::from(Span::styled(strings.transfer_hint, Style::default().fg(Color::DarkGray))));
+
+    let box_area = super::widgets::centered_rect(60, lines.len() as u16 + 2, area);
+    frame.render_widget(ratatui::widgets::Clear, box_area);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(progress.title.clone())),
+        box_area,
+    );
 }
 
 fn render_pane(frame: &mut Frame, area: Rect, pane: &mut PaneState, label: &str, focused: bool, strings: &Strings) {
@@ -622,6 +691,25 @@ mod tests {
         let mut state = browser();
         let rendered = render(&mut state, 40, 20);
         assert!(rendered.contains("too small"));
+    }
+
+    /// A transfer of nothing is complete, not a division by zero, and a
+    /// counter that overshoots must not print 103%.
+    #[test]
+    fn progress_percentages_are_defined_at_both_ends() {
+        let progress = |done, total| TransferProgress {
+            title: String::new(),
+            name: String::new(),
+            file_index: 0,
+            file_count: 0,
+            done_bytes: done,
+            total_bytes: total,
+            scanning: false,
+        };
+        assert_eq!(progress(0, 0).percent(), 100);
+        assert_eq!(progress(0, 100).percent(), 0);
+        assert_eq!(progress(50, 100).percent(), 50);
+        assert_eq!(progress(150, 100).percent(), 100);
     }
 
     #[test]

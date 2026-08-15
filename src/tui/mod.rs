@@ -2,6 +2,7 @@ pub mod confirm;
 pub mod file_browser;
 pub mod help;
 pub mod main_menu;
+pub mod overwrite;
 pub mod script_form;
 pub mod script_run;
 pub mod scripts_list;

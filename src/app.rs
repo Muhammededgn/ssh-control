@@ -1,7 +1,8 @@
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -26,9 +27,10 @@ use crate::tui::server_form::{FormMode, FormOutcome, ServerFormData, ServerFormS
 use crate::tui::settings::{SettingsOutcome, SettingsState};
 use crate::tui::setup::{SetupOutcome, SetupState};
 use crate::tui::totp_prompt::{TotpPromptOutcome, TotpPromptState};
-use crate::ssh::sftp;
-use crate::tui::file_browser::{BrowserEntry, FileBrowserOutcome, FileBrowserState};
+use crate::ssh::{sftp, transfer};
+use crate::tui::file_browser::{BrowserEntry, FileBrowserOutcome, FileBrowserState, Side, TransferProgress};
 use crate::tui::help::{self, HelpTopic};
+use crate::tui::overwrite::{Decision, OverwriteChoice, OverwriteState};
 use crate::tui::totp_unlock::{TotpUnlockOutcome, TotpUnlockState};
 use crate::tui::unlock::{UnlockMode, UnlockOutcome, UnlockState};
 
@@ -162,6 +164,7 @@ enum NextStep {
     ScriptRunClose,
     GoFiles(Uuid),
     FilesBack,
+    FilesTransfer,
     FilesOpenRemote(String),
     FilesRefresh,
 }
@@ -909,7 +912,7 @@ impl App {
                     FileBrowserOutcome::Back => NextStep::FilesBack,
                     FileBrowserOutcome::OpenRemote(path) => NextStep::FilesOpenRemote(path),
                     FileBrowserOutcome::RefreshRemote => NextStep::FilesRefresh,
-                    FileBrowserOutcome::Transfer => NextStep::None,
+                    FileBrowserOutcome::Transfer => NextStep::FilesTransfer,
                 },
             }
         };
@@ -1064,6 +1067,7 @@ impl App {
             NextStep::GoFiles(id) => self.open_files_flow(terminal, id).await?,
             NextStep::FilesOpenRemote(path) => self.list_remote_flow(terminal, Some(path)).await?,
             NextStep::FilesRefresh => self.list_remote_flow(terminal, None).await?,
+            NextStep::FilesTransfer => self.transfer_flow(terminal).await?,
             NextStep::FilesBack => {
                 self.remember_browser_dirs();
                 self.drop_remote();
@@ -1735,6 +1739,86 @@ impl App {
         self.with_unlocked(|u| u.status = Some(StatusMessage::new(text)));
     }
 
+    /// Scans, asks about collisions, then moves the bytes.
+    ///
+    /// The three phases are deliberate. Scanning first is what makes a real
+    /// percentage possible, and resolving every collision *before* the copy
+    /// starts means the byte loop never has to stop for a question — a prompt
+    /// in the middle of it would have to run while a `&mut SftpClient` is held
+    /// over a half-written file.
+    async fn transfer_flow(&mut self, terminal: &mut TerminalGuard) -> Result<()> {
+        let strings = self.lang.strings();
+
+        // Everything that crosses the await is taken out as a local first, the
+        // screen included — same as `run_script_flow`.
+        let Some(mut browser) = self.take_browser() else {
+            return Ok(());
+        };
+        let (side, dest) = browser.direction();
+        let sources: Vec<(String, bool)> = browser
+            .pane(side)
+            .transfer_selection()
+            .into_iter()
+            .map(|e| (join_for(side, &browser.pane(side).cwd, &e.name), e.is_dir))
+            .collect();
+
+        if sources.is_empty() || self.remote.as_ref().is_none_or(|r| r.server_id != browser.server_id) {
+            browser.status = Some(strings.transfer_nothing_selected.to_string());
+            self.put_browser(browser);
+            return Ok(());
+        }
+
+        let direction = match side {
+            Side::Local => transfer::Direction::Upload,
+            Side::Remote => transfer::Direction::Download,
+        };
+        let title = match direction {
+            transfer::Direction::Upload => strings.transfer_title_upload,
+            transfer::Direction::Download => strings.transfer_title_download,
+        };
+
+        let mut session = self.remote.take().expect("checked above");
+        let outcome = run_transfer(&mut session.sftp, terminal, &mut browser, direction, &sources, &dest, title, strings).await;
+        self.remote = Some(session);
+
+        let status = match outcome {
+            Ok(summary) => Some(summarize(&summary, strings)),
+            Err(e) => {
+                self.drop_remote_if_fatal(&e);
+                Some(format!("{}{e}", strings.sftp_error_prefix))
+            }
+        };
+
+        // Both sides may have changed: the destination has new files, and the
+        // source is where a failed `.part` would have been cleaned up.
+        browser.progress = None;
+        browser.status = status;
+        browser.reload_local();
+        let refresh = browser.remote.cwd.clone();
+        self.put_browser(browser);
+        self.list_remote_flow(terminal, Some(refresh)).await
+    }
+
+    /// Takes the browser out of the screen so it can be borrowed across an
+    /// await. The screen is left on the menu only if something goes wrong
+    /// before `put_browser` runs, which no path does.
+    fn take_browser(&mut self) -> Option<FileBrowserState> {
+        let AppState::Unlocked(u) = &mut self.state else {
+            return None;
+        };
+        match std::mem::replace(&mut u.screen, Screen::MainMenu(MainMenuState::new())) {
+            Screen::FileBrowser(browser) => Some(browser),
+            other => {
+                u.screen = other;
+                None
+            }
+        }
+    }
+
+    fn put_browser(&mut self, browser: FileBrowserState) {
+        self.with_unlocked(|u| u.screen = Screen::FileBrowser(browser));
+    }
+
     /// Remembers where both panes were pointed, so the next visit starts there.
     ///
     /// Saved on the way out rather than on every `cd`: a save re-encrypts and
@@ -1763,6 +1847,239 @@ impl App {
         }
     }
 
+}
+
+/// Joins a selected name onto its pane's directory, on whichever side it came
+/// from: remote paths are always `/`-separated, local ones go through `Path`.
+fn join_for(side: Side, cwd: &str, name: &str) -> String {
+    match side {
+        Side::Remote => crate::tui::file_browser::remote_join(cwd, name),
+        Side::Local => PathBuf::from(cwd).join(name).to_string_lossy().into_owned(),
+    }
+}
+
+/// One line describing what a finished run did.
+fn summarize(summary: &transfer::TransferSummary, strings: &Strings) -> String {
+    if summary.cancelled && summary.files == 0 {
+        return strings.transfer_cancelled.to_string();
+    }
+    let mut text = format!(
+        "{}{}{}{}",
+        strings.transfer_done_prefix,
+        summary.files,
+        strings.transfer_done_separator,
+        crate::tui::widgets::format_size(summary.bytes)
+    );
+    if summary.cancelled {
+        text.push_str(" — ");
+        text.push_str(strings.transfer_cancelled);
+    }
+    if let Some(first) = summary.failures.first() {
+        text.push_str(" — ");
+        text.push_str(strings.transfer_failed_prefix);
+        text.push_str(first);
+        if summary.failures.len() > 1 {
+            text.push_str(&format!(" (+{})", summary.failures.len() - 1));
+        }
+    }
+    text
+}
+
+
+/// Drives one transfer: scan, ask about collisions, copy.
+///
+/// Free-standing rather than a method because it borrows the sftp session and
+/// the screen state as plain locals — both were taken out of `self` before the
+/// first await, which is what keeps the `NextStep` rule intact.
+#[allow(clippy::too_many_arguments, reason = "every argument is already a local the flow had to take out of self")]
+async fn run_transfer(
+    sftp: &mut sftp::SftpClient<russh::ChannelStream<russh::client::Msg>>,
+    terminal: &mut TerminalGuard,
+    browser: &mut FileBrowserState,
+    direction: transfer::Direction,
+    sources: &[(String, bool)],
+    dest: &str,
+    title: &'static str,
+    strings: &'static Strings,
+) -> Result<transfer::TransferSummary> {
+    // Phase 1: the walk. It can take a while on a deep tree, so it reports as
+    // it goes and can be cancelled like the copy itself.
+    browser.progress = Some(TransferProgress {
+        title: title.to_string(),
+        name: String::new(),
+        file_index: 0,
+        file_count: 0,
+        done_bytes: 0,
+        total_bytes: 0,
+        scanning: true,
+    });
+
+    let mut cancelled = false;
+    let mut last_draw = Instant::now();
+    let plan = transfer::plan(sftp, direction, sources, dest, |event| {
+        if let transfer::TransferEvent::Scanning { files, bytes } = event
+            && let Some(progress) = &mut browser.progress
+        {
+            progress.file_count = files;
+            progress.total_bytes = bytes;
+        }
+        if redraw_and_poll_cancel(terminal, browser, strings, &mut last_draw, true) {
+            cancelled = true;
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    })
+    .await;
+
+    if cancelled {
+        return Ok(transfer::TransferSummary { cancelled: true, ..Default::default() });
+    }
+    let mut plan = plan?;
+
+    // Phase 2: every collision is settled before a byte moves.
+    if !resolve_conflicts(terminal, browser, &mut plan, strings)? {
+        return Ok(transfer::TransferSummary { cancelled: true, ..Default::default() });
+    }
+
+    // Phase 3: the bytes.
+    let total_bytes = plan.planned_bytes();
+    let file_count = plan.file_count();
+    if let Some(progress) = &mut browser.progress {
+        progress.scanning = false;
+        progress.total_bytes = total_bytes;
+        progress.file_count = file_count;
+        progress.file_index = 0;
+        progress.done_bytes = 0;
+    }
+
+    let mut last_draw = Instant::now();
+    let summary = transfer::run(sftp, direction, &plan, |event| {
+        if let Some(progress) = &mut browser.progress {
+            match event {
+                transfer::TransferEvent::ItemStarted { name, .. } => {
+                    progress.name = name.to_string();
+                    progress.file_index += 1;
+                }
+                transfer::TransferEvent::Progress { done_bytes } => progress.done_bytes = done_bytes,
+                _ => {}
+            }
+        }
+        if redraw_and_poll_cancel(terminal, browser, strings, &mut last_draw, false) {
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    })
+    .await;
+
+    Ok(summary)
+}
+
+/// Redraws at most every `REDRAW_INTERVAL`, but polls for a cancel key every
+/// single time.
+///
+/// The two are deliberately on different clocks: a 32 KiB chunk on a LAN would
+/// otherwise redraw thousands of times a second, while `poll(ZERO)` is one
+/// cheap syscall and Esc has to feel immediate.
+fn redraw_and_poll_cancel(
+    terminal: &mut TerminalGuard,
+    browser: &mut FileBrowserState,
+    strings: &Strings,
+    last_draw: &mut Instant,
+    force: bool,
+) -> bool {
+    const REDRAW_INTERVAL: Duration = Duration::from_millis(50);
+
+    if force || last_draw.elapsed() >= REDRAW_INTERVAL {
+        *last_draw = Instant::now();
+        let _ = terminal.terminal.draw(|frame| {
+            let area = frame.area();
+            browser.render(frame, area, strings);
+        });
+    }
+    cancel_requested()
+}
+
+/// Drains whatever the user typed during a transfer, looking for Esc or
+/// Ctrl+C. These keystrokes never reach `App::run` — it is blocked inside the
+/// flow's await — so they have to be read here or not at all.
+fn cancel_requested() -> bool {
+    let mut cancel = false;
+    while event::poll(Duration::ZERO).unwrap_or(false) {
+        match event::read() {
+            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                let ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+                if key.code == KeyCode::Esc || ctrl_c {
+                    cancel = true;
+                }
+            }
+            // Resizes and mouse events are drained rather than left to pile up
+            // behind the transfer.
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    cancel
+}
+
+/// Asks about every file that would be replaced. Returns `false` if the user
+/// cancelled the whole transfer.
+///
+/// A blocking `event::read()` is right here: the run loop is not running, and
+/// this is the one moment the flow genuinely has nothing to do but wait.
+fn resolve_conflicts(
+    terminal: &mut TerminalGuard,
+    browser: &mut FileBrowserState,
+    plan: &mut transfer::TransferPlan,
+    strings: &Strings,
+) -> Result<bool> {
+    let conflicts = plan.conflicts();
+    let mut sticky: Option<Decision> = None;
+
+    for (position, index) in conflicts.iter().enumerate() {
+        let remaining = conflicts.len() - position;
+        let decision = match sticky {
+            Some(decision) => decision,
+            None => {
+                let name = plan.items[*index].display_name().to_string();
+                let mut prompt = OverwriteState::new(name, remaining);
+                loop {
+                    let _ = terminal.terminal.draw(|frame| {
+                        let area = frame.area();
+                        browser.render(frame, area, strings);
+                        prompt.render(frame, area, strings);
+                    });
+
+                    let Event::Key(key) = event::read().map_err(AppError::Io)? else {
+                        continue;
+                    };
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    match prompt.handle_key(key) {
+                        OverwriteChoice::None => continue,
+                        OverwriteChoice::Cancel => return Ok(false),
+                        OverwriteChoice::Overwrite => {
+                            if prompt.apply_to_all {
+                                sticky = Some(Decision::Overwrite);
+                            }
+                            break Decision::Overwrite;
+                        }
+                        OverwriteChoice::Skip => {
+                            if prompt.apply_to_all {
+                                sticky = Some(Decision::Skip);
+                            }
+                            break Decision::Skip;
+                        }
+                    }
+                }
+            }
+        };
+
+        if decision == Decision::Skip {
+            plan.items[*index].skip = Some(transfer::SkipReason::Exists);
+        }
+    }
+    Ok(true)
 }
 
 /// Server entries as browser rows, applying the same dotfile filter the local

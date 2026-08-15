@@ -44,6 +44,7 @@ pub const FX_OK: u32 = 0;
 pub const FX_EOF: u32 = 1;
 pub const FX_NO_SUCH_FILE: u32 = 2;
 pub const FX_PERMISSION_DENIED: u32 = 3;
+pub const FX_FAILURE: u32 = 4;
 pub const FX_NO_CONNECTION: u32 = 6;
 pub const FX_CONNECTION_LOST: u32 = 7;
 
