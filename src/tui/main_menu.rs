@@ -89,9 +89,30 @@ fn format_relative_time(then_unix: u64, now_unix: u64, strings: &Strings) -> Str
     }
 }
 
+/// `selected` indexes the *visible* list, not `servers`. Everything that has to
+/// name a server goes through `visible_indices` — resolving `servers[selected]`
+/// directly is the bug this screen is shaped to prevent, because with a filter
+/// on, the two disagree.
+///
+/// `typing` is the `/` mode: while it is set every character key is filter text,
+/// so the single-letter shortcuts (a/e/d/s/l/q) are deliberately unreachable.
+/// `Enter` leaves it — connecting to whatever is selected — and `Esc` leaves it
+/// *and* clears the filter, so there is always a way back to the full list.
 pub struct MainMenuState {
     selected: usize,
     list_state: ListState,
+    filter: String,
+    typing: bool,
+}
+
+/// Case-insensitive substring over the three fields the user would type: the
+/// name they gave it, and the `user@host` they would otherwise have to remember.
+/// Port and auth kind are deliberately not searched — nobody looks for "22".
+fn matches(entry: &ServerEntry, needle: &str) -> bool {
+    let needle = needle.to_lowercase();
+    entry.name.to_lowercase().contains(&needle)
+        || entry.host.to_lowercase().contains(&needle)
+        || entry.username.to_lowercase().contains(&needle)
 }
 
 pub enum MainMenuAction {
@@ -116,55 +137,151 @@ impl MainMenuState {
     pub fn new() -> Self {
         let mut list_state = ListState::default();
         list_state.select(Some(0));
-        Self { selected: 0, list_state }
+        Self { selected: 0, list_state, filter: String::new(), typing: false }
+    }
+
+    /// The entries currently on screen, as indices into `servers`. The one
+    /// mapping every key handler resolves through.
+    fn visible_indices(&self, servers: &[ServerEntry]) -> Vec<usize> {
+        if self.filter.is_empty() {
+            return (0..servers.len()).collect();
+        }
+        servers
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| matches(s, &self.filter))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn selected_entry<'a>(&self, servers: &'a [ServerEntry]) -> Option<&'a ServerEntry> {
+        self.visible_indices(servers).get(self.selected).and_then(|&i| servers.get(i))
+    }
+
+    fn move_selection(&mut self, delta: isize, visible_len: usize) {
+        if visible_len == 0 {
+            self.selected = 0;
+        } else if delta < 0 {
+            self.selected = self.selected.saturating_sub(1);
+        } else if self.selected + 1 < visible_len {
+            self.selected += 1;
+        }
+        self.list_state.select(Some(self.selected));
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, servers: &[ServerEntry]) -> MainMenuAction {
+        if self.typing {
+            return self.handle_filter_key(key, servers);
+        }
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
-                if self.selected > 0 {
-                    self.selected -= 1;
-                    self.list_state.select(Some(self.selected));
-                }
+                self.move_selection(-1, self.visible_indices(servers).len());
                 MainMenuAction::None
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if !servers.is_empty() && self.selected + 1 < servers.len() {
-                    self.selected += 1;
-                    self.list_state.select(Some(self.selected));
-                }
+                self.move_selection(1, self.visible_indices(servers).len());
                 MainMenuAction::None
             }
-            KeyCode::Enter => servers
-                .get(self.selected)
+            KeyCode::Enter => self
+                .selected_entry(servers)
                 .map(|s| MainMenuAction::Connect(s.id))
                 .unwrap_or(MainMenuAction::None),
+            KeyCode::Char('/') => {
+                self.typing = true;
+                MainMenuAction::None
+            }
             KeyCode::Char('a') => MainMenuAction::Add,
-            KeyCode::Char('e') => servers
-                .get(self.selected)
+            KeyCode::Char('e') => self
+                .selected_entry(servers)
                 .map(|s| MainMenuAction::Edit(s.id))
                 .unwrap_or(MainMenuAction::None),
-            KeyCode::Char('d') => servers
-                .get(self.selected)
+            KeyCode::Char('d') => self
+                .selected_entry(servers)
                 .map(|s| MainMenuAction::Delete(s.id))
                 .unwrap_or(MainMenuAction::None),
-            KeyCode::Char('s') => servers
-                .get(self.selected)
+            KeyCode::Char('s') => self
+                .selected_entry(servers)
                 .map(|s| MainMenuAction::Scripts(s.id))
                 .unwrap_or(MainMenuAction::None),
             KeyCode::Char('l') => MainMenuAction::Lock,
             KeyCode::F(1) => MainMenuAction::Settings,
+            // With a filter applied, Esc is the way back to the whole list; it
+            // only quits once there is nothing left to clear.
+            KeyCode::Esc if !self.filter.is_empty() => {
+                self.clear_filter(servers);
+                MainMenuAction::None
+            }
             KeyCode::Char('q') | KeyCode::Esc => MainMenuAction::Quit,
             _ => MainMenuAction::None,
         }
     }
 
+    /// The `/` mode. Editing the filter re-anchors the selection on the entry
+    /// that was selected before the keystroke where it survived the narrowing,
+    /// and on the first match otherwise — so typing does not silently walk the
+    /// selection down the list.
+    fn handle_filter_key(&mut self, key: KeyEvent, servers: &[ServerEntry]) -> MainMenuAction {
+        match key.code {
+            KeyCode::Char(c) => {
+                let anchor = self.selected_entry(servers).map(|s| s.id);
+                self.filter.push(c);
+                self.reanchor(servers, anchor);
+                MainMenuAction::None
+            }
+            KeyCode::Backspace => {
+                let anchor = self.selected_entry(servers).map(|s| s.id);
+                self.filter.pop();
+                self.reanchor(servers, anchor);
+                MainMenuAction::None
+            }
+            KeyCode::Up => {
+                self.move_selection(-1, self.visible_indices(servers).len());
+                MainMenuAction::None
+            }
+            KeyCode::Down => {
+                self.move_selection(1, self.visible_indices(servers).len());
+                MainMenuAction::None
+            }
+            // Enter connects to what is visibly selected and leaves `/` mode
+            // with the filter still applied, so the shortcuts come back.
+            KeyCode::Enter => {
+                self.typing = false;
+                self.selected_entry(servers)
+                    .map(|s| MainMenuAction::Connect(s.id))
+                    .unwrap_or(MainMenuAction::None)
+            }
+            KeyCode::Esc => {
+                self.typing = false;
+                self.clear_filter(servers);
+                MainMenuAction::None
+            }
+            _ => MainMenuAction::None,
+        }
+    }
+
+    fn reanchor(&mut self, servers: &[ServerEntry], anchor: Option<Uuid>) {
+        let visible = self.visible_indices(servers);
+        self.selected = anchor
+            .and_then(|id| visible.iter().position(|&i| servers[i].id == id))
+            .unwrap_or(0);
+        self.list_state.select(Some(self.selected));
+    }
+
+    /// Dropping the filter keeps the user where they were: the entry that was
+    /// selected in the narrowed list stays selected in the full one.
+    fn clear_filter(&mut self, servers: &[ServerEntry]) {
+        let anchor = self.selected_entry(servers).map(|s| s.id);
+        self.filter.clear();
+        self.reanchor(servers, anchor);
+    }
+
     /// Clamps the selection after the server list changes (add/delete).
     pub fn clamp_selection(&mut self, servers: &[ServerEntry]) {
-        if servers.is_empty() {
+        let visible = self.visible_indices(servers).len();
+        if visible == 0 {
             self.selected = 0;
-        } else if self.selected >= servers.len() {
-            self.selected = servers.len() - 1;
+        } else if self.selected >= visible {
+            self.selected = visible - 1;
         }
         self.list_state.select(Some(self.selected));
     }
@@ -177,9 +294,15 @@ impl MainMenuState {
         status: Option<&str>,
         strings: &Strings,
     ) {
+        let visible = self.visible_indices(servers);
+        let filter_shown = self.typing || !self.filter.is_empty();
+
+        // The footer grows with what it has to say rather than reserving a
+        // blank row: on a short terminal every row belongs to the list.
+        let footer_lines = 1 + u16::from(status.is_some()) + u16::from(filter_shown);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(4)])
+            .constraints([Constraint::Min(3), Constraint::Length(footer_lines + 2)])
             .split(area);
 
         // Once per frame, not once per row: forty rows must not disagree about
@@ -188,9 +311,12 @@ impl MainMenuState {
 
         let items: Vec<ListItem> = if servers.is_empty() {
             vec![ListItem::new(strings.main_menu_empty)]
+        } else if visible.is_empty() {
+            vec![ListItem::new(strings.main_menu_no_match)]
         } else {
-            servers
+            visible
                 .iter()
+                .map(|&i| &servers[i])
                 .map(|s| {
                     let auth_label = match &s.auth {
                         crate::config::AuthMethod::Password { .. } => strings.auth_label_password,
@@ -226,16 +352,26 @@ impl MainMenuState {
                 .collect()
         };
 
-        let title = list_title_with_position(strings.main_menu_title, self.selected, servers.len());
+        let title = list_title_with_position(strings.main_menu_title, self.selected, visible.len());
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(title))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
             .highlight_symbol("> ");
 
         frame.render_stateful_widget(list, chunks[0], &mut self.list_state);
-        render_list_scrollbar(frame, chunks[0], self.selected, servers.len());
+        render_list_scrollbar(frame, chunks[0], self.selected, visible.len());
 
         let mut help_text = Vec::new();
+
+        if filter_shown {
+            // The block cursor is what says "this is taking your keystrokes";
+            // a filter left applied after Enter shows the text without one.
+            let caret = if self.typing { "█" } else { "" };
+            help_text.push(Line::from(Span::styled(
+                format!("{}{}{caret}", strings.main_menu_filter_label, self.filter),
+                Style::default().fg(Color::Cyan),
+            )));
+        }
 
         if let Some(s) = status {
             help_text.push(Line::from(Span::styled(
@@ -243,8 +379,12 @@ impl MainMenuState {
                 Style::default().fg(Color::Yellow),
             )));
         }
-        help_text.push(Line::from(strings.main_menu_hint));
-        
+        help_text.push(Line::from(if self.typing {
+            strings.main_menu_filter_hint
+        } else {
+            strings.main_menu_hint
+        }));
+
         let help = Paragraph::new(help_text).block(Block::default().borders(Borders::ALL));
         frame.render_widget(help, chunks[1]);
     }
@@ -343,6 +483,127 @@ mod tests {
 
         let rendered = render(&mut MainMenuState::new(), &entries, 20);
         assert!(rendered.contains("2h ago"), "the detail line must appear without system info");
+    }
+
+    fn press(state: &mut MainMenuState, servers: &[ServerEntry], code: KeyCode) -> MainMenuAction {
+        state.handle_key(KeyEvent::from(code), servers)
+    }
+
+    fn type_filter(state: &mut MainMenuState, servers: &[ServerEntry], text: &str) {
+        press(state, servers, KeyCode::Char('/'));
+        for c in text.chars() {
+            press(state, servers, KeyCode::Char(c));
+        }
+    }
+
+    /// The issue's acceptance criterion, and the whole reason the visible-index
+    /// mapping exists: with a filter on, Enter must connect to the row the user
+    /// can see, not to `servers[selected]`.
+    #[test]
+    fn enter_connects_to_the_visibly_selected_server() {
+        let mut entries = servers(4);
+        entries[2].name = "prod-db".to_string();
+        let mut state = MainMenuState::new();
+
+        type_filter(&mut state, &entries, "prod");
+        match press(&mut state, &entries, KeyCode::Enter) {
+            MainMenuAction::Connect(id) => assert_eq!(id, entries[2].id),
+            _ => panic!("Enter should connect"),
+        }
+    }
+
+    /// The other half of the same mapping: edit/delete/scripts resolve through
+    /// it too, so a filtered list cannot delete the wrong server.
+    #[test]
+    fn the_single_letter_shortcuts_also_follow_the_filter() {
+        let mut entries = servers(4);
+        entries[3].host = "10.9.9.9".to_string();
+        let mut state = MainMenuState::new();
+
+        type_filter(&mut state, &entries, "10.9");
+        // Enter leaves `/` mode with the filter still applied.
+        press(&mut state, &entries, KeyCode::Enter);
+        match press(&mut state, &entries, KeyCode::Char('d')) {
+            MainMenuAction::Delete(id) => assert_eq!(id, entries[3].id),
+            _ => panic!("d should delete the visible selection"),
+        }
+    }
+
+    #[test]
+    fn the_filter_matches_name_host_and_username() {
+        let mut entries = servers(3);
+        entries[0].name = "alpha".to_string();
+        entries[1].host = "alpha.example.com".to_string();
+        entries[2].username = "alpha-admin".to_string();
+        let state = MainMenuState { selected: 0, list_state: ListState::default(), filter: "ALPHA".to_string(), typing: false };
+
+        assert_eq!(state.visible_indices(&entries), vec![0, 1, 2]);
+    }
+
+    /// While `/` is held open every character is filter text — otherwise typing
+    /// a server called "dashboard" would delete one.
+    #[test]
+    fn typing_a_shortcut_letter_while_filtering_does_not_fire_it() {
+        let entries = servers(3);
+        let mut state = MainMenuState::new();
+
+        press(&mut state, &entries, KeyCode::Char('/'));
+        assert!(matches!(press(&mut state, &entries, KeyCode::Char('d')), MainMenuAction::None));
+        assert!(matches!(press(&mut state, &entries, KeyCode::Char('q')), MainMenuAction::None));
+    }
+
+    /// Esc clears before it quits, so a filter can never trap the user with a
+    /// list that looks half-empty.
+    #[test]
+    fn esc_clears_the_filter_first_and_quits_second() {
+        let entries = servers(3);
+        let mut state = MainMenuState::new();
+
+        type_filter(&mut state, &entries, "host-1");
+        press(&mut state, &entries, KeyCode::Enter);
+        assert!(matches!(press(&mut state, &entries, KeyCode::Esc), MainMenuAction::None));
+        assert_eq!(state.visible_indices(&entries).len(), 3, "the whole list should be back");
+        assert!(matches!(press(&mut state, &entries, KeyCode::Esc), MainMenuAction::Quit));
+    }
+
+    /// Clearing keeps you on the same server rather than snapping to the top.
+    #[test]
+    fn clearing_the_filter_keeps_the_selected_server_selected() {
+        let entries = servers(5);
+        let mut state = MainMenuState::new();
+
+        type_filter(&mut state, &entries, "host-3");
+        press(&mut state, &entries, KeyCode::Esc);
+        assert_eq!(state.selected_entry(&entries).map(|s| s.id), Some(entries[3].id));
+    }
+
+    /// A filter that matches nothing must not leave the previous selection
+    /// live: pressing Enter into an empty list has to be a no-op.
+    #[test]
+    fn a_filter_matching_nothing_selects_nothing() {
+        let entries = servers(3);
+        let mut state = MainMenuState::new();
+
+        type_filter(&mut state, &entries, "nonexistent");
+        assert!(state.selected_entry(&entries).is_none());
+        assert!(matches!(press(&mut state, &entries, KeyCode::Enter), MainMenuAction::None));
+
+        let rendered = render(&mut state, &entries, 20);
+        assert!(rendered.contains("no server matches"));
+    }
+
+    /// The counter has to count the filtered list; "(1/40)" over three visible
+    /// rows would be worse than no counter at all.
+    #[test]
+    fn the_counter_and_footer_reflect_the_filter() {
+        let entries = servers(40);
+        let mut state = MainMenuState::new();
+
+        type_filter(&mut state, &entries, "host-1");
+        let rendered = render(&mut state, &entries, 24);
+        // host-1 and host-10..host-19.
+        assert!(rendered.contains("(1/11)"), "the counter should count matches");
+        assert!(rendered.contains("Filter: host-1"), "the filter text should be visible");
     }
 
     #[test]
