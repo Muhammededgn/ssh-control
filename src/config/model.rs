@@ -88,6 +88,17 @@ pub struct ServerEntry {
     /// ephemeral and never written back to the encrypted config.
     #[serde(default)]
     pub scripts: Vec<Script>,
+    /// Where the file browser's panes were last pointed for this server.
+    ///
+    /// A convenience, never a promise: a directory that has since vanished
+    /// falls back to the login directory rather than becoming an error. Both
+    /// are additive and `serde(default)`, so an older vault reads back with
+    /// `None` and nothing stored changes meaning — no schema bump, same
+    /// reasoning as `ScriptStep::timeout_secs`.
+    #[serde(default)]
+    pub last_remote_dir: Option<String>,
+    #[serde(default)]
+    pub last_local_dir: Option<String>,
 }
 
 impl ServerEntry {
@@ -103,6 +114,8 @@ impl ServerEntry {
             system_info: None,
             last_connected_unix: None,
             scripts: Vec::new(),
+            last_remote_dir: None,
+            last_local_dir: None,
         }
     }
 }
@@ -202,6 +215,8 @@ impl std::fmt::Debug for ServerEntry {
             .field("host_key_fingerprint", &self.host_key_fingerprint)
             .field("system_info", &self.system_info)
             .field("scripts", &self.scripts)
+            .field("last_remote_dir", &self.last_remote_dir)
+            .field("last_local_dir", &self.last_local_dir)
             .finish()
     }
 }
@@ -230,6 +245,8 @@ mod tests {
     fn legacy_config_without_the_new_fields_still_loads() {
         let config: Config = serde_json::from_str(LEGACY_CONFIG_JSON).expect("an existing vault must still deserialize");
         assert_eq!(config.auto_lock_minutes, DEFAULT_AUTO_LOCK_MINUTES);
+        assert_eq!(config.servers[0].last_remote_dir, None, "the browser's remembered directories are additive");
+        assert_eq!(config.servers[0].last_local_dir, None);
         let AuthMethod::Password { password } = &config.servers[0].auth else {
             panic!("expected password auth");
         };

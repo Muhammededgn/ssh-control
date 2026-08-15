@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
@@ -25,6 +26,8 @@ use crate::tui::server_form::{FormMode, FormOutcome, ServerFormData, ServerFormS
 use crate::tui::settings::{SettingsOutcome, SettingsState};
 use crate::tui::setup::{SetupOutcome, SetupState};
 use crate::tui::totp_prompt::{TotpPromptOutcome, TotpPromptState};
+use crate::ssh::sftp;
+use crate::tui::file_browser::{BrowserEntry, FileBrowserOutcome, FileBrowserState};
 use crate::tui::help::{self, HelpTopic};
 use crate::tui::totp_unlock::{TotpUnlockOutcome, TotpUnlockState};
 use crate::tui::unlock::{UnlockMode, UnlockOutcome, UnlockState};
@@ -41,6 +44,7 @@ enum Screen {
     ScriptForm(ScriptFormState),
     ConfirmDeleteScript { server_id: Uuid, script_id: Uuid, state: ConfirmState },
     ScriptRun(ScriptRunState),
+    FileBrowser(FileBrowserState),
 }
 
 /// Which set of keys the help overlay lists, for the screen currently on top.
@@ -58,6 +62,7 @@ fn help_topic(screen: &Screen) -> HelpTopic {
         Screen::Scripts(_) => HelpTopic::ScriptList,
         Screen::ScriptForm(_) => HelpTopic::ScriptForm,
         Screen::ScriptRun(_) => HelpTopic::ScriptRun,
+        Screen::FileBrowser(_) => HelpTopic::FileBrowser,
     }
 }
 
@@ -155,6 +160,10 @@ enum NextStep {
     ConfirmDeleteScriptNo,
     RunScript(Uuid, Uuid),
     ScriptRunClose,
+    GoFiles(Uuid),
+    FilesBack,
+    FilesOpenRemote(String),
+    FilesRefresh,
 }
 
 pub struct App {
@@ -166,6 +175,23 @@ pub struct App {
     /// after every `handle_key`, so time spent inside an SSH session or a
     /// script run does not count as idle.
     last_activity: Instant,
+    /// The live connection the file browser lists and transfers over.
+    ///
+    /// A sibling of `state`, deliberately not a field inside `UnlockedState`:
+    /// every remote operation awaits, and no borrow of `state` may be held
+    /// across an await (see the `NextStep` pattern). As its own field it can be
+    /// taken out, used across the await, and put back afterwards.
+    remote: Option<RemoteSession>,
+}
+
+/// One authenticated connection plus its sftp channel. The russh handle has to
+/// be kept alive alongside the stream — dropping it closes the channel out from
+/// under the client.
+struct RemoteSession {
+    server_id: Uuid,
+    #[allow(dead_code, reason = "owned to keep the channel alive for the lifetime of the sftp stream")]
+    handle: russh::client::Handle<crate::ssh::client::Handler>,
+    sftp: crate::ssh::sftp::SftpClient<russh::ChannelStream<russh::client::Msg>>,
 }
 
 /// How many wrong codes in a row before the everyday TOTP path is refused and
@@ -189,6 +215,7 @@ impl App {
             lang,
             should_quit: false,
             last_activity: Instant::now(),
+            remote: None,
         };
         app.state = app.resolve_initial_state();
         app
@@ -339,6 +366,7 @@ impl App {
         }
 
         let message = self.lang.strings().status_auto_locked.to_string();
+        self.drop_remote();
         self.state = self.locked_state();
         match &mut self.state {
             AppState::Locked(unlock) => unlock.info = Some(message),
@@ -421,6 +449,7 @@ impl App {
                         Screen::ScriptForm(state) => state.render(frame, area, strings),
                         Screen::ConfirmDeleteScript { state, .. } => state.render(frame, area, strings),
                         Screen::ScriptRun(state) => state.render(frame, area, strings),
+                        Screen::FileBrowser(state) => state.render(frame, area, strings),
                     }
                     if help_open {
                         help::render(frame, area, topic, strings);
@@ -807,6 +836,7 @@ impl App {
                     MainMenuAction::Edit(id) => NextStep::GoEdit(id),
                     MainMenuAction::Delete(id) => NextStep::GoDelete(id),
                     MainMenuAction::Scripts(id) => NextStep::GoScripts(id),
+                    MainMenuAction::Files(id) => NextStep::GoFiles(id),
                     MainMenuAction::Lock => NextStep::Lock,
                     MainMenuAction::Settings => NextStep::GoSettings,
                     MainMenuAction::Help => NextStep::Help,
@@ -873,6 +903,14 @@ impl App {
                     ScriptRunOutcome::Close => NextStep::ScriptRunClose,
                     ScriptRunOutcome::Help => NextStep::Help,
                 },
+                Screen::FileBrowser(state) => match state.handle_key(key) {
+                    FileBrowserOutcome::None => NextStep::None,
+                    FileBrowserOutcome::Help => NextStep::Help,
+                    FileBrowserOutcome::Back => NextStep::FilesBack,
+                    FileBrowserOutcome::OpenRemote(path) => NextStep::FilesOpenRemote(path),
+                    FileBrowserOutcome::RefreshRemote => NextStep::FilesRefresh,
+                    FileBrowserOutcome::Transfer => NextStep::None,
+                },
             }
         };
 
@@ -883,8 +921,14 @@ impl App {
                     u.help_open = true;
                 }
             }
-            NextStep::Quit => self.should_quit = true,
-            NextStep::Lock => self.state = self.locked_state(),
+            NextStep::Quit => {
+                self.drop_remote();
+                self.should_quit = true;
+            }
+            NextStep::Lock => {
+                self.drop_remote();
+                self.state = self.locked_state();
+            }
             NextStep::GoAdd => self.with_unlocked(|u| {
                 u.screen = Screen::ServerForm(ServerFormState::new_add());
             }),
@@ -1017,6 +1061,18 @@ impl App {
                 }
             }),
             NextStep::RunScript(server_id, script_id) => self.run_script_flow(terminal, server_id, script_id).await?,
+            NextStep::GoFiles(id) => self.open_files_flow(terminal, id).await?,
+            NextStep::FilesOpenRemote(path) => self.list_remote_flow(terminal, Some(path)).await?,
+            NextStep::FilesRefresh => self.list_remote_flow(terminal, None).await?,
+            NextStep::FilesBack => {
+                self.remember_browser_dirs();
+                self.drop_remote();
+                self.with_unlocked(|u| {
+                    let mut menu = MainMenuState::new();
+                    menu.clamp_selection(&u.config.servers);
+                    u.screen = Screen::MainMenu(menu);
+                });
+            }
             NextStep::ScriptRunClose => self.with_unlocked(|u| {
                 let ctx = match &u.screen {
                     Screen::ScriptRun(state) => Some((state.server_id, state.server_name.clone())),
@@ -1029,6 +1085,16 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Closes the browser's connection.
+    ///
+    /// Dropping `RemoteSession` closes the channel and the ssh handle with it.
+    /// Called from every path that ends the browsing session — and, critically,
+    /// from the idle auto-lock: a locked vault that quietly kept an
+    /// authenticated connection open would defeat the point of locking.
+    fn drop_remote(&mut self) {
+        self.remote = None;
     }
 
     fn with_unlocked(&mut self, f: impl FnOnce(&mut UnlockedState)) {
@@ -1516,6 +1582,197 @@ impl App {
 
         Ok(())
     }
+
+    /// Opens the file browser: connect if needed, ask the server where "." is,
+    /// and list both sides.
+    ///
+    /// Follows `run_script_flow`'s shape — everything that crosses the await is
+    /// a local, and the screen is installed once the work is done. The vault's
+    /// remembered directory is a convenience: if it has vanished the listing
+    /// falls back to the login directory rather than opening on an error.
+    async fn open_files_flow(&mut self, terminal: &mut TerminalGuard, id: Uuid) -> Result<()> {
+        let strings = self.lang.strings();
+
+        let context = match &self.state {
+            AppState::Unlocked(u) => u.config.servers.iter().find(|e| e.id == id).map(|e| {
+                (ssh::Target::from_entry(e), e.name.clone(), e.last_remote_dir.clone(), e.last_local_dir.clone())
+            }),
+            _ => None,
+        };
+        let Some((target, server_name, last_remote, last_local)) = context else {
+            return Ok(());
+        };
+
+        // Connecting takes a moment on a slow link, and a frozen server list
+        // reads as a hang.
+        self.set_status(strings.file_browser_connecting.to_string());
+        self.draw(terminal)?;
+
+        if !self.remote.as_ref().is_some_and(|r| r.server_id == id) {
+            self.drop_remote();
+            match ssh::connect(&target).await {
+                Ok(connected) => {
+                    let mut handle = connected.handle;
+                    match sftp::open_session(&mut handle).await {
+                        Ok(sftp) => self.remote = Some(RemoteSession { server_id: id, handle, sftp }),
+                        Err(e) => return self.fail_to_open_files(e),
+                    }
+                }
+                Err(e) => return self.fail_to_open_files(e),
+            }
+        }
+
+        let local_cwd = last_local
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("/"));
+
+        let session = self.remote.as_mut().expect("just connected");
+        let remote_cwd = match session.sftp.realpath(last_remote.as_deref().unwrap_or(".")).await {
+            Ok(path) => path,
+            // The remembered directory is gone. Fall back rather than open on
+            // an error — it was a convenience, not a promise.
+            Err(_) => session.sftp.realpath(".").await.unwrap_or_else(|_| "/".to_string()),
+        };
+        let listing = session.sftp.list_dir(&remote_cwd).await;
+
+        let mut browser = FileBrowserState::new(id, server_name, local_cwd, remote_cwd.clone());
+        match listing {
+            Ok(entries) => browser.set_remote(remote_cwd, remote_entries(entries, browser.show_hidden())),
+            Err(e) => {
+                self.drop_remote_if_fatal(&e);
+                browser.set_remote_error(format!("{}{e}", strings.sftp_error_prefix));
+            }
+        }
+
+        self.with_unlocked(|u| {
+            u.status = None;
+            u.screen = Screen::FileBrowser(browser);
+        });
+        Ok(())
+    }
+
+    /// Lists a remote directory into the open browser — either a new path
+    /// (`Enter`, `Backspace`) or the current one again (`r`, or the hidden-file
+    /// toggle).
+    async fn list_remote_flow(&mut self, terminal: &mut TerminalGuard, path: Option<String>) -> Result<()> {
+        let strings = self.lang.strings();
+
+        let context = match &self.state {
+            AppState::Unlocked(u) => match &u.screen {
+                Screen::FileBrowser(browser) => Some((
+                    path.unwrap_or_else(|| browser.remote.cwd.clone()),
+                    browser.show_hidden(),
+                    browser.server_id,
+                )),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some((path, show_hidden, server_id)) = context else {
+            return Ok(());
+        };
+
+        // Without a session there is nothing to list; the browser is already
+        // showing why.
+        if !self.remote.as_ref().is_some_and(|r| r.server_id == server_id) {
+            return Ok(());
+        }
+
+        self.draw(terminal)?;
+        let session = self.remote.as_mut().expect("checked above");
+        let listing = session.sftp.list_dir(&path).await;
+
+        match listing {
+            Ok(entries) => {
+                let entries = remote_entries(entries, show_hidden);
+                self.with_unlocked(|u| {
+                    if let Screen::FileBrowser(browser) = &mut u.screen {
+                        browser.set_remote(path, entries);
+                    }
+                });
+            }
+            Err(e) => {
+                self.drop_remote_if_fatal(&e);
+                let message = format!("{}{e}", strings.sftp_error_prefix);
+                self.with_unlocked(|u| {
+                    if let Screen::FileBrowser(browser) = &mut u.screen {
+                        browser.set_remote_error(message);
+                    }
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// A connection that never opened leaves the user on the server list with
+    /// the reason, rather than on an empty browser that can do nothing.
+    fn fail_to_open_files(&mut self, error: AppError) -> Result<()> {
+        let strings = self.lang.strings();
+        self.drop_remote();
+        self.set_status(format!("{}{error}", strings.connect_error_prefix));
+        Ok(())
+    }
+
+    /// A protocol error means the stream is desynced and a lost connection
+    /// means there is nothing on the other end — both make the session
+    /// unusable, while a plain "permission denied" does not.
+    fn drop_remote_if_fatal(&mut self, error: &AppError) {
+        let fatal = match error {
+            AppError::Sftp(_) | AppError::Io(_) | AppError::Ssh(_) => true,
+            AppError::SftpStatus { code, .. } => {
+                *code == sftp::wire::FX_NO_CONNECTION || *code == sftp::wire::FX_CONNECTION_LOST
+            }
+            _ => false,
+        };
+        if fatal {
+            self.drop_remote();
+        }
+    }
+
+    fn set_status(&mut self, text: String) {
+        self.with_unlocked(|u| u.status = Some(StatusMessage::new(text)));
+    }
+
+    /// Remembers where both panes were pointed, so the next visit starts there.
+    ///
+    /// Saved on the way out rather than on every `cd`: a save re-encrypts and
+    /// rewrites the whole vault, which is far too much work for a keystroke.
+    /// Best-effort, like the saves `connect_flow` makes.
+    fn remember_browser_dirs(&mut self) {
+        let dirs = match &self.state {
+            AppState::Unlocked(u) => match &u.screen {
+                Screen::FileBrowser(browser) => {
+                    Some((browser.server_id, browser.local.cwd.clone(), browser.remote.cwd.clone()))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some((server_id, local, remote)) = dirs else {
+            return;
+        };
+
+        if let AppState::Unlocked(u) = &mut self.state
+            && let Some(entry) = u.config.servers.iter_mut().find(|e| e.id == server_id)
+        {
+            entry.last_local_dir = Some(local);
+            entry.last_remote_dir = Some(remote);
+            let _ = self.store.save(&u.config, &u.master_key, &u.slots);
+        }
+    }
+
+}
+
+/// Server entries as browser rows, applying the same dotfile filter the local
+/// side uses — both panes hide hidden files together or neither does.
+fn remote_entries(entries: Vec<sftp::RemoteEntry>, show_hidden: bool) -> Vec<BrowserEntry> {
+    entries
+        .into_iter()
+        .filter(|e| show_hidden || !e.name.starts_with('.'))
+        .map(|e| BrowserEntry { is_dir: e.is_dir(), name: e.name, size: e.size })
+        .collect()
 }
 
 /// Plain (non-TUI) sink for `run_on_connect` scripts, since they execute

@@ -20,6 +20,7 @@ pub enum HelpTopic {
     ScriptList,
     ScriptForm,
     ScriptRun,
+    FileBrowser,
 }
 
 impl HelpTopic {
@@ -42,6 +43,7 @@ impl HelpTopic {
             HelpTopic::ScriptList => vec![strings.scripts_list_hint],
             HelpTopic::ScriptForm => vec![strings.steps_list_hint, strings.step_edit_hint],
             HelpTopic::ScriptRun => vec![strings.script_run_hint_done],
+            HelpTopic::FileBrowser => vec![strings.file_browser_hint],
         }
     }
 }
@@ -126,6 +128,7 @@ mod tests {
             HelpTopic::ScriptList,
             HelpTopic::ScriptForm,
             HelpTopic::ScriptRun,
+            HelpTopic::FileBrowser,
         ];
         for strings in [&EN, &TR, &ES, &RU] {
             for topic in topics {

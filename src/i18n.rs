@@ -107,6 +107,16 @@ pub struct Strings {
     /// Shown by both forms when the frame is too small to draw them honestly.
     pub terminal_too_small: &'static str,
 
+    // File browser
+    pub file_browser_title: &'static str,
+    pub file_browser_local_label: &'static str,
+    pub file_browser_remote_label: &'static str,
+    pub file_browser_hint: &'static str,
+    pub file_browser_empty: &'static str,
+    pub file_browser_connecting: &'static str,
+    pub file_browser_not_connected: &'static str,
+    pub sftp_error_prefix: &'static str,
+
     // Help overlay
     pub help_title: &'static str,
     pub help_hint: &'static str,
@@ -263,7 +273,7 @@ pub static EN: Strings = Strings {
 
     main_menu_title: " ssh-control — servers ",
     main_menu_empty: "(no servers — press 'a' to add one)",
-    main_menu_hint: "Enter: connect  /: search  a: add  e: edit  d: delete  s: scripts  l: lock  F1: settings  q: quit  ?: help",
+    main_menu_hint: "Enter: connect  /: search  a: add  e: edit  d: delete  s: scripts  f: files  l: lock  F1: settings  q: quit  ?: help",
     main_menu_filter_hint: "type to filter  Enter: connect  Esc: clear",
     main_menu_filter_label: "Filter: ",
     main_menu_no_match: "(no server matches the filter)",
@@ -293,6 +303,15 @@ pub static EN: Strings = Strings {
     err_form_password_empty: "Password cannot be empty",
     err_key_path_empty: "Key path cannot be empty",
     terminal_too_small: "Terminal too small — make the window taller or wider",
+
+    file_browser_title: " Files ",
+    file_browser_local_label: "Local",
+    file_browser_remote_label: "Remote",
+    file_browser_hint: "Tab: switch pane  Enter: open  Backspace: up  Space: mark  t: transfer  r: refresh  .: hidden  Esc: back  ?: help",
+    file_browser_empty: "(empty)",
+    file_browser_connecting: "connecting…",
+    file_browser_not_connected: "(not connected)",
+    sftp_error_prefix: "sftp: ",
 
     help_title: " Keybindings ",
     help_hint: "any key: close",
@@ -439,7 +458,7 @@ pub static TR: Strings = Strings {
 
     main_menu_title: " ssh-control — sunucular ",
     main_menu_empty: "(sunucu yok — 'a' ile ekle)",
-    main_menu_hint: "Enter: bağlan  /: ara  a: ekle  e: düzenle  d: sil  s: scriptler  l: kilitle  F1: ayarlar  q: çık  ?: yardım",
+    main_menu_hint: "Enter: bağlan  /: ara  a: ekle  e: düzenle  d: sil  s: scriptler  f: dosyalar  l: kilitle  F1: ayarlar  q: çık  ?: yardım",
     main_menu_filter_hint: "yazarak filtrele  Enter: bağlan  Esc: temizle",
     main_menu_filter_label: "Filtre: ",
     main_menu_no_match: "(filtreye uyan sunucu yok)",
@@ -469,6 +488,15 @@ pub static TR: Strings = Strings {
     err_form_password_empty: "Şifre boş olamaz",
     err_key_path_empty: "Key path boş olamaz",
     terminal_too_small: "Terminal çok küçük — pencereyi büyüt",
+
+    file_browser_title: " Dosyalar ",
+    file_browser_local_label: "Yerel",
+    file_browser_remote_label: "Uzak",
+    file_browser_hint: "Tab: bölme değiştir  Enter: aç  Backspace: üst  Space: işaretle  t: aktar  r: yenile  .: gizli  Esc: geri  ?: yardım",
+    file_browser_empty: "(boş)",
+    file_browser_connecting: "bağlanılıyor…",
+    file_browser_not_connected: "(bağlı değil)",
+    sftp_error_prefix: "sftp: ",
 
     help_title: " Kısayol tuşları ",
     help_hint: "herhangi bir tuş: kapat",
@@ -615,7 +643,7 @@ pub static ES: Strings = Strings {
 
     main_menu_title: " ssh-control — servidores ",
     main_menu_empty: "(sin servidores — pulsa 'a' para añadir uno)",
-    main_menu_hint: "Enter: conectar  /: buscar  a: añadir  e: editar  d: eliminar  s: scripts  l: bloquear  F1: ajustes  q: salir  ?: ayuda",
+    main_menu_hint: "Enter: conectar  /: buscar  a: añadir  e: editar  d: eliminar  s: scripts  f: archivos  l: bloquear  F1: ajustes  q: salir  ?: ayuda",
     main_menu_filter_hint: "escribe para filtrar  Enter: conectar  Esc: limpiar",
     main_menu_filter_label: "Filtro: ",
     main_menu_no_match: "(ningún servidor coincide con el filtro)",
@@ -645,6 +673,15 @@ pub static ES: Strings = Strings {
     err_form_password_empty: "La contraseña no puede estar vacía",
     err_key_path_empty: "La ruta de clave no puede estar vacía",
     terminal_too_small: "Terminal demasiado pequeña — agranda la ventana",
+
+    file_browser_title: " Archivos ",
+    file_browser_local_label: "Local",
+    file_browser_remote_label: "Remoto",
+    file_browser_hint: "Tab: cambiar panel  Enter: abrir  Backspace: subir  Space: marcar  t: transferir  r: recargar  .: ocultos  Esc: volver  ?: ayuda",
+    file_browser_empty: "(vacío)",
+    file_browser_connecting: "conectando…",
+    file_browser_not_connected: "(sin conexión)",
+    sftp_error_prefix: "sftp: ",
 
     help_title: " Atajos de teclado ",
     help_hint: "cualquier tecla: cerrar",
@@ -791,7 +828,7 @@ pub static RU: Strings = Strings {
 
     main_menu_title: " ssh-control — серверы ",
     main_menu_empty: "(нет серверов — нажмите 'a' чтобы добавить)",
-    main_menu_hint: "Enter: подключиться  /: поиск  a: добавить  e: изменить  d: удалить  s: скрипты  l: заблокировать  F1: настройки  q: выход  ?: справка",
+    main_menu_hint: "Enter: подключиться  /: поиск  a: добавить  e: изменить  d: удалить  s: скрипты  f: файлы  l: заблокировать  F1: настройки  q: выход  ?: справка",
     main_menu_filter_hint: "введите текст для фильтра  Enter: подключиться  Esc: сбросить",
     main_menu_filter_label: "Фильтр: ",
     main_menu_no_match: "(нет серверов, подходящих под фильтр)",
@@ -821,6 +858,15 @@ pub static RU: Strings = Strings {
     err_form_password_empty: "Пароль не может быть пустым",
     err_key_path_empty: "Путь к ключу не может быть пустым",
     terminal_too_small: "Терминал слишком мал — увеличьте окно",
+
+    file_browser_title: " Файлы ",
+    file_browser_local_label: "Локально",
+    file_browser_remote_label: "Удалённо",
+    file_browser_hint: "Tab: сменить панель  Enter: открыть  Backspace: вверх  Space: отметить  t: передать  r: обновить  .: скрытые  Esc: назад  ?: справка",
+    file_browser_empty: "(пусто)",
+    file_browser_connecting: "подключение…",
+    file_browser_not_connected: "(нет подключения)",
+    sftp_error_prefix: "sftp: ",
 
     help_title: " Горячие клавиши ",
     help_hint: "любая клавиша: закрыть",
