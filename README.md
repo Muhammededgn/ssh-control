@@ -20,8 +20,11 @@ so `vim`, `htop`, `tmux` and Ctrl+C behave exactly as they would under plain
 - **System info** — CPU / RAM / disk / GPU snapshot fetched on connect and shown
   in the server list
 - **Per-server scripts** — ordered command chains with per-step conditions
-  (always, on success, on failure, output contains), optionally auto-run on
-  connect
+  (always, on success, on failure, output contains) and per-step timeouts,
+  optionally auto-run on connect
+- **Search** — `/` filters the server list by name, host or username
+- **Keybinding overlay** — `F2` (or `?` on the lists) shows what the current
+  screen can do
 - **Four UI languages** — English, Turkish, Spanish, Russian
 
 ## Platform
@@ -42,17 +45,17 @@ they run on Debian 12+, Ubuntu 22.04+ and Fedora 37+.
 
 ```sh
 # Debian / Ubuntu
-sudo dpkg -i ssh-control_0.1.0-1_amd64.deb
+sudo dpkg -i ssh-control_0.2.0-1_amd64.deb
 
 # Fedora / RHEL
-sudo rpm -i ssh-control-0.1.0-1.x86_64.rpm
+sudo rpm -i ssh-control-0.2.0-1.x86_64.rpm
 
 # Arch
-sudo pacman -U ssh-control-0.1.0-1-x86_64.pkg.tar.zst
+sudo pacman -U ssh-control-0.2.0-1-x86_64.pkg.tar.zst
 
 # Anything else
-tar xzf ssh-control-0.1.0-x86_64-linux.tar.gz
-sudo install -Dm755 ssh-control-0.1.0-x86_64-linux/ssh-control /usr/local/bin/ssh-control
+tar xzf ssh-control-0.2.0-x86_64-linux.tar.gz
+sudo install -Dm755 ssh-control-0.2.0-x86_64-linux/ssh-control /usr/local/bin/ssh-control
 ```
 
 ### Arch, from source
@@ -82,11 +85,16 @@ rather than failing obscurely when piped or run from a service manager.
 
 | Screen | Keys |
 |---|---|
-| Server list | `Enter` connect · `a` add · `e` edit · `d` delete · `s` scripts · `l` lock · `F1` settings · `q` quit |
+| Server list | `Enter` connect · `/` search · `a` add · `e` edit · `d` delete · `s` scripts · `l` lock · `F1` settings · `q` quit |
 | Forms | `Tab` next field · `Ctrl+Enter` save · `Esc` cancel |
 | Script list | `Enter` run · `a` add · `e` edit · `d` delete · `Esc` back |
 | Step editor | `←`/`→` change condition · `Ctrl+↑`/`Ctrl+↓` reorder · `Esc` cancel |
+| Run log | `↑`/`↓` `PgUp`/`PgDn` `Home` scroll · `End` follow the tail |
 | Settings | `←`/`→` switch tab · `Esc` back |
+| Anywhere | `F2` keybindings, and `?` on the lists and the run log |
+
+While `/` is open every key is filter text, so the single-letter shortcuts are
+unavailable until `Enter` (connect, keeping the filter) or `Esc` (clear it).
 
 Settings (`F1`) covers the UI language, changing the master password, and the
 two-factor / TOTP modes.
@@ -210,7 +218,7 @@ Releases are cut by pushing a version tag. The tag, `Cargo.toml` and
 workflow fails before building anything:
 
 ```sh
-git tag v0.1.0 && git push origin v0.1.0
+git tag v0.2.0 && git push origin v0.2.0
 ```
 
 `examples/gen_totp_code.rs` prints the current code for a base32 secret, which
