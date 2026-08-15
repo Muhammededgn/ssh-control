@@ -62,6 +62,19 @@ pub enum AppError {
     #[error("another instance of ssh-control already has this vault open")]
     VaultInUse,
 
+    /// A malformed frame, a desynced stream, a reply whose request id does not
+    /// match, or a subsystem the server would not start. The stream cannot be
+    /// trusted afterwards, so every one of these drops the session rather than
+    /// retrying the operation.
+    #[error("sftp error: {0}")]
+    Sftp(String),
+
+    /// The server answered, and said no. Carries the code because the browser
+    /// reacts differently to a denied listing (stay put, show it on that pane)
+    /// than to a lost connection (drop the session).
+    #[error("{message} ({path})")]
+    SftpStatus { code: u32, path: String, message: String },
+
     /// The OS credential store could not be reached or did not hold what was
     /// expected. Deliberately distinct from a missing entry, which is a normal
     /// outcome that means "this device is not enrolled" rather than a failure.
