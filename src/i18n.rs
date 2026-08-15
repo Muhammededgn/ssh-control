@@ -107,6 +107,10 @@ pub struct Strings {
     /// Shown by both forms when the frame is too small to draw them honestly.
     pub terminal_too_small: &'static str,
 
+    // Help overlay
+    pub help_title: &'static str,
+    pub help_hint: &'static str,
+
     // Confirm overlay
     pub confirm_title: &'static str,
     pub confirm_hint: &'static str,
@@ -259,7 +263,7 @@ pub static EN: Strings = Strings {
 
     main_menu_title: " ssh-control — servers ",
     main_menu_empty: "(no servers — press 'a' to add one)",
-    main_menu_hint: "Enter: connect  /: search  a: add  e: edit  d: delete  s: scripts  l: lock  F1: settings  q: quit",
+    main_menu_hint: "Enter: connect  /: search  a: add  e: edit  d: delete  s: scripts  l: lock  F1: settings  q: quit  ?: help",
     main_menu_filter_hint: "type to filter  Enter: connect  Esc: clear",
     main_menu_filter_label: "Filter: ",
     main_menu_no_match: "(no server matches the filter)",
@@ -281,7 +285,7 @@ pub static EN: Strings = Strings {
     field_password: "Password",
     field_key_path: "Key path",
     field_key_passphrase: "Key passphrase",
-    form_hint: "Tab: next field  Ctrl+Enter: save  Esc: cancel",
+    form_hint: "Tab: next field  Ctrl+Enter: save  Esc: cancel  F2: help",
     err_name_empty: "Name cannot be empty",
     err_host_empty: "Host cannot be empty",
     err_port_invalid: "Port must be between 1-65535",
@@ -289,6 +293,9 @@ pub static EN: Strings = Strings {
     err_form_password_empty: "Password cannot be empty",
     err_key_path_empty: "Key path cannot be empty",
     terminal_too_small: "Terminal too small — make the window taller or wider",
+
+    help_title: " Keybindings ",
+    help_hint: "any key: close",
 
     confirm_title: " Confirm ",
     confirm_hint: "(y)es / (n)o",
@@ -377,7 +384,7 @@ pub static EN: Strings = Strings {
 
     scripts_list_title: "Scripts",
     scripts_list_empty: "(no scripts — press 'a' to add one)",
-    scripts_list_hint: "Enter: run  a: add  e: edit  d: delete  Esc: back",
+    scripts_list_hint: "Enter: run  a: add  e: edit  d: delete  Esc: back  ?: help",
     script_form_title_add: "Add Script",
     script_form_title_edit: "Edit Script",
     field_script_name: "Name",
@@ -407,7 +414,7 @@ pub static EN: Strings = Strings {
     delete_script_confirm_suffix: "'?",
     script_run_title: " Running script ",
     script_run_hint_running: "Running…  ↑/↓ PgUp/PgDn Home: scroll  End: follow",
-    script_run_hint_done: "↑/↓ PgUp/PgDn Home/End: scroll  Enter/Esc: close",
+    script_run_hint_done: "↑/↓ PgUp/PgDn Home/End: scroll  Enter/Esc: close  ?: help",
     script_run_hint_scrolled: "scrolled back — End: follow the output again",
     log_skipped: "(skipped)",
     log_exit_prefix: "exit ",
@@ -432,7 +439,7 @@ pub static TR: Strings = Strings {
 
     main_menu_title: " ssh-control — sunucular ",
     main_menu_empty: "(sunucu yok — 'a' ile ekle)",
-    main_menu_hint: "Enter: bağlan  /: ara  a: ekle  e: düzenle  d: sil  s: scriptler  l: kilitle  F1: ayarlar  q: çık",
+    main_menu_hint: "Enter: bağlan  /: ara  a: ekle  e: düzenle  d: sil  s: scriptler  l: kilitle  F1: ayarlar  q: çık  ?: yardım",
     main_menu_filter_hint: "yazarak filtrele  Enter: bağlan  Esc: temizle",
     main_menu_filter_label: "Filtre: ",
     main_menu_no_match: "(filtreye uyan sunucu yok)",
@@ -454,7 +461,7 @@ pub static TR: Strings = Strings {
     field_password: "Şifre",
     field_key_path: "Key path",
     field_key_passphrase: "Key passphrase",
-    form_hint: "Tab: sonraki alan  Ctrl+Enter: kaydet  Esc: iptal",
+    form_hint: "Tab: sonraki alan  Ctrl+Enter: kaydet  Esc: iptal  F2: yardım",
     err_name_empty: "İsim boş olamaz",
     err_host_empty: "Host boş olamaz",
     err_port_invalid: "Port 1-65535 arasında olmalı",
@@ -462,6 +469,9 @@ pub static TR: Strings = Strings {
     err_form_password_empty: "Şifre boş olamaz",
     err_key_path_empty: "Key path boş olamaz",
     terminal_too_small: "Terminal çok küçük — pencereyi büyüt",
+
+    help_title: " Kısayol tuşları ",
+    help_hint: "herhangi bir tuş: kapat",
 
     confirm_title: " Onay ",
     confirm_hint: "(y)es / (n)o",
@@ -550,7 +560,7 @@ pub static TR: Strings = Strings {
 
     scripts_list_title: "Scriptler",
     scripts_list_empty: "(script yok — 'a' ile ekle)",
-    scripts_list_hint: "Enter: çalıştır  a: ekle  e: düzenle  d: sil  Esc: geri",
+    scripts_list_hint: "Enter: çalıştır  a: ekle  e: düzenle  d: sil  Esc: geri  ?: yardım",
     script_form_title_add: "Script Ekle",
     script_form_title_edit: "Script Düzenle",
     field_script_name: "Ad",
@@ -580,7 +590,7 @@ pub static TR: Strings = Strings {
     delete_script_confirm_suffix: "' script'i silinsin mi?",
     script_run_title: " Script çalışıyor ",
     script_run_hint_running: "Çalışıyor…  ↑/↓ PgUp/PgDn Home: kaydır  End: takip et",
-    script_run_hint_done: "↑/↓ PgUp/PgDn Home/End: kaydır  Enter/Esc: kapat",
+    script_run_hint_done: "↑/↓ PgUp/PgDn Home/End: kaydır  Enter/Esc: kapat  ?: yardım",
     script_run_hint_scrolled: "geri kaydırıldı — End: çıktıyı yeniden takip et",
     log_skipped: "(atlandı)",
     log_exit_prefix: "çıkış kodu ",
@@ -605,7 +615,7 @@ pub static ES: Strings = Strings {
 
     main_menu_title: " ssh-control — servidores ",
     main_menu_empty: "(sin servidores — pulsa 'a' para añadir uno)",
-    main_menu_hint: "Enter: conectar  /: buscar  a: añadir  e: editar  d: eliminar  s: scripts  l: bloquear  F1: ajustes  q: salir",
+    main_menu_hint: "Enter: conectar  /: buscar  a: añadir  e: editar  d: eliminar  s: scripts  l: bloquear  F1: ajustes  q: salir  ?: ayuda",
     main_menu_filter_hint: "escribe para filtrar  Enter: conectar  Esc: limpiar",
     main_menu_filter_label: "Filtro: ",
     main_menu_no_match: "(ningún servidor coincide con el filtro)",
@@ -627,7 +637,7 @@ pub static ES: Strings = Strings {
     field_password: "Contraseña",
     field_key_path: "Ruta de clave",
     field_key_passphrase: "Frase de clave",
-    form_hint: "Tab: siguiente campo  Ctrl+Enter: guardar  Esc: cancelar",
+    form_hint: "Tab: siguiente campo  Ctrl+Enter: guardar  Esc: cancelar  F2: ayuda",
     err_name_empty: "El nombre no puede estar vacío",
     err_host_empty: "El host no puede estar vacío",
     err_port_invalid: "El puerto debe estar entre 1-65535",
@@ -635,6 +645,9 @@ pub static ES: Strings = Strings {
     err_form_password_empty: "La contraseña no puede estar vacía",
     err_key_path_empty: "La ruta de clave no puede estar vacía",
     terminal_too_small: "Terminal demasiado pequeña — agranda la ventana",
+
+    help_title: " Atajos de teclado ",
+    help_hint: "cualquier tecla: cerrar",
 
     confirm_title: " Confirmar ",
     confirm_hint: "(y)es / (n)o",
@@ -723,7 +736,7 @@ pub static ES: Strings = Strings {
 
     scripts_list_title: "Scripts",
     scripts_list_empty: "(sin scripts — pulsa 'a' para añadir uno)",
-    scripts_list_hint: "Enter: ejecutar  a: añadir  e: editar  d: eliminar  Esc: volver",
+    scripts_list_hint: "Enter: ejecutar  a: añadir  e: editar  d: eliminar  Esc: volver  ?: ayuda",
     script_form_title_add: "Añadir Script",
     script_form_title_edit: "Editar Script",
     field_script_name: "Nombre",
@@ -753,7 +766,7 @@ pub static ES: Strings = Strings {
     delete_script_confirm_suffix: "'?",
     script_run_title: " Ejecutando script ",
     script_run_hint_running: "Ejecutando…  ↑/↓ RePág/AvPág Inicio: desplazar  Fin: seguir",
-    script_run_hint_done: "↑/↓ RePág/AvPág Inicio/Fin: desplazar  Enter/Esc: cerrar",
+    script_run_hint_done: "↑/↓ RePág/AvPág Inicio/Fin: desplazar  Enter/Esc: cerrar  ?: ayuda",
     script_run_hint_scrolled: "desplazado hacia atrás — Fin: volver a seguir la salida",
     log_skipped: "(omitido)",
     log_exit_prefix: "código de salida ",
@@ -778,7 +791,7 @@ pub static RU: Strings = Strings {
 
     main_menu_title: " ssh-control — серверы ",
     main_menu_empty: "(нет серверов — нажмите 'a' чтобы добавить)",
-    main_menu_hint: "Enter: подключиться  /: поиск  a: добавить  e: изменить  d: удалить  s: скрипты  l: заблокировать  F1: настройки  q: выход",
+    main_menu_hint: "Enter: подключиться  /: поиск  a: добавить  e: изменить  d: удалить  s: скрипты  l: заблокировать  F1: настройки  q: выход  ?: справка",
     main_menu_filter_hint: "введите текст для фильтра  Enter: подключиться  Esc: сбросить",
     main_menu_filter_label: "Фильтр: ",
     main_menu_no_match: "(нет серверов, подходящих под фильтр)",
@@ -800,7 +813,7 @@ pub static RU: Strings = Strings {
     field_password: "Пароль",
     field_key_path: "Путь к ключу",
     field_key_passphrase: "Пароль ключа",
-    form_hint: "Tab: след. поле  Ctrl+Enter: сохранить  Esc: отмена",
+    form_hint: "Tab: след. поле  Ctrl+Enter: сохранить  Esc: отмена  F2: справка",
     err_name_empty: "Имя не может быть пустым",
     err_host_empty: "Хост не может быть пустым",
     err_port_invalid: "Порт должен быть между 1-65535",
@@ -808,6 +821,9 @@ pub static RU: Strings = Strings {
     err_form_password_empty: "Пароль не может быть пустым",
     err_key_path_empty: "Путь к ключу не может быть пустым",
     terminal_too_small: "Терминал слишком мал — увеличьте окно",
+
+    help_title: " Горячие клавиши ",
+    help_hint: "любая клавиша: закрыть",
 
     confirm_title: " Подтверждение ",
     confirm_hint: "(y)es / (n)o",
@@ -896,7 +912,7 @@ pub static RU: Strings = Strings {
 
     scripts_list_title: "Скрипты",
     scripts_list_empty: "(нет скриптов — нажмите 'a' чтобы добавить)",
-    scripts_list_hint: "Enter: запустить  a: добавить  e: изменить  d: удалить  Esc: назад",
+    scripts_list_hint: "Enter: запустить  a: добавить  e: изменить  d: удалить  Esc: назад  ?: справка",
     script_form_title_add: "Добавить скрипт",
     script_form_title_edit: "Изменить скрипт",
     field_script_name: "Название",
@@ -926,7 +942,7 @@ pub static RU: Strings = Strings {
     delete_script_confirm_suffix: "'?",
     script_run_title: " Выполнение скрипта ",
     script_run_hint_running: "Выполняется…  ↑/↓ PgUp/PgDn Home: прокрутка  End: следить",
-    script_run_hint_done: "↑/↓ PgUp/PgDn Home/End: прокрутка  Enter/Esc: закрыть",
+    script_run_hint_done: "↑/↓ PgUp/PgDn Home/End: прокрутка  Enter/Esc: закрыть  ?: справка",
     script_run_hint_scrolled: "прокручено назад — End: снова следить за выводом",
     log_skipped: "(пропущено)",
     log_exit_prefix: "код выхода ",

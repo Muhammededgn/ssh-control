@@ -124,6 +124,9 @@ pub enum MainMenuAction {
     Scripts(Uuid),
     Lock,
     Settings,
+    /// `?` only reaches here outside `/` mode — while the filter is taking
+    /// keystrokes it is a character like any other.
+    Help,
     Quit,
 }
 
@@ -190,6 +193,7 @@ impl MainMenuState {
                 self.typing = true;
                 MainMenuAction::None
             }
+            KeyCode::Char('?') => MainMenuAction::Help,
             KeyCode::Char('a') => MainMenuAction::Add,
             KeyCode::Char('e') => self
                 .selected_entry(servers)

@@ -24,6 +24,7 @@ pub enum ScriptsListAction {
     Edit(Uuid),
     Delete(Uuid),
     Back,
+    Help,
 }
 
 impl ScriptsListState {
@@ -62,6 +63,7 @@ impl ScriptsListState {
                 .get(self.selected)
                 .map(|s| ScriptsListAction::Delete(s.id))
                 .unwrap_or(ScriptsListAction::None),
+            KeyCode::Char('?') => ScriptsListAction::Help,
             KeyCode::Esc => ScriptsListAction::Back,
             _ => ScriptsListAction::None,
         }

@@ -25,6 +25,7 @@ use crate::tui::server_form::{FormMode, FormOutcome, ServerFormData, ServerFormS
 use crate::tui::settings::{SettingsOutcome, SettingsState};
 use crate::tui::setup::{SetupOutcome, SetupState};
 use crate::tui::totp_prompt::{TotpPromptOutcome, TotpPromptState};
+use crate::tui::help::{self, HelpTopic};
 use crate::tui::totp_unlock::{TotpUnlockOutcome, TotpUnlockState};
 use crate::tui::unlock::{UnlockMode, UnlockOutcome, UnlockState};
 
@@ -40,6 +41,24 @@ enum Screen {
     ScriptForm(ScriptFormState),
     ConfirmDeleteScript { server_id: Uuid, script_id: Uuid, state: ConfirmState },
     ScriptRun(ScriptRunState),
+}
+
+/// Which set of keys the help overlay lists, for the screen currently on top.
+///
+/// The step editor is part of `ScriptForm` as far as `Screen` is concerned, and
+/// that topic lists both its hint and the step list's, so it needs no case of
+/// its own here.
+fn help_topic(screen: &Screen) -> HelpTopic {
+    match screen {
+        Screen::MainMenu(_) => HelpTopic::ServerList,
+        Screen::ServerForm(_) => HelpTopic::ServerForm,
+        Screen::ConfirmDelete { .. } | Screen::ConfirmDeleteScript { .. } => HelpTopic::Confirm,
+        Screen::Settings(_) => HelpTopic::Settings,
+        Screen::TotpPrompt(_) => HelpTopic::TotpPrompt,
+        Screen::Scripts(_) => HelpTopic::ScriptList,
+        Screen::ScriptForm(_) => HelpTopic::ScriptForm,
+        Screen::ScriptRun(_) => HelpTopic::ScriptRun,
+    }
 }
 
 /// A transient footer message ("Saved.", "Deleted."), with the moment it was
@@ -65,6 +84,10 @@ struct UnlockedState {
     slots: Vec<Slot>,
     screen: Screen,
     status: Option<StatusMessage>,
+    /// The keybinding overlay. Modal while it is up: it takes the next key to
+    /// dismiss itself and hands nothing through to the screen underneath, so a
+    /// key pressed to close it can never also act on the list behind it.
+    help_open: bool,
 }
 
 enum AppState {
@@ -101,6 +124,8 @@ enum AppState {
 /// of `self.state` needs to be held across the async `connect_flow`.
 enum NextStep {
     None,
+    /// `?` from a screen where it cannot be mistaken for text input.
+    Help,
     Connect(Uuid),
     GoAdd,
     GoEdit(Uuid),
@@ -370,69 +395,37 @@ impl App {
             }
             AppState::Unlocked(u) => {
                 let status = u.status.as_ref().map(|s| s.text.clone());
-                let config = &u.config;
-                match &mut u.screen {
-                    Screen::MainMenu(state) => {
-                        terminal.terminal.draw(|frame| {
-                            let area = frame.area();
-                            state.render(frame, area, &config.servers, status.as_deref(), strings);
-                        })?;
-                    }
-                    Screen::ServerForm(state) => {
-                        terminal.terminal.draw(|frame| {
-                            let area = frame.area();
-                            state.render(frame, area, strings);
-                        })?;
-                    }
-                    Screen::ConfirmDelete { state, .. } => {
-                        terminal.terminal.draw(|frame| {
-                            let area = frame.area();
-                            state.render(frame, area, strings);
-                        })?;
-                    }
-                    Screen::Settings(state) => {
-                        terminal.terminal.draw(|frame| {
-                            let area = frame.area();
-                            state.render(frame, area, strings);
-                        })?;
-                    }
-                    Screen::TotpPrompt(state) => {
-                        terminal.terminal.draw(|frame| {
-                            let area = frame.area();
-                            state.render(frame, area, strings);
-                        })?;
-                    }
-                    Screen::Scripts(state) => {
-                        let scripts = config
-                            .servers
-                            .iter()
-                            .find(|s| s.id == state.server_id)
-                            .map(|s| s.scripts.as_slice())
-                            .unwrap_or(&[]);
-                        terminal.terminal.draw(|frame| {
-                            let area = frame.area();
+                // One draw for the whole screen, because the help overlay has
+                // to land on top of whatever the screen drew — a second draw
+                // call would start from a cleared frame instead.
+                let help_open = u.help_open;
+                let topic = help_topic(&u.screen);
+                let UnlockedState { config, screen, .. } = &mut **u;
+                terminal.terminal.draw(|frame| {
+                    let area = frame.area();
+                    match screen {
+                        Screen::MainMenu(state) => state.render(frame, area, &config.servers, status.as_deref(), strings),
+                        Screen::ServerForm(state) => state.render(frame, area, strings),
+                        Screen::ConfirmDelete { state, .. } => state.render(frame, area, strings),
+                        Screen::Settings(state) => state.render(frame, area, strings),
+                        Screen::TotpPrompt(state) => state.render(frame, area, strings),
+                        Screen::Scripts(state) => {
+                            let scripts = config
+                                .servers
+                                .iter()
+                                .find(|s| s.id == state.server_id)
+                                .map(|s| s.scripts.as_slice())
+                                .unwrap_or(&[]);
                             state.render(frame, area, scripts, status.as_deref(), strings);
-                        })?;
+                        }
+                        Screen::ScriptForm(state) => state.render(frame, area, strings),
+                        Screen::ConfirmDeleteScript { state, .. } => state.render(frame, area, strings),
+                        Screen::ScriptRun(state) => state.render(frame, area, strings),
                     }
-                    Screen::ScriptForm(state) => {
-                        terminal.terminal.draw(|frame| {
-                            let area = frame.area();
-                            state.render(frame, area, strings);
-                        })?;
+                    if help_open {
+                        help::render(frame, area, topic, strings);
                     }
-                    Screen::ConfirmDeleteScript { state, .. } => {
-                        terminal.terminal.draw(|frame| {
-                            let area = frame.area();
-                            state.render(frame, area, strings);
-                        })?;
-                    }
-                    Screen::ScriptRun(state) => {
-                        terminal.terminal.draw(|frame| {
-                            let area = frame.area();
-                            state.render(frame, area, strings);
-                        })?;
-                    }
-                }
+                })?;
             }
         }
         Ok(())
@@ -766,7 +759,7 @@ impl App {
         } else {
             Screen::MainMenu(MainMenuState::new())
         };
-        AppState::Unlocked(Box::new(UnlockedState { config, master_key, slots, screen, status: None }))
+        AppState::Unlocked(Box::new(UnlockedState { config, master_key, slots, screen, status: None, help_open: false }))
     }
 
     /// For the paths that have *just* checked a live code — enrolment and the
@@ -780,11 +773,28 @@ impl App {
             slots,
             screen: Screen::MainMenu(MainMenuState::new()),
             status: None,
+            help_open: false,
         }))
     }
 
     async fn handle_unlocked_key(&mut self, key: KeyEvent, terminal: &mut TerminalGuard) -> Result<()> {
         let strings = self.lang.strings();
+
+        // F2 rather than `?` as the universal opener: `?` is a character the
+        // forms and the settings password fields have every right to receive,
+        // so the screens where it cannot be confused with typing offer it as
+        // well, through their own `Help` outcome.
+        if let AppState::Unlocked(u) = &mut self.state {
+            if u.help_open {
+                u.help_open = false;
+                return Ok(());
+            }
+            if key.code == crossterm::event::KeyCode::F(2) {
+                u.help_open = true;
+                return Ok(());
+            }
+        }
+
         let next = {
             let AppState::Unlocked(u) = &mut self.state else {
                 return Ok(());
@@ -799,6 +809,7 @@ impl App {
                     MainMenuAction::Scripts(id) => NextStep::GoScripts(id),
                     MainMenuAction::Lock => NextStep::Lock,
                     MainMenuAction::Settings => NextStep::GoSettings,
+                    MainMenuAction::Help => NextStep::Help,
                     MainMenuAction::Quit => NextStep::Quit,
                 },
                 Screen::ServerForm(state) => match state.handle_key(key, strings) {
@@ -844,6 +855,7 @@ impl App {
                         ScriptsListAction::Edit(script_id) => NextStep::GoScriptEdit(script_id),
                         ScriptsListAction::Delete(script_id) => NextStep::GoScriptDeleteConfirm(script_id),
                         ScriptsListAction::Back => NextStep::ScriptsBack,
+                        ScriptsListAction::Help => NextStep::Help,
                     }
                 }
                 Screen::ScriptForm(state) => match state.handle_key(key, strings) {
@@ -859,12 +871,18 @@ impl App {
                 Screen::ScriptRun(state) => match state.handle_key(key) {
                     ScriptRunOutcome::None => NextStep::None,
                     ScriptRunOutcome::Close => NextStep::ScriptRunClose,
+                    ScriptRunOutcome::Help => NextStep::Help,
                 },
             }
         };
 
         match next {
             NextStep::None => {}
+            NextStep::Help => {
+                if let AppState::Unlocked(u) = &mut self.state {
+                    u.help_open = true;
+                }
+            }
             NextStep::Quit => self.should_quit = true,
             NextStep::Lock => self.state = self.locked_state(),
             NextStep::GoAdd => self.with_unlocked(|u| {

@@ -61,6 +61,7 @@ fn wrapped_rows(text: &str, width: u16) -> usize {
 pub enum ScriptRunOutcome {
     None,
     Close,
+    Help,
 }
 
 impl ScriptRunState {
@@ -200,6 +201,7 @@ impl ScriptRunState {
                 self.scroll = None;
                 return ScriptRunOutcome::None;
             }
+            KeyCode::Char('?') => return ScriptRunOutcome::Help,
             _ => {}
         }
         if !self.finished {
