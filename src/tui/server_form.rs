@@ -3,11 +3,10 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use super::widgets::mask;
+use super::widgets::{mask, render_form};
 use crate::config::{AuthMethod, Secret, ServerEntry};
 use crate::i18n::Strings;
 
@@ -297,7 +296,71 @@ impl ServerFormState {
             )));
         }
 
-        let block = Block::default().borders(Borders::ALL).title(title);
-        frame.render_widget(Paragraph::new(lines).block(block), area);
+        // `fields()` and `lines` are built in the same order, so the focused
+        // field's index is its row — that is what `render_form` scrolls to.
+        let focus_row = self.fields().iter().position(|f| *f == self.focus).unwrap_or(0);
+        render_form(frame, area, title, lines, focus_row, strings.terminal_too_small);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::i18n::EN;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn render(state: &ServerFormState, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test backend");
+        terminal
+            .draw(|frame| state.render(frame, frame.area(), &EN))
+            .expect("render");
+        terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    fn tab_to(state: &mut ServerFormState, field: Field) {
+        for _ in 0..state.fields().len() {
+            if state.focus == field {
+                return;
+            }
+            state.handle_key(KeyEvent::from(KeyCode::Tab), &EN);
+        }
+        panic!("{field:?} is not in the focus order");
+    }
+
+    /// The issue's acceptance criterion: the field taking keystrokes must be on
+    /// screen. Before this the form was drawn full height and the bottom fields
+    /// were silently cut off, so focus could sit on a field nobody could see.
+    #[test]
+    fn the_focused_field_stays_on_screen_when_the_form_does_not_fit() {
+        let mut state = ServerFormState::new_add();
+        tab_to(&mut state, Field::Password);
+
+        // Seven rows: two for the border, five for eight lines of form.
+        let rendered = render(&state, 60, 7);
+        assert!(rendered.contains(EN.field_password), "the focused field must be visible");
+        assert!(!rendered.contains(EN.field_name), "the top of the form has scrolled off");
+    }
+
+    /// Scrolled content is only honest if the frame says there is more.
+    #[test]
+    fn a_clamped_form_says_there_is_more_above() {
+        let mut state = ServerFormState::new_add();
+        tab_to(&mut state, Field::Password);
+        assert!(render(&state, 60, 7).contains('↑'));
+
+        let fits = ServerFormState::new_add();
+        let full = render(&fits, 60, 20);
+        assert!(!full.contains('↑') && !full.contains('↓'), "a form that fits gets no arrows");
+    }
+
+    /// Below the minimum there is no honest way to draw the form, so it says so
+    /// rather than rendering a frame with nothing in it.
+    #[test]
+    fn a_frame_too_small_for_the_form_says_so() {
+        let state = ServerFormState::new_add();
+        let rendered = render(&state, 60, 4);
+        assert!(rendered.contains("too small"));
+        assert!(!rendered.contains(EN.field_name));
     }
 }

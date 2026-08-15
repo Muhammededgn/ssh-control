@@ -104,6 +104,8 @@ pub struct Strings {
     pub err_username_empty: &'static str,
     pub err_form_password_empty: &'static str,
     pub err_key_path_empty: &'static str,
+    /// Shown by both forms when the frame is too small to draw them honestly.
+    pub terminal_too_small: &'static str,
 
     // Confirm overlay
     pub confirm_title: &'static str,
@@ -280,6 +282,7 @@ pub static EN: Strings = Strings {
     err_username_empty: "Username cannot be empty",
     err_form_password_empty: "Password cannot be empty",
     err_key_path_empty: "Key path cannot be empty",
+    terminal_too_small: "Terminal too small — make the window taller or wider",
 
     confirm_title: " Confirm ",
     confirm_hint: "(y)es / (n)o",
@@ -446,6 +449,7 @@ pub static TR: Strings = Strings {
     err_username_empty: "Kullanıcı adı boş olamaz",
     err_form_password_empty: "Şifre boş olamaz",
     err_key_path_empty: "Key path boş olamaz",
+    terminal_too_small: "Terminal çok küçük — pencereyi büyüt",
 
     confirm_title: " Onay ",
     confirm_hint: "(y)es / (n)o",
@@ -612,6 +616,7 @@ pub static ES: Strings = Strings {
     err_username_empty: "El usuario no puede estar vacío",
     err_form_password_empty: "La contraseña no puede estar vacía",
     err_key_path_empty: "La ruta de clave no puede estar vacía",
+    terminal_too_small: "Terminal demasiado pequeña — agranda la ventana",
 
     confirm_title: " Confirmar ",
     confirm_hint: "(y)es / (n)o",
@@ -778,6 +783,7 @@ pub static RU: Strings = Strings {
     err_username_empty: "Имя пользователя не может быть пустым",
     err_form_password_empty: "Пароль не может быть пустым",
     err_key_path_empty: "Путь к ключу не может быть пустым",
+    terminal_too_small: "Терминал слишком мал — увеличьте окно",
 
     confirm_title: " Подтверждение ",
     confirm_hint: "(y)es / (n)o",

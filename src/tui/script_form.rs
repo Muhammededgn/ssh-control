@@ -6,6 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use uuid::Uuid;
 
+use super::widgets::{MIN_FORM_WIDTH, render_form, render_if_too_small};
 use crate::config::{ScriptStep, StepCondition};
 use crate::i18n::Strings;
 
@@ -317,6 +318,13 @@ impl ScriptFormState {
     }
 
     fn render_main(&mut self, frame: &mut Frame, area: Rect, strings: &Strings) {
+        // 4 + 3 + 4, the three constraints below. Any shorter and ratatui
+        // shrinks the step list to nothing rather than the screen saying why.
+        const MIN_MAIN_HEIGHT: u16 = 11;
+        if render_if_too_small(frame, area, MIN_FORM_WIDTH, MIN_MAIN_HEIGHT, strings.terminal_too_small) {
+            return;
+        }
+
         let title = match self.mode {
             FormMode::Add => strings.script_form_title_add,
             FormMode::Edit(_) => strings.script_form_title_edit,
@@ -417,8 +425,12 @@ impl ScriptFormState {
             lines.push(Line::from(Span::styled(strings.step_edit_hint, Style::default().fg(Color::DarkGray))));
         }
 
-        let block = Block::default().borders(Borders::ALL).title(strings.steps_list_title);
-        frame.render_widget(Paragraph::new(lines).block(block), area);
+        // Same order as `step_focus_order`, so the focus index is the row.
+        let focus_row = step_focus_order(is_first, se.condition_kind)
+            .iter()
+            .position(|f| *f == se.focus)
+            .unwrap_or(0);
+        render_form(frame, area, strings.steps_list_title, lines, focus_row, strings.terminal_too_small);
     }
 }
 
