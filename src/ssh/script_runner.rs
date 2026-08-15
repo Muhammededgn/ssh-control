@@ -5,9 +5,11 @@ use russh::client;
 
 use super::client::Handler;
 use crate::config::{Script, StepCondition};
-use crate::error::{AppError, Result};
+use crate::error::Result;
 
-const STEP_TIMEOUT: Duration = Duration::from_secs(120);
+/// What a step gets when `ScriptStep::timeout_secs` is unset — which is every
+/// step written before that field existed.
+pub const STEP_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Emitted synchronously as a script runs, so callers can drive either a live
 /// TUI redraw or a plain stdout print from the very same execution loop.
@@ -19,6 +21,23 @@ pub enum RunEvent<'a> {
     /// The exec channel itself failed to open/run (connection dropped
     /// mid-script, etc.) — distinct from a step merely exiting non-zero.
     StepError { index: usize, message: &'a str },
+    /// The step outlived its timeout. Its own event rather than a `StepError`
+    /// so the message can be localized against the number of seconds; the
+    /// number is the timeout that was actually applied, not the constant.
+    StepTimedOut { index: usize, seconds: u64 },
+}
+
+/// Exit code a timed-out step is recorded with, so the next step's
+/// `OnFailure` / `OutputContains` sees a failure rather than a skip. 124 is
+/// what coreutils `timeout(1)` reports, for the same reason.
+pub const TIMEOUT_EXIT_CODE: i32 = 124;
+
+/// What `run_step` came back with. A timeout is not an error: the step ran, it
+/// just did not finish, and the output it managed to produce is still worth
+/// showing and still worth matching `OutputContains` against.
+enum StepOutcome {
+    Finished { exit_code: i32, output: String },
+    TimedOut { output: String },
 }
 
 /// Outcome of one step, used only to evaluate the *next* step's condition —
@@ -67,10 +86,15 @@ pub async fn run_script(
 
         on_event(RunEvent::StepStarted { index, command: &step.command });
 
-        match run_step(handle, &step.command, |chunk| on_event(RunEvent::Output { index, chunk })).await {
-            Ok((exit_code, output)) => {
+        let timeout = step.timeout_secs.map(Duration::from_secs).unwrap_or(STEP_TIMEOUT);
+        match run_step(handle, &step.command, timeout, |chunk| on_event(RunEvent::Output { index, chunk })).await {
+            Ok(StepOutcome::Finished { exit_code, output }) => {
                 on_event(RunEvent::StepFinished { index, exit_code });
                 results.push(StepStatus::Ran { exit_code, output });
+            }
+            Ok(StepOutcome::TimedOut { output }) => {
+                on_event(RunEvent::StepTimedOut { index, seconds: timeout.as_secs() });
+                results.push(StepStatus::Ran { exit_code: TIMEOUT_EXIT_CODE, output });
             }
             Err(e) => {
                 on_event(RunEvent::StepError { index, message: &e.to_string() });
@@ -85,15 +109,16 @@ pub async fn run_script(
 async fn run_step(
     handle: &mut client::Handle<Handler>,
     command: &str,
+    timeout: Duration,
     mut on_output: impl FnMut(&[u8]),
-) -> Result<(i32, String)> {
+) -> Result<StepOutcome> {
     let mut channel = handle.channel_open_session().await?;
     channel.exec(true, command).await?;
 
     let mut output = Vec::new();
     let mut exit_code = 0i32;
 
-    let result = tokio::time::timeout(STEP_TIMEOUT, async {
+    let result = tokio::time::timeout(timeout, async {
         loop {
             match channel.wait().await {
                 Some(ChannelMsg::Data { data }) => {
@@ -117,11 +142,12 @@ async fn run_step(
     })
     .await;
 
+    let output = String::from_utf8_lossy(&output).into_owned();
     if result.is_err() {
-        return Err(AppError::SshConnect("step timed out".into()));
+        return Ok(StepOutcome::TimedOut { output });
     }
 
-    Ok((exit_code, String::from_utf8_lossy(&output).into_owned()))
+    Ok(StepOutcome::Finished { exit_code, output })
 }
 
 #[cfg(test)]
@@ -166,6 +192,17 @@ mod tests {
         assert!(should_run(&cond, Some(&ran_with_output("server is ready now"))));
         assert!(!should_run(&cond, Some(&ran_with_output("still booting"))));
         assert!(!should_run(&cond, Some(&StepStatus::Skipped)));
+    }
+
+    /// The issue's second acceptance criterion: a step killed by its timeout
+    /// has to look like a failure to the next step, not like a skip — a skip
+    /// would cascade and silence the `OnFailure` cleanup that exists precisely
+    /// for this case.
+    #[test]
+    fn a_timed_out_step_reads_as_a_failure_to_the_next_one() {
+        let timed_out = ran(TIMEOUT_EXIT_CODE);
+        assert!(should_run(&StepCondition::OnFailure, Some(&timed_out)));
+        assert!(!should_run(&StepCondition::OnSuccess, Some(&timed_out)));
     }
 
     #[test]

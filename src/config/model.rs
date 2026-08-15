@@ -125,6 +125,13 @@ pub struct Script {
 pub struct ScriptStep {
     pub command: String,
     pub condition: StepCondition,
+    /// Seconds this step may run for before it is killed, or `None` for the
+    /// built-in default (`ssh::script_runner::STEP_TIMEOUT`). Additive and
+    /// `serde(default)`, so a vault written before this field existed reads
+    /// back with every step on the default — nothing stored is reinterpreted,
+    /// which is why it needs no schema bump.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -237,6 +244,16 @@ mod tests {
 
         let key_auth = AuthMethod::SshKey { key_path: "/k".into(), passphrase: Some(Secret::from("pp".to_string())) };
         assert_eq!(serde_json::to_string(&key_auth).unwrap(), r#"{"SshKey":{"key_path":"/k","passphrase":"pp"}}"#);
+    }
+
+    /// `timeout_secs` was added after scripts shipped, so every step already in
+    /// a vault lacks the field and must read back as "use the default" rather
+    /// than failing the whole config.
+    #[test]
+    fn a_step_written_before_timeouts_existed_still_loads() {
+        let step: ScriptStep =
+            serde_json::from_str(r#"{"command":"uptime","condition":"Always"}"#).expect("an existing step must still deserialize");
+        assert_eq!(step.timeout_secs, None);
     }
 
     #[test]

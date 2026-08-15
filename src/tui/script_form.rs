@@ -9,6 +9,7 @@ use uuid::Uuid;
 use super::widgets::{MIN_FORM_WIDTH, render_form, render_if_too_small};
 use crate::config::{ScriptStep, StepCondition};
 use crate::i18n::Strings;
+use crate::ssh::script_runner::STEP_TIMEOUT;
 
 const CONDITION_COUNT: usize = 4;
 
@@ -35,6 +36,7 @@ enum StepFocus {
     Command,
     Condition,
     OutputText,
+    Timeout,
 }
 
 struct StepEditState {
@@ -44,6 +46,10 @@ struct StepEditState {
     command: String,
     condition_kind: usize,
     output_contains_text: String,
+    /// Free text rather than a number, because the field has to be able to be
+    /// empty — empty is what "use the default" looks like on screen, and a
+    /// `u64` has no way to say it.
+    timeout: String,
     focus: StepFocus,
 }
 
@@ -186,18 +192,20 @@ impl ScriptFormState {
 
     fn begin_step_edit(&mut self, editing_index: Option<usize>) {
         let existing = editing_index.and_then(|i| self.steps.get(i));
-        let (command, condition_kind, output_contains_text) = match existing {
+        let (command, condition_kind, output_contains_text, timeout) = match existing {
             Some(step) => {
                 let (kind, text) = condition_to_kind(&step.condition);
-                (step.command.clone(), kind, text)
+                let timeout = step.timeout_secs.map(|s| s.to_string()).unwrap_or_default();
+                (step.command.clone(), kind, text, timeout)
             }
-            None => (String::new(), 0, String::new()),
+            None => (String::new(), 0, String::new(), String::new()),
         };
         self.step_edit = Some(StepEditState {
             editing_index,
             command,
             condition_kind,
             output_contains_text,
+            timeout,
             focus: StepFocus::Command,
         });
     }
@@ -235,11 +243,15 @@ impl ScriptFormState {
                 StepFocus::OutputText => {
                     se.output_contains_text.pop();
                 }
+                StepFocus::Timeout => {
+                    se.timeout.pop();
+                }
                 StepFocus::Condition => {}
             },
             KeyCode::Char(c) => match se.focus {
                 StepFocus::Command => se.command.push(c),
                 StepFocus::OutputText => se.output_contains_text.push(c),
+                StepFocus::Timeout => se.timeout.push(c),
                 StepFocus::Condition => {}
             },
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -281,7 +293,20 @@ impl ScriptFormState {
             }
         };
 
-        let step = ScriptStep { command: se.command.trim().to_string(), condition };
+        // Empty means "use the default", which is also what every step written
+        // before this field existed deserialises to.
+        let timeout_secs = match se.timeout.trim() {
+            "" => None,
+            text => match text.parse::<u64>() {
+                Ok(secs) if secs > 0 => Some(secs),
+                _ => {
+                    self.error = Some(strings.err_step_timeout_invalid.to_string());
+                    return;
+                }
+            },
+        };
+
+        let step = ScriptStep { command: se.command.trim().to_string(), condition, timeout_secs };
         match se.editing_index {
             Some(i) => self.steps[i] = step,
             None => {
@@ -418,6 +443,20 @@ impl ScriptFormState {
                 ));
             }
         }
+        // Blank shows the default it would fall back to rather than an empty
+        // field, so the number in force is always on screen.
+        let timeout_value = if se.timeout.is_empty() {
+            format!(
+                "{}{}{}",
+                strings.step_timeout_default_prefix,
+                STEP_TIMEOUT.as_secs(),
+                strings.step_timeout_seconds_suffix
+            )
+        } else {
+            format!("{}{}", se.timeout, strings.step_timeout_seconds_suffix)
+        };
+        lines.push(field_line(strings.step_field_timeout, timeout_value, se.focus == StepFocus::Timeout));
+
         lines.push(Line::from(""));
         if let Some(err) = &self.error {
             lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(Color::Red))));
@@ -471,6 +510,7 @@ fn step_focus_order(is_first: bool, condition_kind: usize) -> Vec<StepFocus> {
             order.push(StepFocus::OutputText);
         }
     }
+    order.push(StepFocus::Timeout);
     order
 }
 
@@ -480,4 +520,98 @@ fn next_step_focus(current: StepFocus, is_first: bool, condition_kind: usize, de
     let len = order.len() as i32;
     let next = (idx as i32 + delta).rem_euclid(len) as usize;
     order[next]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::i18n::EN;
+
+    fn form_with_a_step_open() -> ScriptFormState {
+        let mut form = ScriptFormState::new_add(Uuid::new_v4(), "box".into());
+        form.focus = Focus::Steps;
+        form.handle_key(KeyEvent::from(KeyCode::Char('a')), &EN);
+        form
+    }
+
+    fn type_text(form: &mut ScriptFormState, text: &str) {
+        for c in text.chars() {
+            form.handle_key(KeyEvent::from(KeyCode::Char(c)), &EN);
+        }
+    }
+
+    fn focus_timeout(form: &mut ScriptFormState) {
+        for _ in 0..4 {
+            let se = form.step_edit.as_ref().expect("step editor open");
+            if se.focus == StepFocus::Timeout {
+                return;
+            }
+            form.handle_key(KeyEvent::from(KeyCode::Tab), &EN);
+        }
+        panic!("the timeout field is not in the focus order");
+    }
+
+    #[test]
+    fn a_step_with_no_timeout_entered_keeps_the_default() {
+        let mut form = form_with_a_step_open();
+        type_text(&mut form, "uptime");
+        form.handle_key(KeyEvent::from(KeyCode::Enter), &EN);
+        // Enter walks to the timeout field, then commits from the last one.
+        form.handle_key(KeyEvent::from(KeyCode::Enter), &EN);
+
+        assert_eq!(form.steps.len(), 1);
+        assert_eq!(form.steps[0].timeout_secs, None, "blank means the built-in default");
+    }
+
+    #[test]
+    fn a_timeout_typed_into_the_step_is_stored() {
+        let mut form = form_with_a_step_open();
+        type_text(&mut form, "sleep 300");
+        focus_timeout(&mut form);
+        type_text(&mut form, "5");
+        form.handle_key(KeyEvent::from(KeyCode::Enter), &EN);
+
+        assert_eq!(form.steps[0].timeout_secs, Some(5));
+    }
+
+    /// A step editor that swallowed "abc" as a timeout would produce a step
+    /// that silently ran on the default instead of what was typed.
+    #[test]
+    fn a_timeout_that_is_not_a_number_is_refused() {
+        let mut form = form_with_a_step_open();
+        type_text(&mut form, "uptime");
+        focus_timeout(&mut form);
+        type_text(&mut form, "abc");
+        form.handle_key(KeyEvent::from(KeyCode::Enter), &EN);
+
+        assert!(form.steps.is_empty(), "the step must not be committed");
+        assert_eq!(form.error.as_deref(), Some(EN.err_step_timeout_invalid));
+        assert!(form.step_edit.is_some(), "the editor stays open on the bad value");
+    }
+
+    /// Zero seconds is not "no timeout", it is a step that can never finish —
+    /// blank is how the default is asked for.
+    #[test]
+    fn a_zero_timeout_is_refused() {
+        let mut form = form_with_a_step_open();
+        type_text(&mut form, "uptime");
+        focus_timeout(&mut form);
+        type_text(&mut form, "0");
+        form.handle_key(KeyEvent::from(KeyCode::Enter), &EN);
+
+        assert!(form.steps.is_empty());
+        assert_eq!(form.error.as_deref(), Some(EN.err_step_timeout_invalid));
+    }
+
+    /// Editing an existing step shows the timeout it was saved with, so the
+    /// number does not quietly reset to the default on every edit.
+    #[test]
+    fn editing_a_step_shows_the_timeout_it_was_saved_with() {
+        let mut form = ScriptFormState::new_add(Uuid::new_v4(), "box".into());
+        form.steps.push(ScriptStep { command: "uptime".into(), condition: StepCondition::Always, timeout_secs: Some(30) });
+        form.focus = Focus::Steps;
+        form.handle_key(KeyEvent::from(KeyCode::Char('e')), &EN);
+
+        assert_eq!(form.step_edit.as_ref().expect("editor open").timeout.as_str(), "30");
+    }
 }

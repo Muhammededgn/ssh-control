@@ -109,6 +109,16 @@ impl ScriptRunState {
         )));
     }
 
+    /// A timeout is logged as a failure, not an error: the step ran, it just
+    /// did not finish, and the next step's `OnFailure` will see it that way.
+    pub fn step_timed_out(&mut self, seconds: u64, strings: &Strings) {
+        self.flush_partial();
+        self.log.push(Line::from(Span::styled(
+            format!("{}{seconds}{}", strings.log_timed_out_prefix, strings.log_timed_out_suffix),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
     pub fn step_skipped(&mut self, strings: &Strings) {
         self.log.push(Line::from(Span::styled(strings.log_skipped, Style::default().fg(Color::DarkGray))));
     }

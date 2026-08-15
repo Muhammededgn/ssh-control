@@ -1477,6 +1477,7 @@ impl App {
                         RunEvent::StepFinished { exit_code, .. } => run_state.step_finished(exit_code, strings),
                         RunEvent::StepSkipped { .. } => run_state.step_skipped(strings),
                         RunEvent::StepError { message, .. } => run_state.step_error(message, strings),
+                        RunEvent::StepTimedOut { seconds, .. } => run_state.step_timed_out(seconds, strings),
                     }
                     let _ = terminal.terminal.draw(|frame| {
                         let area = frame.area();
@@ -1534,6 +1535,13 @@ fn print_script_event_plain(event: RunEvent, strings: &Strings, partial: &mut St
                 let _ = write!(out, "{line}\r\n");
             }
             let _ = write!(out, "{}{message}\r\n", strings.log_error_prefix);
+        }
+        RunEvent::StepTimedOut { seconds, .. } => {
+            if !partial.is_empty() {
+                let line = std::mem::take(partial);
+                let _ = write!(out, "{line}\r\n");
+            }
+            let _ = write!(out, "{}{seconds}{}\r\n", strings.log_timed_out_prefix, strings.log_timed_out_suffix);
         }
     }
     let _ = out.flush();
