@@ -1,6 +1,8 @@
+use std::ops::ControlFlow;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -25,7 +27,10 @@ use crate::tui::server_form::{FormMode, FormOutcome, ServerFormData, ServerFormS
 use crate::tui::settings::{SettingsOutcome, SettingsState};
 use crate::tui::setup::{SetupOutcome, SetupState};
 use crate::tui::totp_prompt::{TotpPromptOutcome, TotpPromptState};
+use crate::ssh::{sftp, transfer};
+use crate::tui::file_browser::{BrowserEntry, FileBrowserOutcome, FileBrowserState, Side, TransferProgress};
 use crate::tui::help::{self, HelpTopic};
+use crate::tui::overwrite::{Decision, OverwriteChoice, OverwriteState};
 use crate::tui::totp_unlock::{TotpUnlockOutcome, TotpUnlockState};
 use crate::tui::unlock::{UnlockMode, UnlockOutcome, UnlockState};
 
@@ -41,6 +46,7 @@ enum Screen {
     ScriptForm(ScriptFormState),
     ConfirmDeleteScript { server_id: Uuid, script_id: Uuid, state: ConfirmState },
     ScriptRun(ScriptRunState),
+    FileBrowser(FileBrowserState),
 }
 
 /// Which set of keys the help overlay lists, for the screen currently on top.
@@ -58,6 +64,7 @@ fn help_topic(screen: &Screen) -> HelpTopic {
         Screen::Scripts(_) => HelpTopic::ScriptList,
         Screen::ScriptForm(_) => HelpTopic::ScriptForm,
         Screen::ScriptRun(_) => HelpTopic::ScriptRun,
+        Screen::FileBrowser(_) => HelpTopic::FileBrowser,
     }
 }
 
@@ -155,6 +162,11 @@ enum NextStep {
     ConfirmDeleteScriptNo,
     RunScript(Uuid, Uuid),
     ScriptRunClose,
+    GoFiles(Uuid),
+    FilesBack,
+    FilesTransfer,
+    FilesOpenRemote(String),
+    FilesRefresh,
 }
 
 pub struct App {
@@ -166,6 +178,23 @@ pub struct App {
     /// after every `handle_key`, so time spent inside an SSH session or a
     /// script run does not count as idle.
     last_activity: Instant,
+    /// The live connection the file browser lists and transfers over.
+    ///
+    /// A sibling of `state`, deliberately not a field inside `UnlockedState`:
+    /// every remote operation awaits, and no borrow of `state` may be held
+    /// across an await (see the `NextStep` pattern). As its own field it can be
+    /// taken out, used across the await, and put back afterwards.
+    remote: Option<RemoteSession>,
+}
+
+/// One authenticated connection plus its sftp channel. The russh handle has to
+/// be kept alive alongside the stream — dropping it closes the channel out from
+/// under the client.
+struct RemoteSession {
+    server_id: Uuid,
+    #[allow(dead_code, reason = "owned to keep the channel alive for the lifetime of the sftp stream")]
+    handle: russh::client::Handle<crate::ssh::client::Handler>,
+    sftp: crate::ssh::sftp::SftpClient<russh::ChannelStream<russh::client::Msg>>,
 }
 
 /// How many wrong codes in a row before the everyday TOTP path is refused and
@@ -189,6 +218,7 @@ impl App {
             lang,
             should_quit: false,
             last_activity: Instant::now(),
+            remote: None,
         };
         app.state = app.resolve_initial_state();
         app
@@ -339,6 +369,7 @@ impl App {
         }
 
         let message = self.lang.strings().status_auto_locked.to_string();
+        self.drop_remote();
         self.state = self.locked_state();
         match &mut self.state {
             AppState::Locked(unlock) => unlock.info = Some(message),
@@ -421,6 +452,7 @@ impl App {
                         Screen::ScriptForm(state) => state.render(frame, area, strings),
                         Screen::ConfirmDeleteScript { state, .. } => state.render(frame, area, strings),
                         Screen::ScriptRun(state) => state.render(frame, area, strings),
+                        Screen::FileBrowser(state) => state.render(frame, area, strings),
                     }
                     if help_open {
                         help::render(frame, area, topic, strings);
@@ -807,6 +839,7 @@ impl App {
                     MainMenuAction::Edit(id) => NextStep::GoEdit(id),
                     MainMenuAction::Delete(id) => NextStep::GoDelete(id),
                     MainMenuAction::Scripts(id) => NextStep::GoScripts(id),
+                    MainMenuAction::Files(id) => NextStep::GoFiles(id),
                     MainMenuAction::Lock => NextStep::Lock,
                     MainMenuAction::Settings => NextStep::GoSettings,
                     MainMenuAction::Help => NextStep::Help,
@@ -873,6 +906,14 @@ impl App {
                     ScriptRunOutcome::Close => NextStep::ScriptRunClose,
                     ScriptRunOutcome::Help => NextStep::Help,
                 },
+                Screen::FileBrowser(state) => match state.handle_key(key) {
+                    FileBrowserOutcome::None => NextStep::None,
+                    FileBrowserOutcome::Help => NextStep::Help,
+                    FileBrowserOutcome::Back => NextStep::FilesBack,
+                    FileBrowserOutcome::OpenRemote(path) => NextStep::FilesOpenRemote(path),
+                    FileBrowserOutcome::RefreshRemote => NextStep::FilesRefresh,
+                    FileBrowserOutcome::Transfer => NextStep::FilesTransfer,
+                },
             }
         };
 
@@ -883,8 +924,14 @@ impl App {
                     u.help_open = true;
                 }
             }
-            NextStep::Quit => self.should_quit = true,
-            NextStep::Lock => self.state = self.locked_state(),
+            NextStep::Quit => {
+                self.drop_remote();
+                self.should_quit = true;
+            }
+            NextStep::Lock => {
+                self.drop_remote();
+                self.state = self.locked_state();
+            }
             NextStep::GoAdd => self.with_unlocked(|u| {
                 u.screen = Screen::ServerForm(ServerFormState::new_add());
             }),
@@ -1017,6 +1064,19 @@ impl App {
                 }
             }),
             NextStep::RunScript(server_id, script_id) => self.run_script_flow(terminal, server_id, script_id).await?,
+            NextStep::GoFiles(id) => self.open_files_flow(terminal, id).await?,
+            NextStep::FilesOpenRemote(path) => self.list_remote_flow(terminal, Some(path)).await?,
+            NextStep::FilesRefresh => self.list_remote_flow(terminal, None).await?,
+            NextStep::FilesTransfer => self.transfer_flow(terminal).await?,
+            NextStep::FilesBack => {
+                self.remember_browser_dirs();
+                self.drop_remote();
+                self.with_unlocked(|u| {
+                    let mut menu = MainMenuState::new();
+                    menu.clamp_selection(&u.config.servers);
+                    u.screen = Screen::MainMenu(menu);
+                });
+            }
             NextStep::ScriptRunClose => self.with_unlocked(|u| {
                 let ctx = match &u.screen {
                     Screen::ScriptRun(state) => Some((state.server_id, state.server_name.clone())),
@@ -1029,6 +1089,16 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Closes the browser's connection.
+    ///
+    /// Dropping `RemoteSession` closes the channel and the ssh handle with it.
+    /// Called from every path that ends the browsing session — and, critically,
+    /// from the idle auto-lock: a locked vault that quietly kept an
+    /// authenticated connection open would defeat the point of locking.
+    fn drop_remote(&mut self) {
+        self.remote = None;
     }
 
     fn with_unlocked(&mut self, f: impl FnOnce(&mut UnlockedState)) {
@@ -1516,6 +1586,510 @@ impl App {
 
         Ok(())
     }
+
+    /// Opens the file browser: connect if needed, ask the server where "." is,
+    /// and list both sides.
+    ///
+    /// Follows `run_script_flow`'s shape — everything that crosses the await is
+    /// a local, and the screen is installed once the work is done. The vault's
+    /// remembered directory is a convenience: if it has vanished the listing
+    /// falls back to the login directory rather than opening on an error.
+    async fn open_files_flow(&mut self, terminal: &mut TerminalGuard, id: Uuid) -> Result<()> {
+        let strings = self.lang.strings();
+
+        let context = match &self.state {
+            AppState::Unlocked(u) => u.config.servers.iter().find(|e| e.id == id).map(|e| {
+                (ssh::Target::from_entry(e), e.name.clone(), e.last_remote_dir.clone(), e.last_local_dir.clone())
+            }),
+            _ => None,
+        };
+        let Some((target, server_name, last_remote, last_local)) = context else {
+            return Ok(());
+        };
+
+        // Connecting takes a moment on a slow link, and a frozen server list
+        // reads as a hang.
+        self.set_status(strings.file_browser_connecting.to_string());
+        self.draw(terminal)?;
+
+        if !self.remote.as_ref().is_some_and(|r| r.server_id == id) {
+            self.drop_remote();
+            match ssh::connect(&target).await {
+                Ok(connected) => {
+                    let mut handle = connected.handle;
+                    match sftp::open_session(&mut handle).await {
+                        Ok(sftp) => self.remote = Some(RemoteSession { server_id: id, handle, sftp }),
+                        Err(e) => return self.fail_to_open_files(e),
+                    }
+                }
+                Err(e) => return self.fail_to_open_files(e),
+            }
+        }
+
+        let local_cwd = last_local
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("/"));
+
+        let session = self.remote.as_mut().expect("just connected");
+        let remote_cwd = match session.sftp.realpath(last_remote.as_deref().unwrap_or(".")).await {
+            Ok(path) => path,
+            // The remembered directory is gone. Fall back rather than open on
+            // an error — it was a convenience, not a promise.
+            Err(_) => session.sftp.realpath(".").await.unwrap_or_else(|_| "/".to_string()),
+        };
+        let listing = session.sftp.list_dir(&remote_cwd).await;
+
+        let mut browser = FileBrowserState::new(id, server_name, local_cwd, remote_cwd.clone());
+        match listing {
+            Ok(entries) => browser.set_remote(remote_cwd, remote_entries(entries, browser.show_hidden())),
+            Err(e) => {
+                self.drop_remote_if_fatal(&e);
+                browser.set_remote_error(format!("{}{e}", strings.sftp_error_prefix));
+            }
+        }
+
+        self.with_unlocked(|u| {
+            u.status = None;
+            u.screen = Screen::FileBrowser(browser);
+        });
+        Ok(())
+    }
+
+    /// Lists a remote directory into the open browser — either a new path
+    /// (`Enter`, `Backspace`) or the current one again (`r`, or the hidden-file
+    /// toggle).
+    async fn list_remote_flow(&mut self, terminal: &mut TerminalGuard, path: Option<String>) -> Result<()> {
+        let strings = self.lang.strings();
+
+        let context = match &self.state {
+            AppState::Unlocked(u) => match &u.screen {
+                Screen::FileBrowser(browser) => Some((
+                    path.unwrap_or_else(|| browser.remote.cwd.clone()),
+                    browser.show_hidden(),
+                    browser.server_id,
+                )),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some((path, show_hidden, server_id)) = context else {
+            return Ok(());
+        };
+
+        // Without a session there is nothing to list; the browser is already
+        // showing why.
+        if !self.remote.as_ref().is_some_and(|r| r.server_id == server_id) {
+            return Ok(());
+        }
+
+        self.draw(terminal)?;
+        let session = self.remote.as_mut().expect("checked above");
+        let listing = session.sftp.list_dir(&path).await;
+
+        match listing {
+            Ok(entries) => {
+                let entries = remote_entries(entries, show_hidden);
+                self.with_unlocked(|u| {
+                    if let Screen::FileBrowser(browser) = &mut u.screen {
+                        browser.set_remote(path, entries);
+                    }
+                });
+            }
+            Err(e) => {
+                self.drop_remote_if_fatal(&e);
+                let message = format!("{}{e}", strings.sftp_error_prefix);
+                self.with_unlocked(|u| {
+                    if let Screen::FileBrowser(browser) = &mut u.screen {
+                        browser.set_remote_error(message);
+                    }
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// A connection that never opened leaves the user on the server list with
+    /// the reason, rather than on an empty browser that can do nothing.
+    fn fail_to_open_files(&mut self, error: AppError) -> Result<()> {
+        let strings = self.lang.strings();
+        self.drop_remote();
+        self.set_status(format!("{}{error}", strings.connect_error_prefix));
+        Ok(())
+    }
+
+    /// A protocol error means the stream is desynced and a lost connection
+    /// means there is nothing on the other end — both make the session
+    /// unusable, while a plain "permission denied" does not.
+    fn drop_remote_if_fatal(&mut self, error: &AppError) {
+        let fatal = match error {
+            AppError::Sftp(_) | AppError::Io(_) | AppError::Ssh(_) => true,
+            AppError::SftpStatus { code, .. } => {
+                *code == sftp::wire::FX_NO_CONNECTION || *code == sftp::wire::FX_CONNECTION_LOST
+            }
+            _ => false,
+        };
+        if fatal {
+            self.drop_remote();
+        }
+    }
+
+    fn set_status(&mut self, text: String) {
+        self.with_unlocked(|u| u.status = Some(StatusMessage::new(text)));
+    }
+
+    /// Scans, asks about collisions, then moves the bytes.
+    ///
+    /// The three phases are deliberate. Scanning first is what makes a real
+    /// percentage possible, and resolving every collision *before* the copy
+    /// starts means the byte loop never has to stop for a question — a prompt
+    /// in the middle of it would have to run while a `&mut SftpClient` is held
+    /// over a half-written file.
+    async fn transfer_flow(&mut self, terminal: &mut TerminalGuard) -> Result<()> {
+        let strings = self.lang.strings();
+
+        // Everything that crosses the await is taken out as a local first, the
+        // screen included — same as `run_script_flow`.
+        let Some(mut browser) = self.take_browser() else {
+            return Ok(());
+        };
+        let (side, dest) = browser.direction();
+        let sources: Vec<(String, bool)> = browser
+            .pane(side)
+            .transfer_selection()
+            .into_iter()
+            .map(|e| (join_for(side, &browser.pane(side).cwd, &e.name), e.is_dir))
+            .collect();
+
+        if sources.is_empty() || self.remote.as_ref().is_none_or(|r| r.server_id != browser.server_id) {
+            browser.status = Some(strings.transfer_nothing_selected.to_string());
+            self.put_browser(browser);
+            return Ok(());
+        }
+
+        let direction = match side {
+            Side::Local => transfer::Direction::Upload,
+            Side::Remote => transfer::Direction::Download,
+        };
+        let title = match direction {
+            transfer::Direction::Upload => strings.transfer_title_upload,
+            transfer::Direction::Download => strings.transfer_title_download,
+        };
+
+        let mut session = self.remote.take().expect("checked above");
+        let outcome = run_transfer(&mut session.sftp, terminal, &mut browser, direction, &sources, &dest, title, strings).await;
+        self.remote = Some(session);
+
+        let status = match outcome {
+            Ok(summary) => Some(summarize(&summary, strings)),
+            Err(e) => {
+                self.drop_remote_if_fatal(&e);
+                Some(format!("{}{e}", strings.sftp_error_prefix))
+            }
+        };
+
+        // Both sides may have changed: the destination has new files, and the
+        // source is where a failed `.part` would have been cleaned up.
+        browser.progress = None;
+        browser.status = status;
+        browser.reload_local();
+        let refresh = browser.remote.cwd.clone();
+        self.put_browser(browser);
+        self.list_remote_flow(terminal, Some(refresh)).await
+    }
+
+    /// Takes the browser out of the screen so it can be borrowed across an
+    /// await. The screen is left on the menu only if something goes wrong
+    /// before `put_browser` runs, which no path does.
+    fn take_browser(&mut self) -> Option<FileBrowserState> {
+        let AppState::Unlocked(u) = &mut self.state else {
+            return None;
+        };
+        match std::mem::replace(&mut u.screen, Screen::MainMenu(MainMenuState::new())) {
+            Screen::FileBrowser(browser) => Some(browser),
+            other => {
+                u.screen = other;
+                None
+            }
+        }
+    }
+
+    fn put_browser(&mut self, browser: FileBrowserState) {
+        self.with_unlocked(|u| u.screen = Screen::FileBrowser(browser));
+    }
+
+    /// Remembers where both panes were pointed, so the next visit starts there.
+    ///
+    /// Saved on the way out rather than on every `cd`: a save re-encrypts and
+    /// rewrites the whole vault, which is far too much work for a keystroke.
+    /// Best-effort, like the saves `connect_flow` makes.
+    fn remember_browser_dirs(&mut self) {
+        let dirs = match &self.state {
+            AppState::Unlocked(u) => match &u.screen {
+                Screen::FileBrowser(browser) => {
+                    Some((browser.server_id, browser.local.cwd.clone(), browser.remote.cwd.clone()))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some((server_id, local, remote)) = dirs else {
+            return;
+        };
+
+        if let AppState::Unlocked(u) = &mut self.state
+            && let Some(entry) = u.config.servers.iter_mut().find(|e| e.id == server_id)
+        {
+            entry.last_local_dir = Some(local);
+            entry.last_remote_dir = Some(remote);
+            let _ = self.store.save(&u.config, &u.master_key, &u.slots);
+        }
+    }
+
+}
+
+/// Joins a selected name onto its pane's directory, on whichever side it came
+/// from: remote paths are always `/`-separated, local ones go through `Path`.
+fn join_for(side: Side, cwd: &str, name: &str) -> String {
+    match side {
+        Side::Remote => crate::tui::file_browser::remote_join(cwd, name),
+        Side::Local => PathBuf::from(cwd).join(name).to_string_lossy().into_owned(),
+    }
+}
+
+/// One line describing what a finished run did.
+fn summarize(summary: &transfer::TransferSummary, strings: &Strings) -> String {
+    if summary.cancelled && summary.files == 0 {
+        return strings.transfer_cancelled.to_string();
+    }
+    let mut text = format!(
+        "{}{}{}{}",
+        strings.transfer_done_prefix,
+        summary.files,
+        strings.transfer_done_separator,
+        crate::tui::widgets::format_size(summary.bytes)
+    );
+    if summary.cancelled {
+        text.push_str(" — ");
+        text.push_str(strings.transfer_cancelled);
+    }
+    if let Some(first) = summary.failures.first() {
+        text.push_str(" — ");
+        text.push_str(strings.transfer_failed_prefix);
+        text.push_str(first);
+        if summary.failures.len() > 1 {
+            text.push_str(&format!(" (+{})", summary.failures.len() - 1));
+        }
+    }
+    text
+}
+
+
+/// Drives one transfer: scan, ask about collisions, copy.
+///
+/// Free-standing rather than a method because it borrows the sftp session and
+/// the screen state as plain locals — both were taken out of `self` before the
+/// first await, which is what keeps the `NextStep` rule intact.
+#[allow(clippy::too_many_arguments, reason = "every argument is already a local the flow had to take out of self")]
+async fn run_transfer(
+    sftp: &mut sftp::SftpClient<russh::ChannelStream<russh::client::Msg>>,
+    terminal: &mut TerminalGuard,
+    browser: &mut FileBrowserState,
+    direction: transfer::Direction,
+    sources: &[(String, bool)],
+    dest: &str,
+    title: &'static str,
+    strings: &'static Strings,
+) -> Result<transfer::TransferSummary> {
+    // Phase 1: the walk. It can take a while on a deep tree, so it reports as
+    // it goes and can be cancelled like the copy itself.
+    browser.progress = Some(TransferProgress {
+        title: title.to_string(),
+        name: String::new(),
+        file_index: 0,
+        file_count: 0,
+        done_bytes: 0,
+        total_bytes: 0,
+        scanning: true,
+    });
+
+    let mut cancelled = false;
+    let mut last_draw = Instant::now();
+    let plan = transfer::plan(sftp, direction, sources, dest, |event| {
+        if let transfer::TransferEvent::Scanning { files, bytes } = event
+            && let Some(progress) = &mut browser.progress
+        {
+            progress.file_count = files;
+            progress.total_bytes = bytes;
+        }
+        if redraw_and_poll_cancel(terminal, browser, strings, &mut last_draw, true) {
+            cancelled = true;
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    })
+    .await;
+
+    if cancelled {
+        return Ok(transfer::TransferSummary { cancelled: true, ..Default::default() });
+    }
+    let mut plan = plan?;
+
+    // Phase 2: every collision is settled before a byte moves.
+    if !resolve_conflicts(terminal, browser, &mut plan, strings)? {
+        return Ok(transfer::TransferSummary { cancelled: true, ..Default::default() });
+    }
+
+    // Phase 3: the bytes.
+    let total_bytes = plan.planned_bytes();
+    let file_count = plan.file_count();
+    if let Some(progress) = &mut browser.progress {
+        progress.scanning = false;
+        progress.total_bytes = total_bytes;
+        progress.file_count = file_count;
+        progress.file_index = 0;
+        progress.done_bytes = 0;
+    }
+
+    let mut last_draw = Instant::now();
+    let summary = transfer::run(sftp, direction, &plan, |event| {
+        if let Some(progress) = &mut browser.progress {
+            match event {
+                transfer::TransferEvent::ItemStarted { name, .. } => {
+                    progress.name = name.to_string();
+                    progress.file_index += 1;
+                }
+                transfer::TransferEvent::Progress { done_bytes } => progress.done_bytes = done_bytes,
+                _ => {}
+            }
+        }
+        if redraw_and_poll_cancel(terminal, browser, strings, &mut last_draw, false) {
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    })
+    .await;
+
+    Ok(summary)
+}
+
+/// Redraws at most every `REDRAW_INTERVAL`, but polls for a cancel key every
+/// single time.
+///
+/// The two are deliberately on different clocks: a 32 KiB chunk on a LAN would
+/// otherwise redraw thousands of times a second, while `poll(ZERO)` is one
+/// cheap syscall and Esc has to feel immediate.
+fn redraw_and_poll_cancel(
+    terminal: &mut TerminalGuard,
+    browser: &mut FileBrowserState,
+    strings: &Strings,
+    last_draw: &mut Instant,
+    force: bool,
+) -> bool {
+    const REDRAW_INTERVAL: Duration = Duration::from_millis(50);
+
+    if force || last_draw.elapsed() >= REDRAW_INTERVAL {
+        *last_draw = Instant::now();
+        let _ = terminal.terminal.draw(|frame| {
+            let area = frame.area();
+            browser.render(frame, area, strings);
+        });
+    }
+    cancel_requested()
+}
+
+/// Drains whatever the user typed during a transfer, looking for Esc or
+/// Ctrl+C. These keystrokes never reach `App::run` — it is blocked inside the
+/// flow's await — so they have to be read here or not at all.
+fn cancel_requested() -> bool {
+    let mut cancel = false;
+    while event::poll(Duration::ZERO).unwrap_or(false) {
+        match event::read() {
+            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                let ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+                if key.code == KeyCode::Esc || ctrl_c {
+                    cancel = true;
+                }
+            }
+            // Resizes and mouse events are drained rather than left to pile up
+            // behind the transfer.
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    cancel
+}
+
+/// Asks about every file that would be replaced. Returns `false` if the user
+/// cancelled the whole transfer.
+///
+/// A blocking `event::read()` is right here: the run loop is not running, and
+/// this is the one moment the flow genuinely has nothing to do but wait.
+fn resolve_conflicts(
+    terminal: &mut TerminalGuard,
+    browser: &mut FileBrowserState,
+    plan: &mut transfer::TransferPlan,
+    strings: &Strings,
+) -> Result<bool> {
+    let conflicts = plan.conflicts();
+    let mut sticky: Option<Decision> = None;
+
+    for (position, index) in conflicts.iter().enumerate() {
+        let remaining = conflicts.len() - position;
+        let decision = match sticky {
+            Some(decision) => decision,
+            None => {
+                let name = plan.items[*index].display_name().to_string();
+                let mut prompt = OverwriteState::new(name, remaining);
+                loop {
+                    let _ = terminal.terminal.draw(|frame| {
+                        let area = frame.area();
+                        browser.render(frame, area, strings);
+                        prompt.render(frame, area, strings);
+                    });
+
+                    let Event::Key(key) = event::read().map_err(AppError::Io)? else {
+                        continue;
+                    };
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    match prompt.handle_key(key) {
+                        OverwriteChoice::None => continue,
+                        OverwriteChoice::Cancel => return Ok(false),
+                        OverwriteChoice::Overwrite => {
+                            if prompt.apply_to_all {
+                                sticky = Some(Decision::Overwrite);
+                            }
+                            break Decision::Overwrite;
+                        }
+                        OverwriteChoice::Skip => {
+                            if prompt.apply_to_all {
+                                sticky = Some(Decision::Skip);
+                            }
+                            break Decision::Skip;
+                        }
+                    }
+                }
+            }
+        };
+
+        if decision == Decision::Skip {
+            plan.items[*index].skip = Some(transfer::SkipReason::Exists);
+        }
+    }
+    Ok(true)
+}
+
+/// Server entries as browser rows, applying the same dotfile filter the local
+/// side uses — both panes hide hidden files together or neither does.
+fn remote_entries(entries: Vec<sftp::RemoteEntry>, show_hidden: bool) -> Vec<BrowserEntry> {
+    entries
+        .into_iter()
+        .filter(|e| show_hidden || !e.name.starts_with('.'))
+        .map(|e| BrowserEntry { is_dir: e.is_dir(), name: e.name, size: e.size })
+        .collect()
 }
 
 /// Plain (non-TUI) sink for `run_on_connect` scripts, since they execute

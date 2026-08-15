@@ -122,6 +122,7 @@ pub enum MainMenuAction {
     Edit(Uuid),
     Delete(Uuid),
     Scripts(Uuid),
+    Files(Uuid),
     Lock,
     Settings,
     /// `?` only reaches here outside `/` mode — while the filter is taking
@@ -206,6 +207,10 @@ impl MainMenuState {
             KeyCode::Char('s') => self
                 .selected_entry(servers)
                 .map(|s| MainMenuAction::Scripts(s.id))
+                .unwrap_or(MainMenuAction::None),
+            KeyCode::Char('f') => self
+                .selected_entry(servers)
+                .map(|s| MainMenuAction::Files(s.id))
                 .unwrap_or(MainMenuAction::None),
             KeyCode::Char('l') => MainMenuAction::Lock,
             KeyCode::F(1) => MainMenuAction::Settings,
@@ -415,6 +420,8 @@ mod tests {
                 system_info: None,
                 last_connected_unix: None,
                 scripts: Vec::new(),
+                last_remote_dir: None,
+                last_local_dir: None,
             })
             .collect()
     }

@@ -22,6 +22,9 @@ so `vim`, `htop`, `tmux` and Ctrl+C behave exactly as they would under plain
 - **Per-server scripts** — ordered command chains with per-step conditions
   (always, on success, on failure, output contains) and per-step timeouts,
   optionally auto-run on connect
+- **File browser** — two panes, local and remote, over a hand-written SFTP
+  client: upload and download files or whole folders, with progress and a
+  cancel key
 - **Search** — `/` filters the server list by name, host or username
 - **Keybinding overlay** — `F2` (or `?` on the lists) shows what the current
   screen can do
@@ -85,16 +88,36 @@ rather than failing obscurely when piped or run from a service manager.
 
 | Screen | Keys |
 |---|---|
-| Server list | `Enter` connect · `/` search · `a` add · `e` edit · `d` delete · `s` scripts · `l` lock · `F1` settings · `q` quit |
+| Server list | `Enter` connect · `/` search · `a` add · `e` edit · `d` delete · `s` scripts · `f` files · `l` lock · `F1` settings · `q` quit |
 | Forms | `Tab` next field · `Ctrl+Enter` save · `Esc` cancel |
 | Script list | `Enter` run · `a` add · `e` edit · `d` delete · `Esc` back |
 | Step editor | `←`/`→` change condition · `Ctrl+↑`/`Ctrl+↓` reorder · `Esc` cancel |
 | Run log | `↑`/`↓` `PgUp`/`PgDn` `Home` scroll · `End` follow the tail |
+| File browser | `Tab` switch pane · `Enter` open · `Backspace` up · `Space` mark · `t` transfer · `r` refresh · `.` hidden files · `Esc` back |
 | Settings | `←`/`→` switch tab · `Esc` back |
 | Anywhere | `F2` keybindings, and `?` on the lists and the run log |
 
 While `/` is open every key is filter text, so the single-letter shortcuts are
 unavailable until `Enter` (connect, keeping the filter) or `Esc` (clear it).
+
+## Transferring files
+
+`f` opens the browser: your filesystem on the left, the server on the right.
+Which way a transfer goes is decided by which pane has focus — the focused side
+is the source, the other side's directory is the destination — so `t` uploads
+from the left and downloads from the right. `Space` marks several entries;
+with nothing marked, the cursor is what moves. Folders transfer whole.
+
+The transfer is scanned before it starts, which is where the progress figure
+comes from and where existing files are found: every collision is settled up
+front (overwrite, skip, or apply the answer to the rest) so nothing stops half
+way to ask. `Esc` cancels, and nothing partial is left behind — files are
+written under a `.part` name and renamed once complete.
+
+Two limits worth knowing. Symlinks are listed but never followed or copied: a
+directory symlink can point back up its own tree. And the client sends one
+32 KiB request at a time, so throughput is bound by the round trip — fine on a
+LAN, noticeably slower than `scp` across a continent.
 
 Settings (`F1`) covers the UI language, changing the master password, and the
 two-factor / TOTP modes.

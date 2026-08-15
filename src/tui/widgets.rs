@@ -154,6 +154,25 @@ pub fn render_form(
     frame.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)).block(block), area);
 }
 
+/// A byte count at whichever unit keeps it readable — "4.0 KiB", "1.2 GiB".
+///
+/// Distinct from `main_menu`'s fixed-GiB helper on purpose: that one compares
+/// two figures of the same magnitude (RAM used against RAM total), where a
+/// shifting unit would make the pair harder to read. Here the numbers range
+/// from a few bytes to several gigabytes and a fixed unit would print
+/// "0.0 GiB" for most files.
+pub fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    // Whole bytes never need a decimal point; anything scaled does.
+    if unit == 0 { format!("{bytes} B") } else { format!("{value:.1} {}", UNITS[unit]) }
+}
+
 /// Renders `data` as a QR code in half-block characters, for scanning an
 /// `otpauth://` URI with a phone. An unencodable string yields one blank line
 /// rather than an error: the secret is always shown as text beside the code, so
@@ -184,6 +203,15 @@ mod tests {
     #[test]
     fn an_empty_list_gets_no_counter() {
         assert_eq!(list_title_with_position(" Servers ", 0, 0), " Servers ");
+    }
+
+    #[test]
+    fn sizes_scale_to_a_readable_unit() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(1024), "1.0 KiB");
+        assert_eq!(format_size(1536), "1.5 KiB");
+        assert_eq!(format_size(3 * 1024 * 1024 * 1024), "3.0 GiB");
     }
 
     #[test]
