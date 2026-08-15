@@ -149,6 +149,13 @@ impl Encoder {
         e
     }
 
+    /// A packet with neither an id nor a version — only `VERSION`, which the
+    /// fake server in `client.rs`'s tests has to be able to send.
+    #[cfg(test)]
+    pub fn raw(kind: u8) -> Self {
+        Self { buf: vec![kind] }
+    }
+
     /// `INIT` has no request id — it is the one packet sent before ids exist.
     /// The same is true of the `VERSION` reply, and mixing them up shifts every
     /// later field by four bytes, which is the classic first bug here.
