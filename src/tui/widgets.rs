@@ -42,6 +42,18 @@ pub fn mask(s: &str) -> String {
     "*".repeat(s.chars().count())
 }
 
+/// Clears `area` and puts the theme's own surface back underneath.
+///
+/// `Clear` resets every cell to the terminal's own default, which under a
+/// preset with a background of its own is a hole punched through the middle of
+/// the frame.
+/// Every overlay wants the surface back, not the terminal — so no screen may
+/// render a bare `Clear` any more.
+pub fn clear_surface(frame: &mut Frame, area: Rect) {
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::default().style(theme::band()), area);
+}
+
 /// Appends a `(3/17)` position counter to a list's block title.
 ///
 /// Counts *items*, not rows, and that is the point: a server row is one or two
@@ -101,7 +113,7 @@ pub fn render_if_too_small(
         .wrap(Wrap { trim: true })
         .alignment(Alignment::Center)
         .style(Style::default().fg(theme::warning()));
-    frame.render_widget(Clear, area);
+    clear_surface(frame, area);
     frame.render_widget(paragraph, area);
     true
 }

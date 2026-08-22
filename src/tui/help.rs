@@ -2,9 +2,9 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
-use super::widgets::centered_rect;
+use super::widgets::{self, centered_rect};
 use crate::i18n::Strings;
 use crate::tui::theme;
 
@@ -86,7 +86,7 @@ pub fn render(frame: &mut Frame, area: Rect, topic: HelpTopic, strings: &'static
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(strings.help_title, Style::default().add_modifier(Modifier::BOLD)));
-    frame.render_widget(Clear, popup);
+    widgets::clear_surface(frame, popup);
     frame.render_widget(Paragraph::new(rows).block(block), popup);
 }
 

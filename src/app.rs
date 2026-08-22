@@ -18,6 +18,7 @@ use crate::ssh;
 use crate::ssh::script_runner::{self, OwnedRunEvent, RunEvent, ScriptVars};
 use crate::terminal::TerminalGuard;
 use crate::totp::{self, AuthMode};
+use crate::tui::chrome;
 use crate::tui::confirm::{ConfirmOutcome, ConfirmState};
 use crate::tui::main_menu::{MainMenuAction, MainMenuState};
 use crate::tui::script_form::{FormMode as ScriptFormMode, ScriptFormData, ScriptFormOutcome, ScriptFormState};
@@ -405,24 +406,28 @@ impl App {
             AppState::Locked(unlock) => {
                 terminal.terminal.draw(|frame| {
                     let area = frame.area();
+                    chrome::paint_background(frame, area);
                     unlock.render(frame, area, strings);
                 })?;
             }
             AppState::LockedTotpDaily(totp_unlock) => {
                 terminal.terminal.draw(|frame| {
                     let area = frame.area();
+                    chrome::paint_background(frame, area);
                     totp_unlock.render(frame, area, strings);
                 })?;
             }
             AppState::Setup(setup) => {
                 terminal.terminal.draw(|frame| {
                     let area = frame.area();
+                    chrome::paint_background(frame, area);
                     setup.render(frame, area, strings);
                 })?;
             }
             AppState::Unopenable => {
                 terminal.terminal.draw(|frame| {
                     let area = frame.area();
+                    chrome::paint_background(frame, area);
                     crate::tui::setup::render_unopenable(frame, area, strings);
                 })?;
             }
@@ -430,6 +435,7 @@ impl App {
                 let (title, message) = (*title, *message);
                 terminal.terminal.draw(|frame| {
                     let area = frame.area();
+                    chrome::paint_background(frame, area);
                     crate::tui::setup::render_cannot_open(frame, area, title, message);
                 })?;
             }
@@ -443,6 +449,7 @@ impl App {
                 let UnlockedState { config, screen, .. } = &mut **u;
                 terminal.terminal.draw(|frame| {
                     let area = frame.area();
+                    chrome::paint_background(frame, area);
                     match screen {
                         Screen::MainMenu(state) => state.render(frame, area, &config.servers, config.server_sort, status.as_deref(), strings),
                         Screen::ServerForm(state) => state.render(frame, area, strings),
@@ -2116,6 +2123,7 @@ fn redraw_and_poll_cancel(
         *last_draw = Instant::now();
         let _ = terminal.terminal.draw(|frame| {
             let area = frame.area();
+            chrome::paint_background(frame, area);
             browser.render(frame, area, strings);
         });
     }
@@ -2168,6 +2176,7 @@ fn resolve_conflicts(
                 loop {
                     let _ = terminal.terminal.draw(|frame| {
                         let area = frame.area();
+                        chrome::paint_background(frame, area);
                         browser.render(frame, area, strings);
                         prompt.render(frame, area, strings);
                     });
@@ -2236,6 +2245,7 @@ fn apply_run_event(event: OwnedRunEvent, run_state: &mut ScriptRunState, strings
 fn draw_run(terminal: &mut TerminalGuard, run_state: &mut ScriptRunState, strings: &'static Strings) {
     let _ = terminal.terminal.draw(|frame| {
         let area = frame.area();
+        chrome::paint_background(frame, area);
         run_state.render(frame, area, strings);
     });
 }

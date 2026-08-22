@@ -17,7 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use uuid::Uuid;
 
-use super::widgets::{format_size, render_if_too_small, render_list_scrollbar};
+use super::widgets::{self, format_size, render_if_too_small, render_list_scrollbar};
 use crate::i18n::Strings;
 use crate::tui::theme;
 
@@ -395,7 +395,7 @@ fn render_progress(frame: &mut Frame, area: Rect, progress: &TransferProgress, s
     lines.push(Line::from(Span::styled(strings.transfer_hint, Style::default().fg(theme::hint()))));
 
     let box_area = super::widgets::centered_rect(60, lines.len() as u16 + 2, area);
-    frame.render_widget(ratatui::widgets::Clear, box_area);
+    widgets::clear_surface(frame, box_area);
     frame.render_widget(
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(progress.title.clone())),
         box_area,

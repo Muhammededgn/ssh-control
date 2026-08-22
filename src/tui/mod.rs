@@ -1,3 +1,4 @@
+pub mod chrome;
 pub mod confirm;
 pub mod file_browser;
 pub mod help;

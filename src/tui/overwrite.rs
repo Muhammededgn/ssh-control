@@ -15,7 +15,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use super::widgets::centered_rect;
 use crate::i18n::Strings;
@@ -86,7 +86,7 @@ impl OverwriteState {
             .borders(Borders::ALL)
             .title(strings.overwrite_title)
             .style(Style::default().fg(theme::warning()));
-        frame.render_widget(Clear, box_area);
+        crate::tui::widgets::clear_surface(frame, box_area);
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }).block(block), box_area);
     }
 }
