@@ -295,7 +295,11 @@ impl SetupState {
     /// own, so neither can be the thing that gets scrolled away.
     fn render_choose_mode(&self, frame: &mut Frame, area: Rect, strings: &Strings) {
         let width = 76.min(area.width.saturating_sub(4)).max(widgets::MIN_PANEL_WIDTH);
-        let height = area.height.min(24);
+        // The whole body, not a capped 24 rows. The cap looked like restraint
+        // and behaved like the original bug: on a 34-row terminal it held the
+        // panel to 24 and scrolled the fourth mode off a frame that had ten
+        // spare rows for it.
+        let height = area.height;
         let rect = widgets::centered_rect(width, height, area);
         if widgets::render_if_too_small(frame, rect, widgets::MIN_PANEL_WIDTH, widgets::MIN_PANEL_HEIGHT, strings.terminal_too_small) {
             return;
@@ -310,36 +314,53 @@ impl SetupState {
             Some(err) => Span::styled(err.clone(), Style::default().fg(theme::error())),
             None => Span::styled(strings.setup_choose_hint, Style::default().fg(theme::hint())),
         });
-        let intro_rows = widgets::wrapped_height(&[Line::from(strings.setup_intro)], inner.width) as u16;
         let footer_rows = widgets::wrapped_height(std::slice::from_ref(&footer), inner.width) as u16;
+        // The intro explains the screen once; the modes are what the screen is
+        // for. On a frame this short those four rows are the difference between
+        // seeing two modes and seeing three, so the explanation gives way.
+        let intro_rows = widgets::wrapped_height(&[Line::from(strings.setup_intro)], inner.width) as u16;
+        let intro_rows = if inner.height >= intro_rows + footer_rows + 14 { intro_rows + 1 } else { 0 };
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(intro_rows + 1), Constraint::Min(3), Constraint::Length(footer_rows)])
+            .constraints([Constraint::Length(intro_rows), Constraint::Min(3), Constraint::Length(footer_rows)])
             .split(inner);
 
-        let intro = Paragraph::new(Span::styled(strings.setup_intro, Style::default().fg(theme::hint()))).wrap(Wrap { trim: false });
-        frame.render_widget(intro, rows[0]);
+        if intro_rows > 0 {
+            let intro = Paragraph::new(Span::styled(strings.setup_intro, Style::default().fg(theme::hint()))).wrap(Wrap { trim: false });
+            frame.render_widget(intro, rows[0]);
+        }
 
+        // A `List` truncates rather than wraps, so the descriptions are wrapped
+        // by hand. The width allows for the selection marker on the left and
+        // the scrollbar's column on the right; without that subtraction the
+        // last word of every description ran under the scrollbar.
+        let text_width = rows[1].width.saturating_sub(widgets::SELECT_MARKER.chars().count() as u16 + 3);
+        let last = MODES.len() - 1;
         let items: Vec<ListItem> = MODES
             .iter()
-            .map(|mode| {
+            .enumerate()
+            .map(|(i, mode)| {
                 let available = self.mode_available(*mode);
                 let title = if available {
                     Span::raw(mode_title(*mode, strings))
                 } else {
                     Span::styled(mode_title(*mode, strings), Style::default().fg(theme::hint()).add_modifier(Modifier::DIM))
                 };
-                let mut lines = vec![
-                    Line::from(title),
-                    Line::from(Span::styled(format!("  {}", mode_description(*mode, strings)), Style::default().fg(theme::hint()))),
-                ];
-                if !available {
-                    lines.push(Line::from(Span::styled(
-                        format!("  {}", strings.setup_needs_credential_store),
-                        Style::default().fg(theme::warning()),
-                    )));
+                let mut lines = vec![Line::from(title)];
+                for row in widgets::wrap_text(mode_description(*mode, strings), text_width.saturating_sub(2)) {
+                    lines.push(Line::from(Span::styled(format!("  {row}"), Style::default().fg(theme::hint()))));
                 }
-                lines.push(Line::from(""));
+                if !available {
+                    for row in widgets::wrap_text(strings.setup_needs_credential_store, text_width.saturating_sub(2)) {
+                        lines.push(Line::from(Span::styled(format!("  {row}"), Style::default().fg(theme::warning()))));
+                    }
+                }
+                // A separator between modes, not after the last one: that
+                // trailing blank is a row, and rows are what decides whether
+                // the fourth mode needs scrolling to.
+                if i != last {
+                    lines.push(Line::from(""));
+                }
                 ListItem::new(lines)
             })
             .collect();
@@ -352,6 +373,7 @@ impl SetupState {
         let list = List::new(items).highlight_style(theme::selection()).highlight_symbol(widgets::SELECT_MARKER);
         frame.render_stateful_widget(list, rows[1], &mut list_state);
         widgets::render_list_scrollbar(frame, rows[1], self.selected, MODES.len());
+
 
         frame.render_widget(Paragraph::new(footer).wrap(Wrap { trim: false }), rows[2]);
     }
@@ -646,8 +668,13 @@ mod tests {
         for (width, height) in [(100, 24), (80, 20), (56, 16)] {
             for (index, mode) in MODES.iter().enumerate() {
                 let mut state = SetupState::new(true);
+                // Both directions: the chooser opens on mode 2, so walking
+                // only downwards never reaches the first one.
                 while state.selected < index {
                     press(&mut state, KeyCode::Down);
+                }
+                while state.selected > index {
+                    press(&mut state, KeyCode::Up);
                 }
                 let rendered = draw(&mut state, width, height);
                 assert!(
@@ -657,6 +684,17 @@ mod tests {
                     height
                 );
             }
+        }
+    }
+
+    /// And on a frame with room for all four, all four are actually drawn —
+    /// a list that scrolls when it does not need to is its own bug.
+    #[test]
+    fn a_tall_frame_shows_every_mode_at_once() {
+        let mut state = SetupState::new(true);
+        let rendered = draw(&mut state, 110, 32);
+        for mode in MODES {
+            assert!(rendered.contains(mode_title(mode, &EN)), "{:?} should not need scrolling to at 110x34", mode);
         }
     }
 

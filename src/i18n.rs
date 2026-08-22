@@ -303,7 +303,7 @@ pub static EN: Strings = Strings {
     err_password_too_short: "Password must be at least 8 characters",
     err_passwords_dont_match: "Passwords do not match",
 
-    main_menu_title: " ssh-control — servers ",
+    main_menu_title: " Servers ",
     main_menu_empty: "(no servers — press 'a' to add one)",
     main_menu_hint: "Enter: connect  /: search  a: add  e: edit  d: delete  s: scripts  f: files  o: sort  l: lock  F1: settings  q: quit  ?: help",
     main_menu_filter_hint: "type to filter  Enter: connect  Esc: clear",
@@ -396,7 +396,7 @@ pub static EN: Strings = Strings {
     totp_code_label: "Code",
     totp_prompt_title: " Two-Factor Code ",
     totp_prompt_hint: "Enter: verify  Esc: cancel (locks again)",
-    totp_unlock_title: " ssh-control — enter authenticator code ",
+    totp_unlock_title: " Authenticator code ",
     totp_unlock_hint: "Enter: unlock  Esc: quit",
     err_totp_invalid_code: "Invalid code",
 
@@ -519,7 +519,7 @@ pub static TR: Strings = Strings {
     err_password_too_short: "Şifre en az 8 karakter olmalı",
     err_passwords_dont_match: "Şifreler eşleşmiyor",
 
-    main_menu_title: " ssh-control — sunucular ",
+    main_menu_title: " Sunucular ",
     main_menu_empty: "(sunucu yok — 'a' ile ekle)",
     main_menu_hint: "Enter: bağlan  /: ara  a: ekle  e: düzenle  d: sil  s: scriptler  f: dosyalar  o: sırala  l: kilitle  F1: ayarlar  q: çık  ?: yardım",
     main_menu_filter_hint: "yazarak filtrele  Enter: bağlan  Esc: temizle",
@@ -612,7 +612,7 @@ pub static TR: Strings = Strings {
     totp_code_label: "Kod",
     totp_prompt_title: " İki Faktör Kodu ",
     totp_prompt_hint: "Enter: doğrula  Esc: iptal (tekrar kilitlenir)",
-    totp_unlock_title: " ssh-control — authenticator kodunu gir ",
+    totp_unlock_title: " Authenticator kodu ",
     totp_unlock_hint: "Enter: aç  Esc: çık",
     err_totp_invalid_code: "Geçersiz kod",
 
@@ -735,7 +735,7 @@ pub static ES: Strings = Strings {
     err_password_too_short: "La contraseña debe tener al menos 8 caracteres",
     err_passwords_dont_match: "Las contraseñas no coinciden",
 
-    main_menu_title: " ssh-control — servidores ",
+    main_menu_title: " Servidores ",
     main_menu_empty: "(sin servidores — pulsa 'a' para añadir uno)",
     main_menu_hint: "Enter: conectar  /: buscar  a: añadir  e: editar  d: eliminar  s: scripts  f: archivos  o: ordenar  l: bloquear  F1: ajustes  q: salir  ?: ayuda",
     main_menu_filter_hint: "escribe para filtrar  Enter: conectar  Esc: limpiar",
@@ -828,7 +828,7 @@ pub static ES: Strings = Strings {
     totp_code_label: "Código",
     totp_prompt_title: " Código de Dos Factores ",
     totp_prompt_hint: "Enter: verificar  Esc: cancelar (bloquea de nuevo)",
-    totp_unlock_title: " ssh-control — introduce el código del autenticador ",
+    totp_unlock_title: " Código del autenticador ",
     totp_unlock_hint: "Enter: desbloquear  Esc: salir",
     err_totp_invalid_code: "Código inválido",
 
@@ -951,7 +951,7 @@ pub static RU: Strings = Strings {
     err_password_too_short: "Пароль должен быть не менее 8 символов",
     err_passwords_dont_match: "Пароли не совпадают",
 
-    main_menu_title: " ssh-control — серверы ",
+    main_menu_title: " Серверы ",
     main_menu_empty: "(нет серверов — нажмите 'a' чтобы добавить)",
     main_menu_hint: "Enter: подключиться  /: поиск  a: добавить  e: изменить  d: удалить  s: скрипты  f: файлы  o: сортировка  l: заблокировать  F1: настройки  q: выход  ?: справка",
     main_menu_filter_hint: "введите текст для фильтра  Enter: подключиться  Esc: сбросить",
@@ -1044,7 +1044,7 @@ pub static RU: Strings = Strings {
     totp_code_label: "Код",
     totp_prompt_title: " Код Двухфакторной ",
     totp_prompt_hint: "Enter: проверить  Esc: отмена (снова блокирует)",
-    totp_unlock_title: " ssh-control — введите код аутентификатора ",
+    totp_unlock_title: " Код аутентификатора ",
     totp_unlock_hint: "Enter: разблокировать  Esc: выход",
     err_totp_invalid_code: "Неверный код",
 

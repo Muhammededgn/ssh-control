@@ -58,7 +58,9 @@ pub fn render(frame: &mut Frame, area: Rect, title: &str, footer: Vec<Line<'stat
         return area;
     }
 
-    let footer_height = footer.len() as u16;
+    // Wrapped rows, not lines: the server list's hint is longer than a
+    // hundred columns and was losing its last binding off the right edge.
+    let footer_height = crate::tui::widgets::wrapped_height(&footer, area.width.saturating_sub(2)) as u16;
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(HEADER_HEIGHT), Constraint::Min(3), Constraint::Length(footer_height)])
@@ -68,7 +70,7 @@ pub fn render(frame: &mut Frame, area: Rect, title: &str, footer: Vec<Line<'stat
     if footer_height > 0 {
         frame.render_widget(
             Paragraph::new(footer).wrap(Wrap { trim: false }).style(theme::band()),
-            rows[2],
+            Rect { x: rows[2].x + 1, width: rows[2].width.saturating_sub(2), ..rows[2] },
         );
     }
     rows[1]

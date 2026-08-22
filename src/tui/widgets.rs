@@ -73,9 +73,12 @@ pub fn list_title_with_position(title: &str, selected: usize, total: usize) -> S
 /// because the `Rect` it takes has to be the *same* one the list was rendered
 /// into — ratatui insets it past the border itself.
 pub fn render_list_scrollbar(frame: &mut Frame, area: Rect, selected: usize, total: usize) {
-    // One item cannot scroll, and a scrollbar with nothing to say is just
-    // noise on the border.
-    if total <= 1 {
+    // A list that fits cannot scroll, and a scrollbar with nothing to say is
+    // just a bar of noise down the border. `area` is the rect the list was
+    // rendered into, so its inner height is the number of rows on screen —
+    // comparing against 1 instead meant four entries in a twenty-row panel
+    // still got a full-height scrollbar.
+    if total <= panel("").inner(area).height as usize {
         return;
     }
 
@@ -87,35 +90,50 @@ pub fn render_list_scrollbar(frame: &mut Frame, area: Rect, selected: usize, tot
     );
 }
 
-/// Rows one logical line occupies once `Wrap { trim: false }` has had it.
+/// Greedy word wrapping, matching what ratatui's `Wrap` does closely enough
+/// that a hand-wrapped line and a wrapped `Paragraph` agree on their height.
+/// A word longer than the width is broken rather than allowed to overflow.
 ///
-/// Greedy word wrapping, matching what ratatui does closely enough that the
-/// scrollbar and the `End` clamp land on the same row the user sees. A word
-/// longer than the width is broken rather than allowed to overflow.
-///
-/// Here rather than on the one screen that started with it, because a panel
-/// sized as if each line were one row loses its hint the moment a server name
-/// is long enough to wrap.
-pub fn wrapped_rows(text: &str, width: u16) -> usize {
+/// Needed because `ListItem` does not wrap: a `List` truncates a long line at
+/// its right edge, so a mode description or a step command simply lost its
+/// end. Wrapping it into several lines is the only way a list row can carry
+/// prose.
+pub fn wrap_text(text: &str, width: u16) -> Vec<String> {
     let width = width.max(1) as usize;
-    let mut rows = 1;
+    let mut rows = vec![String::new()];
     let mut col = 0;
 
     for word in text.split_inclusive(' ') {
         let len = word.chars().count();
         if col + len > width && col > 0 {
-            rows += 1;
+            rows.push(String::new());
             col = 0;
         }
-        // A single word wider than the viewport wraps within itself.
         if len > width {
-            rows += (len - 1) / width;
-            col = len % width;
+            // A single word wider than the viewport wraps within itself.
+            for ch in word.chars() {
+                if col == width {
+                    rows.push(String::new());
+                    col = 0;
+                }
+                rows.last_mut().expect("there is always a row").push(ch);
+                col += 1;
+            }
         } else {
+            rows.last_mut().expect("there is always a row").push_str(word);
             col += len;
         }
     }
     rows
+}
+
+/// Rows one logical line occupies once `Wrap { trim: false }` has had it.
+///
+/// Here rather than on the one screen that started with it, because a panel
+/// sized as if each line were one row loses its hint the moment a server name
+/// is long enough to wrap.
+pub fn wrapped_rows(text: &str, width: u16) -> usize {
+    wrap_text(text, width).len()
 }
 
 /// Below this a bordered form has nothing left to show: two rows go to the

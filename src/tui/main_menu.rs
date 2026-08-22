@@ -490,8 +490,14 @@ impl MainMenuState {
         let mut lines = vec![
             Line::from(Span::styled(entry.name.clone(), Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD))),
             Line::from(""),
-            Line::from(format!("{}@{}:{}", entry.username, entry.host, entry.port)),
-            Line::from(vec![label(strings.field_auth_type), Span::raw(auth_label)]),
+            // The address and how it authenticates on one line: the form's
+            // own auth label carries a "(←/→)" hint that means nothing on a
+            // card nobody can edit, and a new string for a word already on
+            // screen would be four translations for nothing.
+            Line::from(vec![
+                Span::raw(format!("{}@{}:{}", entry.username, entry.host, entry.port)),
+                Span::styled(format!("  ·  {auth_label}"), Style::default().fg(theme::hint())),
+            ]),
         ];
 
         if !entry.tags.is_empty() {
