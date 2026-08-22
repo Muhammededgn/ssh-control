@@ -10,13 +10,13 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 use zeroize::Zeroizing;
 
 use crate::i18n::Strings;
 use crate::tui::theme;
 use crate::totp::{self, AuthMode};
-use crate::tui::widgets::{self, centered_rect, mask, qr_lines};
+use crate::tui::widgets::{self, mask, qr_lines};
 
 const MIN_PASSWORD_LEN: usize = 8;
 
@@ -261,43 +261,81 @@ impl SetupState {
         }
     }
 
+    /// The mode chooser, as a `List` rather than a paragraph of hand-marked
+    /// lines.
+    ///
+    /// The paragraph is what produced the reported bug: it built every mode
+    /// into one line list, sized a `centered_rect` to it, and let the clamp
+    /// silently drop whatever did not fit — so the fourth mode stayed
+    /// selectable while being off screen, and the user could choose a security
+    /// mode they had never read.
+    ///
+    /// A `List` scrolls for free, and scrolls *by item*, so a mode is never
+    /// half-shown: `get_items_bounds` walks forward until the selection fits,
+    /// which is the same smallest-scroll contract `form_scroll_offset` spells
+    /// out by hand. The intro and the hint sit outside it, in bands of their
+    /// own, so neither can be the thing that gets scrolled away.
     fn render_choose_mode(&self, frame: &mut Frame, area: Rect, strings: &Strings) {
-        let mut lines = vec![Line::from(Span::styled(strings.setup_intro, Style::default().fg(theme::hint()))), Line::from("")];
-
-        for (i, mode) in MODES.iter().enumerate() {
-            let available = self.mode_available(*mode);
-            let marker = if i == self.selected { "> " } else { "  " };
-            let style = if !available {
-                Style::default().fg(theme::hint()).add_modifier(Modifier::DIM)
-            } else if i == self.selected {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-            lines.push(Line::from(Span::styled(format!("{marker}{}", mode_title(*mode, strings)), style)));
-            lines.push(Line::from(Span::styled(
-                format!("    {}", mode_description(*mode, strings)),
-                Style::default().fg(theme::hint()),
-            )));
-            if !available {
-                lines.push(Line::from(Span::styled(
-                    format!("    {}", strings.setup_needs_credential_store),
-                    Style::default().fg(theme::warning()),
-                )));
-            }
-            lines.push(Line::from(""));
+        let width = 76.min(area.width.saturating_sub(4)).max(widgets::MIN_PANEL_WIDTH);
+        let height = area.height.min(24);
+        let rect = widgets::centered_rect(width, height, area);
+        if widgets::render_if_too_small(frame, rect, widgets::MIN_PANEL_WIDTH, widgets::MIN_PANEL_HEIGHT, strings.terminal_too_small) {
+            return;
         }
 
-        if let Some(err) = &self.error {
-            lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(theme::error()))));
-        } else {
-            lines.push(Line::from(Span::styled(strings.setup_choose_hint, Style::default().fg(theme::hint()))));
-        }
-
-        let height = (lines.len() as u16 + 2).min(area.height);
-        let rect = centered_rect(76, height, area);
         let block = widgets::modal(strings.setup_title);
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), rect);
+        let inner = block.inner(rect);
+        widgets::clear_surface(frame, rect);
+        frame.render_widget(block, rect);
+
+        let footer = Line::from(match &self.error {
+            Some(err) => Span::styled(err.clone(), Style::default().fg(theme::error())),
+            None => Span::styled(strings.setup_choose_hint, Style::default().fg(theme::hint())),
+        });
+        let intro_rows = widgets::wrapped_height(&[Line::from(strings.setup_intro)], inner.width) as u16;
+        let footer_rows = widgets::wrapped_height(std::slice::from_ref(&footer), inner.width) as u16;
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(intro_rows + 1), Constraint::Min(3), Constraint::Length(footer_rows)])
+            .split(inner);
+
+        let intro = Paragraph::new(Span::styled(strings.setup_intro, Style::default().fg(theme::hint()))).wrap(Wrap { trim: false });
+        frame.render_widget(intro, rows[0]);
+
+        let items: Vec<ListItem> = MODES
+            .iter()
+            .map(|mode| {
+                let available = self.mode_available(*mode);
+                let title = if available {
+                    Span::raw(mode_title(*mode, strings))
+                } else {
+                    Span::styled(mode_title(*mode, strings), Style::default().fg(theme::hint()).add_modifier(Modifier::DIM))
+                };
+                let mut lines = vec![
+                    Line::from(title),
+                    Line::from(Span::styled(format!("  {}", mode_description(*mode, strings)), Style::default().fg(theme::hint()))),
+                ];
+                if !available {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}", strings.setup_needs_credential_store),
+                        Style::default().fg(theme::warning()),
+                    )));
+                }
+                lines.push(Line::from(""));
+                ListItem::new(lines)
+            })
+            .collect();
+
+        // Rebuilt every frame from `self.selected`, for the same reason
+        // `form_scroll_offset` is stateless: that field is the only position
+        // that exists, and a stored offset is one more thing to drift from it.
+        let mut list_state = ListState::default();
+        list_state.select(Some(self.selected));
+        let list = List::new(items).highlight_style(theme::selection()).highlight_symbol(widgets::SELECT_MARKER);
+        frame.render_stateful_widget(list, rows[1], &mut list_state);
+        widgets::render_list_scrollbar(frame, rows[1], self.selected, MODES.len());
+
+        frame.render_widget(Paragraph::new(footer).wrap(Wrap { trim: false }), rows[2]);
     }
 
     fn render_offer_recovery(&self, frame: &mut Frame, area: Rect, strings: &Strings) {
@@ -308,9 +346,8 @@ impl SetupState {
             Line::from(""),
             Line::from(Span::styled(strings.setup_recovery_hint, Style::default().fg(theme::hint()))),
         ];
-        let rect = centered_rect(70, lines.len() as u16 + 2, area);
-        let block = widgets::modal(strings.setup_recovery_title);
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), rect);
+        let focus_row = lines.len() - 1;
+        widgets::render_panel(frame, area, 70, strings.setup_recovery_title, lines, focus_row, strings.terminal_too_small);
     }
 
     fn render_password(&self, frame: &mut Frame, area: Rect, strings: &Strings) {
@@ -328,9 +365,10 @@ impl SetupState {
             lines.push(Line::from(Span::styled(strings.setup_password_hint, Style::default().fg(theme::hint()))));
         }
 
-        let rect = centered_rect(64, lines.len() as u16 + 2, area);
-        let block = widgets::modal(mode_title(self.mode, strings));
-        frame.render_widget(Paragraph::new(lines).block(block), rect);
+        // The focused field, so a wrapped label or a long error can never
+        // scroll the box the user is typing into off screen.
+        let focus_row = usize::from(self.focus_confirm);
+        widgets::render_panel(frame, area, 64, mode_title(self.mode, strings), lines, focus_row, strings.terminal_too_small);
     }
 
     fn render_totp_enroll(&self, frame: &mut Frame, area: Rect, strings: &Strings) {
@@ -389,20 +427,16 @@ pub fn render_unopenable(frame: &mut Frame, area: Rect, strings: &Strings) {
     let lines = vec![
         Line::from(Span::styled(strings.unopenable_message, Style::default().fg(theme::error()))),
     ];
-    let rect = centered_rect(70, 10, area);
-    let block = widgets::modal(strings.unopenable_title);
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), rect);
+    widgets::render_panel(frame, area, 70, strings.unopenable_title, lines, 0, strings.terminal_too_small);
 }
 
 /// A vault that cannot be opened *right now* — another instance holds it, or a
 /// newer build wrote it. Unlike `render_unopenable` these clear by themselves
 /// once the user does the thing the message names, so they are yellow rather
 /// than red and the caller supplies the wording.
-pub fn render_cannot_open(frame: &mut Frame, area: Rect, title: &str, message: &str) {
+pub fn render_cannot_open(frame: &mut Frame, area: Rect, title: &str, message: &str, strings: &Strings) {
     let lines = vec![Line::from(Span::styled(message.to_string(), Style::default().fg(theme::warning())))];
-    let rect = centered_rect(70, 10, area);
-    let block = widgets::modal(title);
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), rect);
+    widgets::render_panel(frame, area, 70, title, lines, 0, strings.terminal_too_small);
 }
 
 #[cfg(test)]
@@ -561,7 +595,7 @@ mod tests {
         let in_use = {
             let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test backend");
             terminal
-                .draw(|frame| render_cannot_open(frame, frame.area(), EN.vault_in_use_title, EN.vault_in_use_message))
+                .draw(|frame| render_cannot_open(frame, frame.area(), EN.vault_in_use_title, EN.vault_in_use_message, &EN))
                 .expect("render");
             terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect::<String>()
         };
@@ -569,6 +603,60 @@ mod tests {
         assert!(unopenable.contains("recovery"), "the permanent one explains the missing fallback");
         assert!(in_use.contains("Close"), "the transient one says what to do about it");
         assert!(!in_use.contains("recovery"), "a contended vault is not a missing-credential problem");
+    }
+
+    fn draw(state: &mut SetupState, width: u16, height: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test backend");
+        terminal.draw(|frame| state.render(frame, frame.area(), &EN)).expect("render");
+        terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    /// The reported bug, pinned. The chooser used to build its lines and then
+    /// hand them to a `centered_rect` clamped to the frame — so on anything
+    /// short the fourth mode was selectable and invisible at the same time,
+    /// and the user could pick a security mode they had never read.
+    ///
+    /// Every mode has to be readable at the size it is *reached* at, which is
+    /// the worst case, not the best: the Security tab renders this same screen
+    /// 24 columns narrower than the frame.
+    #[test]
+    fn every_security_mode_can_be_read_on_a_short_terminal() {
+        for (width, height) in [(100, 24), (80, 20), (56, 16)] {
+            for (index, mode) in MODES.iter().enumerate() {
+                let mut state = SetupState::new(true);
+                while state.selected < index {
+                    press(&mut state, KeyCode::Down);
+                }
+                let rendered = draw(&mut state, width, height);
+                assert!(
+                    rendered.contains(mode_title(*mode, &EN)),
+                    "{}x{}: mode {index} is selectable but not on screen",
+                    width,
+                    height
+                );
+            }
+        }
+    }
+
+    /// The second instance of the same bug, and the quieter one: the enrolment
+    /// screen split the frame into a fixed `[4, qr_height, 4]`, and a version-2
+    /// QR is about 25 rows in half-blocks. On a 24-row terminal the last chunk
+    /// — the box holding the six-digit field — got zero rows, so the user
+    /// could not see the code they were typing.
+    #[test]
+    fn the_code_field_is_on_screen_during_enrolment() {
+        let mut state = choose(AuthMode::PasswordTotp);
+        enter_password(&mut state, "correct horse");
+        assert_eq!(state.step, Step::TotpEnroll);
+        for (width, height) in [(100, 40), (100, 24), (80, 20), (72, 16)] {
+            let rendered = draw(&mut state, width, height);
+            assert!(
+                rendered.contains(EN.totp_code_label),
+                "{width}x{height}: the field the user types into has to be visible"
+            );
+        }
     }
 
     /// Without this the user could enrol a secret their authenticator cannot

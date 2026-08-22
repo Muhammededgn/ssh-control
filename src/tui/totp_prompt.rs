@@ -3,9 +3,8 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
 
-use super::widgets::{self, centered_rect};
+use super::widgets;
 use crate::i18n::Strings;
 use crate::tui::theme;
 
@@ -51,7 +50,6 @@ impl TotpPromptState {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, strings: &Strings) {
-        let box_area = centered_rect(46, 7, area);
         let mut lines = vec![Line::from(""), Line::from(format!("{}: {}_", strings.totp_code_label, self.code)), Line::from("")];
 
         if let Some(err) = &self.error {
@@ -60,7 +58,7 @@ impl TotpPromptState {
             lines.push(Line::from(Span::styled(strings.totp_prompt_hint, Style::default().fg(theme::hint()))));
         }
 
-        let block = widgets::modal(strings.totp_prompt_title);
-        frame.render_widget(Paragraph::new(lines).block(block), box_area);
+        let focus_row = lines.len() - 1;
+        widgets::render_panel(frame, area, 52, strings.totp_prompt_title, lines, focus_row, strings.terminal_too_small);
     }
 }

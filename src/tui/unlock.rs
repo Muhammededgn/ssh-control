@@ -3,10 +3,9 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
 use zeroize::Zeroizing;
 
-use super::widgets::{self, centered_rect, mask};
+use super::widgets::{self, mask};
 use crate::i18n::Strings;
 use crate::tui::theme;
 
@@ -131,13 +130,14 @@ impl UnlockState {
 
     pub fn render(&self, frame: &mut Frame, area: Rect, strings: &Strings) {
         // The migration screen carries a paragraph explaining why a password is
-        // suddenly being asked for, so it needs noticeably more room.
-        let (width, height) = match self.mode {
-            UnlockMode::MigrateTotpOnly => (72, 16),
-            UnlockMode::FirstRun => (50, 10),
-            UnlockMode::Unlock => (50, 8),
+        // suddenly being asked for, so it wants noticeably more room. The
+        // height is no longer chosen here: `render_panel` derives it from the
+        // wrapped text and scrolls when the frame cannot give it, which is what
+        // stops that paragraph pushing the confirm field off the box.
+        let width = match self.mode {
+            UnlockMode::MigrateTotpOnly => 72,
+            UnlockMode::FirstRun | UnlockMode::Unlock => 56,
         };
-        let box_area = centered_rect(width, height, area);
 
         let title = match self.mode {
             UnlockMode::FirstRun => strings.unlock_title_first_run,
@@ -149,6 +149,10 @@ impl UnlockState {
         if self.mode == UnlockMode::MigrateTotpOnly {
             lines.push(Line::from(Span::styled(strings.migrate_totp_only_message, Style::default().fg(theme::warning()))));
         }
+        // Where the password field lands, so `focus_row` can name it: the
+        // migration mode pushes it down by its explanatory paragraph, and that
+        // paragraph wraps, so the number is not a constant.
+        let password_row = lines.len() + 1;
         lines.extend([
             Line::from(""),
             Line::from(vec![
@@ -184,8 +188,13 @@ impl UnlockState {
             )));
         }
 
-        let block = widgets::modal(title);
-        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false }).block(block);
-        frame.render_widget(paragraph, box_area);
+        // The focused *field*, not the last line: a password box that scrolls
+        // away from what the user is typing into is the exact failure this
+        // helper exists to prevent.
+        let focus_row = match self.focus {
+            Focus::Password => password_row,
+            Focus::Confirm => password_row + 1,
+        };
+        widgets::render_panel(frame, area, width, title, lines, focus_row, strings.terminal_too_small);
     }
 }

@@ -200,15 +200,32 @@ pub fn modal(title: &str) -> Block<'static> {
 /// The shared body of `render_form` and `render_panel`: `lines` in `block`,
 /// scrolled by the smallest amount that keeps `focus_row` on screen, with the
 /// border saying so.
-fn render_lines_scrolled(frame: &mut Frame, rect: Rect, title: &str, lines: Vec<Line<'static>>, focus_row: usize, block: Block<'static>) {
+///
+/// `wrap` is not a style choice. A panel carries prose — an error, a warning,
+/// the sentence naming the server about to be deleted — and without wrapping
+/// that prose is cut at the border instead of continuing, which loses the end
+/// of the message rather than the bottom of it. A form does not wrap, because
+/// `focus_row` indexes *lines* there and a wrapped field would put the scroll
+/// on a different row than the focus.
+///
+/// So when `wrap` is on, both figures are converted to wrapped rows first:
+/// counting lines and scrolling rows is how a panel ends up one row short of
+/// the thing it was supposed to be showing.
+fn render_lines_scrolled(frame: &mut Frame, rect: Rect, title: &str, lines: Vec<Line<'static>>, focus_row: usize, block: Block<'static>, wrap: bool) {
     let inner = block.inner(rect);
     let visible = inner.height as usize;
-    let offset = form_scroll_offset(focus_row, lines.len(), visible);
+    let (focus_row, total) = if wrap {
+        let upto = wrapped_height(&lines[..(focus_row + 1).min(lines.len())], inner.width);
+        (upto.saturating_sub(1), wrapped_height(&lines, inner.width))
+    } else {
+        (focus_row, lines.len())
+    };
+    let offset = form_scroll_offset(focus_row, total, visible);
 
     // Arrows on the border are the only signal that fields exist off screen;
     // without them a clamped form looks like the whole form.
     let more_above = offset > 0;
-    let more_below = offset + visible < lines.len();
+    let more_below = offset + visible < total;
     let title = match (more_above, more_below) {
         (true, true) => format!("{title}↑↓ "),
         (true, false) => format!("{title}↑ "),
@@ -217,7 +234,9 @@ fn render_lines_scrolled(frame: &mut Frame, rect: Rect, title: &str, lines: Vec<
     };
 
     let block = block.title(Span::styled(title, Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD)));
-    frame.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)).block(block), rect);
+    let paragraph = Paragraph::new(lines).scroll((offset as u16, 0)).block(block);
+    let paragraph = if wrap { paragraph.wrap(Wrap { trim: false }) } else { paragraph };
+    frame.render_widget(paragraph, rect);
 }
 
 /// A form's lines in a bordered block, scrolled to keep the focused row
@@ -237,7 +256,7 @@ pub fn render_form(
     if render_if_too_small(frame, area, MIN_FORM_WIDTH, MIN_FORM_HEIGHT, too_small_message) {
         return;
     }
-    render_lines_scrolled(frame, area, title, lines, focus_row, panel(""));
+    render_lines_scrolled(frame, area, title, lines, focus_row, panel(""), false);
 }
 
 /// Below this a dialog has nothing left to say: the border and its padding
@@ -267,11 +286,30 @@ pub fn render_panel(
     focus_row: usize,
     too_small_message: &str,
 ) {
+    render_panel_with(frame, area, width, title, lines, focus_row, too_small_message, |block| block);
+}
+
+/// `render_panel`, letting the caller restyle the block it built.
+///
+/// A closure rather than more parameters: the two screens that need this want
+/// a different *border* colour (a confirm is red, an overwrite prompt amber)
+/// and nothing else, and every one of those is one call on `Block`.
+#[allow(clippy::too_many_arguments)]
+pub fn render_panel_with(
+    frame: &mut Frame,
+    area: Rect,
+    width: u16,
+    title: &str,
+    lines: Vec<Line<'static>>,
+    focus_row: usize,
+    too_small_message: &str,
+    style_block: impl FnOnce(Block<'static>) -> Block<'static>,
+) {
     if render_if_too_small(frame, area, MIN_PANEL_WIDTH, MIN_PANEL_HEIGHT, too_small_message) {
         return;
     }
 
-    let block = modal(title);
+    let block = style_block(modal(title));
     // Derived from the frame rather than trusted from the caller: the same
     // screen runs full-width at first run and 24 columns narrower inside the
     // Settings tab that embeds it.
@@ -282,7 +320,7 @@ pub fn render_panel(
     let rect = centered_rect(width, height, area);
 
     clear_surface(frame, rect);
-    render_lines_scrolled(frame, rect, title, lines, focus_row, block);
+    render_lines_scrolled(frame, rect, title, lines, focus_row, block, true);
 }
 
 /// The marker beside a selected row. Paired with `theme::selection()`, and the

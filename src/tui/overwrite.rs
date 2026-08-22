@@ -15,9 +15,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
 
-use super::widgets::centered_rect;
 use crate::i18n::Strings;
 use crate::tui::theme;
 
@@ -81,10 +79,13 @@ impl OverwriteState {
         }
         lines.push(Line::from(Span::styled(strings.overwrite_hint, Style::default().fg(theme::hint()))));
 
-        let box_area = centered_rect(60, lines.len() as u16 + 2, area);
-        let block = crate::tui::widgets::modal(strings.overwrite_title).border_style(Style::default().fg(theme::warning()));
-        crate::tui::widgets::clear_surface(frame, box_area);
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }).block(block), box_area);
+        // Same reason as the confirm dialog: the filename is user data and a
+        // long one wraps, so the box has to be sized from the wrapped text and
+        // the hint has to be the row a clamp keeps.
+        let focus_row = lines.len() - 1;
+        crate::tui::widgets::render_panel_with(frame, area, 64, strings.overwrite_title, lines, focus_row, strings.terminal_too_small, |block| {
+            block.border_style(Style::default().fg(theme::warning()))
+        });
     }
 }
 

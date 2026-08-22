@@ -3,9 +3,8 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
 
-use super::widgets::{self, centered_rect};
+use super::widgets;
 use crate::i18n::Strings;
 use crate::tui::theme;
 
@@ -54,7 +53,6 @@ impl TotpUnlockState {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, strings: &Strings) {
-        let box_area = centered_rect(46, 8, area);
         let mut lines = vec![Line::from(""), Line::from(format!("{}: {}_", strings.totp_code_label, self.code)), Line::from("")];
 
         if let Some(err) = &self.error {
@@ -65,7 +63,10 @@ impl TotpUnlockState {
             lines.push(Line::from(Span::styled(strings.totp_unlock_hint, Style::default().fg(theme::hint()))));
         }
 
-        let block = widgets::modal(strings.totp_unlock_title);
-        frame.render_widget(Paragraph::new(lines).block(block), box_area);
+        // The last row is the focused one: an error explaining *why* the code
+        // was refused is the reason to look at this screen at all, so it is the
+        // line a clamped panel has to keep.
+        let focus_row = lines.len() - 1;
+        widgets::render_panel(frame, area, 52, strings.totp_unlock_title, lines, focus_row, strings.terminal_too_small);
     }
 }

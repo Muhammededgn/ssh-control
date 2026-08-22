@@ -436,7 +436,7 @@ impl App {
                 terminal.terminal.draw(|frame| {
                     let area = frame.area();
                     chrome::paint_background(frame, area);
-                    crate::tui::setup::render_cannot_open(frame, area, title, message);
+                    crate::tui::setup::render_cannot_open(frame, area, title, message, strings);
                 })?;
             }
             AppState::Unlocked(u) => {
