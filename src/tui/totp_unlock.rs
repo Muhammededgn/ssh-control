@@ -3,9 +3,9 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
-use super::widgets::centered_rect;
+use super::widgets::{self, centered_rect};
 use crate::i18n::Strings;
 use crate::tui::theme;
 
@@ -65,7 +65,7 @@ impl TotpUnlockState {
             lines.push(Line::from(Span::styled(strings.totp_unlock_hint, Style::default().fg(theme::hint()))));
         }
 
-        let block = Block::default().borders(Borders::ALL).title(strings.totp_unlock_title);
+        let block = widgets::modal(strings.totp_unlock_title);
         frame.render_widget(Paragraph::new(lines).block(block), box_area);
     }
 }

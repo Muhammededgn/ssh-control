@@ -14,7 +14,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use uuid::Uuid;
 
 use super::widgets::{self, format_size, render_if_too_small, render_list_scrollbar};
@@ -358,7 +358,7 @@ impl FileBrowserState {
             footer.push(Line::from(Span::styled(status.clone(), Style::default().fg(theme::warning()))));
         }
         footer.push(Line::from(strings.file_browser_hint));
-        frame.render_widget(Paragraph::new(footer).block(Block::default().borders(Borders::ALL)), rows[1]);
+        frame.render_widget(Paragraph::new(footer).block(widgets::panel("")), rows[1]);
 
         if let Some(progress) = &self.progress {
             render_progress(frame, area, progress, strings);
@@ -397,7 +397,7 @@ fn render_progress(frame: &mut Frame, area: Rect, progress: &TransferProgress, s
     let box_area = super::widgets::centered_rect(60, lines.len() as u16 + 2, area);
     widgets::clear_surface(frame, box_area);
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(progress.title.clone())),
+        Paragraph::new(lines).block(widgets::modal(&progress.title)),
         box_area,
     );
 }
@@ -435,10 +435,9 @@ fn render_pane(frame: &mut Frame, area: Rect, pane: &mut PaneState, label: &str,
     // the middle rather than either end.
     let width = area.width.saturating_sub(label.len() as u16 + 6) as usize;
     let title = format!(" {label}: {} ", ellipsize_middle(&pane.cwd, width.max(8)));
-    let border = if focused { Style::default().fg(theme::accent()) } else { Style::default().fg(theme::hint()) };
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).border_style(border).title(title))
+        .block(widgets::focus_panel(&title, focused))
         .highlight_style(if focused {
             Style::default().add_modifier(Modifier::REVERSED)
         } else {

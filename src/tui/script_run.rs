@@ -3,11 +3,12 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 use uuid::Uuid;
 
 use crate::i18n::Strings;
 use crate::tui::theme;
+use crate::tui::widgets::{self, wrapped_rows};
 
 /// Live-updating log for one script run. `app.rs`'s async execution loop
 /// pushes lines into this as `ssh::script_runner::run_script`'s `on_event`
@@ -38,33 +39,6 @@ pub struct ScriptRunState {
     /// Result of the last save attempt, already formatted for the footer.
     /// `app.rs` sets it — the write itself is I/O and does not belong here.
     save_result: Option<(String, bool)>,
-}
-
-/// Rows one logical line occupies once `Wrap { trim: false }` has had it.
-///
-/// Greedy word wrapping, matching what ratatui does closely enough that the
-/// scrollbar and the `End` clamp land on the same row the user sees. A word
-/// longer than the width is broken rather than allowed to overflow.
-fn wrapped_rows(text: &str, width: u16) -> usize {
-    let width = width.max(1) as usize;
-    let mut rows = 1;
-    let mut col = 0;
-
-    for word in text.split_inclusive(' ') {
-        let len = word.chars().count();
-        if col + len > width && col > 0 {
-            rows += 1;
-            col = 0;
-        }
-        // A single word wider than the viewport wraps within itself.
-        if len > width {
-            rows += (len - 1) / width;
-            col = len % width;
-        } else {
-            col += len;
-        }
-    }
-    rows
 }
 
 pub enum ScriptRunOutcome {
@@ -321,7 +295,7 @@ impl ScriptRunState {
         let paragraph = Paragraph::new(self.log.clone())
             .wrap(Wrap { trim: false })
             .scroll((scroll, 0))
-            .block(Block::default().borders(Borders::ALL).title(title));
+            .block(widgets::panel(&title));
         frame.render_widget(paragraph, chunks[0]);
 
         // The prompt and the save result both take the footer over, in that
@@ -346,7 +320,7 @@ impl ScriptRunState {
                 if self.is_scrolled_back() { Style::default().fg(theme::warning()) } else { Style::default().fg(theme::hint()) };
             Line::from(Span::styled(hint, style))
         };
-        let footer = Paragraph::new(footer_line).block(Block::default().borders(Borders::ALL));
+        let footer = Paragraph::new(footer_line).block(widgets::panel(""));
         frame.render_widget(footer, chunks[1]);
     }
 }

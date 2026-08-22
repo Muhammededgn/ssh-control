@@ -10,13 +10,13 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 use zeroize::Zeroizing;
 
 use crate::i18n::Strings;
 use crate::tui::theme;
 use crate::totp::{self, AuthMode};
-use crate::tui::widgets::{centered_rect, mask, qr_lines};
+use crate::tui::widgets::{self, centered_rect, mask, qr_lines};
 
 const MIN_PASSWORD_LEN: usize = 8;
 
@@ -296,7 +296,7 @@ impl SetupState {
 
         let height = (lines.len() as u16 + 2).min(area.height);
         let rect = centered_rect(76, height, area);
-        let block = Block::default().borders(Borders::ALL).title(strings.setup_title);
+        let block = widgets::modal(strings.setup_title);
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), rect);
     }
 
@@ -309,7 +309,7 @@ impl SetupState {
             Line::from(Span::styled(strings.setup_recovery_hint, Style::default().fg(theme::hint()))),
         ];
         let rect = centered_rect(70, lines.len() as u16 + 2, area);
-        let block = Block::default().borders(Borders::ALL).title(strings.setup_recovery_title);
+        let block = widgets::modal(strings.setup_recovery_title);
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), rect);
     }
 
@@ -329,7 +329,7 @@ impl SetupState {
         }
 
         let rect = centered_rect(64, lines.len() as u16 + 2, area);
-        let block = Block::default().borders(Borders::ALL).title(mode_title(self.mode, strings));
+        let block = widgets::modal(mode_title(self.mode, strings));
         frame.render_widget(Paragraph::new(lines).block(block), rect);
     }
 
@@ -350,7 +350,7 @@ impl SetupState {
             .constraints([Constraint::Length(4), Constraint::Length(qr_height), Constraint::Length(4)])
             .split(area);
 
-        let block = Block::default().borders(Borders::ALL).title(mode_title(self.mode, strings));
+        let block = widgets::modal(mode_title(self.mode, strings));
         frame.render_widget(Paragraph::new(top).wrap(Wrap { trim: true }).block(block), chunks[0]);
         frame.render_widget(Paragraph::new(qr), chunks[1]);
 
@@ -360,7 +360,7 @@ impl SetupState {
         } else {
             bottom.push(Line::from(Span::styled(strings.tf_verify_hint, Style::default().fg(theme::hint()))));
         }
-        frame.render_widget(Paragraph::new(bottom).block(Block::default().borders(Borders::ALL)), chunks[2]);
+        frame.render_widget(Paragraph::new(bottom).block(widgets::modal("")), chunks[2]);
     }
 }
 
@@ -390,7 +390,7 @@ pub fn render_unopenable(frame: &mut Frame, area: Rect, strings: &Strings) {
         Line::from(Span::styled(strings.unopenable_message, Style::default().fg(theme::error()))),
     ];
     let rect = centered_rect(70, 10, area);
-    let block = Block::default().borders(Borders::ALL).title(strings.unopenable_title);
+    let block = widgets::modal(strings.unopenable_title);
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), rect);
 }
 
@@ -401,7 +401,7 @@ pub fn render_unopenable(frame: &mut Frame, area: Rect, strings: &Strings) {
 pub fn render_cannot_open(frame: &mut Frame, area: Rect, title: &str, message: &str) {
     let lines = vec![Line::from(Span::styled(message.to_string(), Style::default().fg(theme::warning())))];
     let rect = centered_rect(70, 10, area);
-    let block = Block::default().borders(Borders::ALL).title(title.to_string());
+    let block = widgets::modal(title);
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), rect);
 }
 

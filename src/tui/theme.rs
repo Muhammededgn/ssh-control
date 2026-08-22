@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 
 /// The only place in the crate that names a `Color`.
 ///
@@ -263,6 +263,18 @@ pub fn text() -> Color {
 /// no screen has to learn that `text()` exists.
 pub fn root() -> Style {
     Style::default().fg(text()).bg(background())
+}
+
+/// The selected row of a list.
+///
+/// An accent foreground and a bold weight rather than the full-width
+/// `REVERSED` band the screens used to carry: on a wide terminal that band was
+/// the loudest thing on screen, and it drowned the row it was meant to point
+/// at. The `▌` marker every list draws beside it is what keeps the selection
+/// legible under `NO_COLOR`, where the accent collapses to the terminal's own
+/// foreground — a marker is not colour.
+pub fn selection() -> Style {
+    Style::default().fg(accent()).add_modifier(Modifier::BOLD)
 }
 
 /// The chrome bands and the fill behind a modal: one step off the background

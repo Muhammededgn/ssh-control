@@ -1,8 +1,8 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use super::widgets::{self, centered_rect};
 use crate::i18n::Strings;
@@ -79,13 +79,17 @@ pub fn render(frame: &mut Frame, area: Rect, topic: HelpTopic, strings: &'static
     rows.push(Line::from(""));
     rows.push(Line::from(Span::styled(strings.help_hint, Style::default().fg(theme::hint()))));
 
-    let width = rows.iter().map(|l| l.width()).max().unwrap_or(0).saturating_add(4) as u16;
-    let height = rows.len().saturating_add(2) as u16;
+    // Sized from the modal's own chrome rather than a guessed constant: two
+    // columns of border and four of padding, two rows of border and one of
+    // padding. Guessing is what left the title clipped when the padding
+    // arrived.
+    let block = widgets::modal(strings.help_title);
+    let widest = rows.iter().map(|l| l.width()).max().unwrap_or(0) as u16;
+    let title_width = strings.help_title.chars().count() as u16;
+    let width = widest.max(title_width).saturating_add(6);
+    let height = (rows.len() as u16).saturating_add(3);
     let popup = centered_rect(width, height, area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(strings.help_title, Style::default().add_modifier(Modifier::BOLD)));
     widgets::clear_surface(frame, popup);
     frame.render_widget(Paragraph::new(rows).block(block), popup);
 }

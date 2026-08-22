@@ -3,9 +3,9 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
-use super::widgets::centered_rect;
+use super::widgets::{self, centered_rect};
 use crate::i18n::Strings;
 use crate::tui::theme;
 
@@ -37,10 +37,10 @@ impl ConfirmState {
         let box_area = centered_rect(50, 5, area);
         let hint = ratatui::text::Span::styled(strings.confirm_hint, Style::default().fg(theme::hint()));
         let lines = vec![Line::from(self.message.clone()), Line::from(""), Line::from(hint)];
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(strings.confirm_title)
-            .style(Style::default().fg(theme::error()));
+        // The border carries the alarm; the message stays body text. A whole
+        // box in `error()` made the name being deleted harder to read, which is
+        // the one thing the dialog exists to show.
+        let block = widgets::modal(strings.confirm_title).border_style(Style::default().fg(theme::error()));
         let paragraph = Paragraph::new(lines).block(block);
         frame.render_widget(paragraph, box_area);
     }

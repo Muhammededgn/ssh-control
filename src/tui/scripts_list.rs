@@ -3,13 +3,13 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use uuid::Uuid;
 
 use crate::config::Script;
 use crate::i18n::Strings;
 use crate::tui::theme;
-use crate::tui::widgets::{list_title_with_position, render_list_scrollbar};
+use crate::tui::widgets::{self, list_title_with_position, render_list_scrollbar};
 
 pub struct ScriptsListState {
     pub server_id: Uuid,
@@ -106,7 +106,7 @@ impl ScriptsListState {
             scripts.len(),
         );
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(title))
+            .block(widgets::panel(&title))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
             .highlight_symbol("> ");
 
@@ -123,7 +123,7 @@ impl ScriptsListState {
         }
         help_text.push(Line::from(strings.scripts_list_hint));
 
-        let help = Paragraph::new(help_text).block(Block::default().borders(Borders::ALL));
+        let help = Paragraph::new(help_text).block(widgets::panel(""));
         frame.render_widget(help, chunks[1]);
     }
 }

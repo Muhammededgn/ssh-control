@@ -3,10 +3,10 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use uuid::Uuid;
 
-use super::widgets::{MIN_FORM_WIDTH, render_form, render_if_too_small};
+use super::widgets::{self, MIN_FORM_WIDTH, render_form, render_if_too_small};
 use crate::config::{ScriptStep, StepCondition};
 use crate::i18n::Strings;
 use crate::tui::theme;
@@ -234,7 +234,7 @@ impl ScriptFormState {
                 se.focus = next_step_focus(se.focus, is_first, se.condition_kind, -1);
             }
             KeyCode::Left | KeyCode::Right if se.focus == StepFocus::Condition && !is_first => {
-                let delta: i32 = if key.code == KeyCode::Left { -1 } else { 1 };
+                let delta: i32 = if key.code == KeyCode::Left {-1 } else { 1 };
                 se.condition_kind = (se.condition_kind as i32 + delta).rem_euclid(CONDITION_COUNT as i32) as usize;
             }
             KeyCode::Backspace => match se.focus {
@@ -379,7 +379,7 @@ impl ScriptFormState {
                 self.focus == Focus::RunOnConnect,
             ),
         ];
-        frame.render_widget(Paragraph::new(top_lines).block(Block::default().borders(Borders::ALL).title(title)), chunks[0]);
+        frame.render_widget(Paragraph::new(top_lines).block(widgets::panel(title)), chunks[0]);
 
         let items: Vec<ListItem> = self
             .steps
@@ -395,7 +395,7 @@ impl ScriptFormState {
             Style::default().fg(theme::accent())
         };
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(strings.steps_list_title))
+            .block(widgets::focus_panel(strings.steps_list_title, self.focus == Focus::Steps))
             .highlight_style(highlight_style)
             .highlight_symbol("> ");
         frame.render_stateful_widget(list, chunks[1], &mut list_state);
@@ -413,7 +413,7 @@ impl ScriptFormState {
             Line::from(Span::styled(strings.steps_list_hint, Style::default().fg(theme::hint())))
         };
         frame.render_widget(
-            Paragraph::new(vec![save_line, hint_line]).block(Block::default().borders(Borders::ALL)),
+            Paragraph::new(vec![save_line, hint_line]).block(widgets::panel("")),
             chunks[2],
         );
     }

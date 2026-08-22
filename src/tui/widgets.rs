@@ -2,9 +2,9 @@ use qrcode::QrCode;
 use qrcode::render::unicode;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::Style;
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
 
 use crate::tui::theme;
 
@@ -87,6 +87,37 @@ pub fn render_list_scrollbar(frame: &mut Frame, area: Rect, selected: usize, tot
     );
 }
 
+/// Rows one logical line occupies once `Wrap { trim: false }` has had it.
+///
+/// Greedy word wrapping, matching what ratatui does closely enough that the
+/// scrollbar and the `End` clamp land on the same row the user sees. A word
+/// longer than the width is broken rather than allowed to overflow.
+///
+/// Here rather than on the one screen that started with it, because a panel
+/// sized as if each line were one row loses its hint the moment a server name
+/// is long enough to wrap.
+pub fn wrapped_rows(text: &str, width: u16) -> usize {
+    let width = width.max(1) as usize;
+    let mut rows = 1;
+    let mut col = 0;
+
+    for word in text.split_inclusive(' ') {
+        let len = word.chars().count();
+        if col + len > width && col > 0 {
+            rows += 1;
+            col = 0;
+        }
+        // A single word wider than the viewport wraps within itself.
+        if len > width {
+            rows += (len - 1) / width;
+            col = len % width;
+        } else {
+            col += len;
+        }
+    }
+    rows
+}
+
 /// Below this a bordered form has nothing left to show: two rows go to the
 /// border, so the height buys one field and the hint line, and a width under
 /// thirty columns cuts labels off mid-word.
@@ -132,6 +163,63 @@ pub fn form_scroll_offset(focus_row: usize, total_lines: usize, visible: usize) 
     focus_row.saturating_sub(visible - 1).min(max)
 }
 
+/// The standard bordered panel: rounded, one column of breathing room either
+/// side, a bold title in the accent, and a border in `theme::hint()` so the
+/// frame stays quieter than what is inside it.
+///
+/// Every screen goes through this rather than building its own `Block`, and
+/// `no_screen_hand_rolls_its_own_block` pins that — a screen that builds its
+/// own is a screen the next border change cannot reach, which is the same
+/// failure mode as a screen that names its own colour and just as invisible
+/// without a test.
+pub fn panel(title: &str) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::hint()))
+        .padding(Padding::horizontal(1))
+        .title(Span::styled(title.to_string(), Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD)))
+}
+
+/// `panel`, with the border in the accent while focused — the convention
+/// `file_browser::render_pane` already established for its two panes.
+pub fn focus_panel(title: &str, focused: bool) -> Block<'static> {
+    let border = if focused { theme::accent() } else { theme::hint() };
+    panel(title).border_style(Style::default().fg(border))
+}
+
+/// A dialog: `panel` plus a row of vertical padding and the surface fill, so
+/// it reads as sitting on top of the frame rather than cut out of it.
+///
+/// Vertical padding is deliberately *not* on `panel`: a list spends those rows
+/// on entries, and rows are the thing this overhaul is trying to recover.
+pub fn modal(title: &str) -> Block<'static> {
+    panel(title).padding(Padding::new(2, 2, 1, 0)).style(theme::band())
+}
+
+/// The shared body of `render_form` and `render_panel`: `lines` in `block`,
+/// scrolled by the smallest amount that keeps `focus_row` on screen, with the
+/// border saying so.
+fn render_lines_scrolled(frame: &mut Frame, rect: Rect, title: &str, lines: Vec<Line<'static>>, focus_row: usize, block: Block<'static>) {
+    let inner = block.inner(rect);
+    let visible = inner.height as usize;
+    let offset = form_scroll_offset(focus_row, lines.len(), visible);
+
+    // Arrows on the border are the only signal that fields exist off screen;
+    // without them a clamped form looks like the whole form.
+    let more_above = offset > 0;
+    let more_below = offset + visible < lines.len();
+    let title = match (more_above, more_below) {
+        (true, true) => format!("{title}↑↓ "),
+        (true, false) => format!("{title}↑ "),
+        (false, true) => format!("{title}↓ "),
+        (false, false) => title.to_string(),
+    };
+
+    let block = block.title(Span::styled(title, Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD)));
+    frame.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)).block(block), rect);
+}
+
 /// A form's lines in a bordered block, scrolled to keep the focused row
 /// visible, or the "terminal too small" message if it cannot be drawn at all.
 ///
@@ -149,23 +237,95 @@ pub fn render_form(
     if render_if_too_small(frame, area, MIN_FORM_WIDTH, MIN_FORM_HEIGHT, too_small_message) {
         return;
     }
+    render_lines_scrolled(frame, area, title, lines, focus_row, panel(""));
+}
 
-    let visible = area.height.saturating_sub(2) as usize;
-    let offset = form_scroll_offset(focus_row, lines.len(), visible);
+/// Below this a dialog has nothing left to say: the border and its padding
+/// take four columns and two rows before a single character of content.
+pub const MIN_PANEL_WIDTH: u16 = 44;
+pub const MIN_PANEL_HEIGHT: u16 = 9;
 
-    // Arrows on the border are the only signal that fields exist off screen;
-    // without them a clamped form looks like the whole form.
-    let more_above = offset > 0;
-    let more_below = offset + visible < lines.len();
-    let title = match (more_above, more_below) {
-        (true, true) => format!("{title}↑↓ "),
-        (true, false) => format!("{title}↑ "),
-        (false, true) => format!("{title}↓ "),
-        (false, false) => title.to_string(),
-    };
+/// The same thing as `render_form`, in a centred panel sized to its content
+/// but clamped to the frame — and scrolled rather than truncated when the
+/// clamp bites.
+///
+/// This is the fix for a whole class of bug, not one screen's layout.
+/// `centered_rect(w, lines.len() + 2, area)` clamps the *rect* and then the
+/// paragraph silently loses whatever did not fit, so a security mode could be
+/// selectable and invisible at the same time. Here the clamp becomes a scroll
+/// and the ↑/↓ markers say so.
+///
+/// The height counts *wrapped* rows: a panel sized as if every line were one
+/// row loses its hint the moment a message is long enough to wrap, which is
+/// how a long server name used to push the y/n prompt off a confirm dialog.
+pub fn render_panel(
+    frame: &mut Frame,
+    area: Rect,
+    width: u16,
+    title: &str,
+    lines: Vec<Line<'static>>,
+    focus_row: usize,
+    too_small_message: &str,
+) {
+    if render_if_too_small(frame, area, MIN_PANEL_WIDTH, MIN_PANEL_HEIGHT, too_small_message) {
+        return;
+    }
 
-    let block = Block::default().borders(Borders::ALL).title(title);
-    frame.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)).block(block), area);
+    let block = modal(title);
+    // Derived from the frame rather than trusted from the caller: the same
+    // screen runs full-width at first run and 24 columns narrower inside the
+    // Settings tab that embeds it.
+    let width = width.min(area.width.saturating_sub(4)).max(MIN_PANEL_WIDTH);
+    // Two for the border, four for the horizontal padding.
+    let content_width = width.saturating_sub(6);
+    let height = (wrapped_height(&lines, content_width) as u16 + 3).min(area.height);
+    let rect = centered_rect(width, height, area);
+
+    clear_surface(frame, rect);
+    render_lines_scrolled(frame, rect, title, lines, focus_row, block);
+}
+
+/// The marker beside a selected row. Paired with `theme::selection()`, and the
+/// half of the pair that still works with no colour at all.
+pub const SELECT_MARKER: &str = "\u{258c} ";
+
+/// A list in a panel, with an empty state that is a message rather than a row.
+///
+/// The empty state is the reason this exists. Handing `List` a single
+/// `ListItem` saying "no scripts yet" made the placeholder pick up the
+/// selection style and the marker, so a sentence the user cannot act on was
+/// drawn as the highlighted, selectable row. Here it is centred, dimmed, and
+/// outside the list entirely; `state` is not even consulted.
+pub fn render_list(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    items: Vec<ListItem<'static>>,
+    state: &mut ListState,
+    empty_message: Option<&str>,
+    focused: bool,
+) {
+    let block = focus_panel(title, focused);
+    if let Some(message) = empty_message.filter(|_| items.is_empty()) {
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        // Vertically centred as well as horizontally: an empty list is mostly
+        // frame, and a message pinned to the top edge of it reads as a row.
+        let row = Rect { y: inner.y + inner.height / 2, height: 1, ..inner };
+        frame.render_widget(
+            Paragraph::new(message.to_string()).alignment(Alignment::Center).style(Style::default().fg(theme::hint())),
+            row,
+        );
+        return;
+    }
+
+    let list = List::new(items).block(block).highlight_style(theme::selection()).highlight_symbol(SELECT_MARKER);
+    frame.render_stateful_widget(list, area, state);
+}
+
+/// Rows a whole line list occupies once `Wrap` has had it.
+pub fn wrapped_height(lines: &[Line], width: u16) -> usize {
+    lines.iter().map(|l| wrapped_rows(&l.to_string(), width)).sum()
 }
 
 /// A byte count at whichever unit keeps it readable — "4.0 KiB", "1.2 GiB".
@@ -205,6 +365,26 @@ pub fn qr_lines(data: &str) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A screen that builds its own block is a screen the next border change
+    /// cannot reach — the same failure mode as a screen that names its own
+    /// colour, and just as invisible without a test. This check *is* the
+    /// feature, exactly as with the missing `Default` on `Strings`.
+    #[test]
+    fn no_screen_hand_rolls_its_own_block() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tui");
+        let mut offenders = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("src/tui is readable") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().is_some_and(|e| e == "rs") && path.file_name().is_some_and(|n| n != "widgets.rs") {
+                let text = std::fs::read_to_string(&path).expect("source is utf-8");
+                if text.contains("Borders::") || text.contains("BorderType::") {
+                    offenders.push(path.display().to_string());
+                }
+            }
+        }
+        assert!(offenders.is_empty(), "these build their own block instead of using widgets::panel: {offenders:?}");
+    }
 
     #[test]
     fn the_counter_is_one_based_for_the_reader() {

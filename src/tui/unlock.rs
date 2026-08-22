@@ -3,10 +3,10 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 use zeroize::Zeroizing;
 
-use super::widgets::{centered_rect, mask};
+use super::widgets::{self, centered_rect, mask};
 use crate::i18n::Strings;
 use crate::tui::theme;
 
@@ -184,7 +184,7 @@ impl UnlockState {
             )));
         }
 
-        let block = Block::default().borders(Borders::ALL).title(title);
+        let block = widgets::modal(title);
         let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false }).block(block);
         frame.render_widget(paragraph, box_area);
     }

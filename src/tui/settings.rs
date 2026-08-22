@@ -3,11 +3,11 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 use zeroize::Zeroizing;
 
 use super::setup::{self, SetupOutcome, SetupState};
-use super::widgets::mask;
+use super::widgets::{self, mask};
 use crate::i18n::{Lang, Strings};
 use crate::tui::theme::{self, THEMES, Theme};
 use crate::totp::AuthMode;
@@ -347,7 +347,7 @@ impl SettingsState {
             })
             .collect();
 
-        let list = List::new(items).block(Block::default().borders(Borders::ALL).title(strings.settings_title));
+        let list = List::new(items).block(widgets::panel(strings.settings_title));
         frame.render_widget(list, area);
     }
 
@@ -379,7 +379,7 @@ impl SettingsState {
             })
             .collect();
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(strings.settings_tab_auto_lock))
+            .block(widgets::panel(strings.settings_tab_auto_lock))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
             .highlight_symbol("> ");
         frame.render_stateful_widget(list, chunks[0], &mut self.auto_lock_list_state);
@@ -411,7 +411,7 @@ impl SettingsState {
             })
             .collect();
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(strings.settings_tab_theme))
+            .block(widgets::panel(strings.settings_tab_theme))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
             .highlight_symbol("> ");
         frame.render_stateful_widget(list, chunks[0], &mut self.theme_list_state);
@@ -440,7 +440,7 @@ impl SettingsState {
             .map(|l| ListItem::new(format!("{} ({})", native_name(*l), l.code())))
             .collect();
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(strings.settings_tab_language))
+            .block(widgets::panel(strings.settings_tab_language))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
             .highlight_symbol("> ");
         frame.render_stateful_widget(list, chunks[0], &mut self.lang_list_state);
@@ -489,7 +489,7 @@ impl SettingsState {
             )));
         }
 
-        let block = Block::default().borders(Borders::ALL).title(strings.settings_tab_password);
+        let block = widgets::panel(strings.settings_tab_password);
         frame.render_widget(Paragraph::new(lines).block(block), area);
     }
 
@@ -506,7 +506,7 @@ impl SettingsState {
             Line::from(Span::styled(strings.settings_action_change_mode, Style::default().add_modifier(Modifier::REVERSED))),
         ];
 
-        let block = Block::default().borders(Borders::ALL).title(strings.settings_tab_security);
+        let block = widgets::panel(strings.settings_tab_security);
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), area);
     }
 }
