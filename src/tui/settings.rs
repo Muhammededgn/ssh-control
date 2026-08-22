@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use zeroize::Zeroizing;
@@ -9,6 +9,7 @@ use zeroize::Zeroizing;
 use super::setup::{self, SetupOutcome, SetupState};
 use super::widgets::mask;
 use crate::i18n::{Lang, Strings};
+use crate::tui::theme::{self, THEMES, Theme};
 use crate::totp::AuthMode;
 
 const LANGS: [Lang; 4] = [Lang::En, Lang::Tr, Lang::Es, Lang::Ru];
@@ -16,12 +17,13 @@ const LANGS: [Lang; 4] = [Lang::En, Lang::Tr, Lang::Es, Lang::Ru];
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Language,
+    Theme,
     Password,
     Security,
     AutoLock,
 }
 
-const TABS: [Tab; 4] = [Tab::Language, Tab::Password, Tab::Security, Tab::AutoLock];
+const TABS: [Tab; 5] = [Tab::Language, Tab::Theme, Tab::Password, Tab::Security, Tab::AutoLock];
 
 /// Idle auto-lock choices, in minutes. `0` is "off"; anything else is a
 /// timeout. Presets rather than a free-text field so the value can never be
@@ -45,6 +47,8 @@ pub struct SettingsState {
     tab: Tab,
     lang_list_state: ListState,
     lang_selected: usize,
+    theme_list_state: ListState,
+    theme_selected: usize,
     pw_focus: PwField,
     current_password: Zeroizing<String>,
     new_password: Zeroizing<String>,
@@ -71,6 +75,7 @@ pub enum SettingsOutcome {
     None,
     Close,
     LanguageSelected(Lang),
+    ThemeSelected(Theme),
     /// Idle auto-lock timeout in minutes; `0` disables it.
     AutoLockSelected(u32),
     ChangePassword { current: Zeroizing<String>, new: Zeroizing<String> },
@@ -90,10 +95,20 @@ impl SettingsState {
         self.security_setup = None;
     }
 
-    pub fn new(current_lang: Lang, auth_mode: AuthMode, credential_store: bool, auto_lock_minutes: u32) -> Self {
+    pub fn new(
+        current_lang: Lang,
+        current_theme: Theme,
+        auth_mode: AuthMode,
+        credential_store: bool,
+        auto_lock_minutes: u32,
+    ) -> Self {
         let lang_selected = LANGS.iter().position(|l| *l == current_lang).unwrap_or(0);
         let mut lang_list_state = ListState::default();
         lang_list_state.select(Some(lang_selected));
+
+        let theme_selected = THEMES.iter().position(|t| *t == current_theme).unwrap_or(0);
+        let mut theme_list_state = ListState::default();
+        theme_list_state.select(Some(theme_selected));
 
         // A stored value outside the preset list (hand-edited, or a preset we
         // dropped later) falls back to the first entry rather than showing no
@@ -106,6 +121,8 @@ impl SettingsState {
             tab: Tab::Language,
             lang_list_state,
             lang_selected,
+            theme_list_state,
+            theme_selected,
             pw_focus: PwField::Current,
             current_password: Zeroizing::new(String::new()),
             new_password: Zeroizing::new(String::new()),
@@ -135,7 +152,8 @@ impl SettingsState {
                 if !(self.tab == Tab::Security && self.security_setup.is_some()) =>
             {
                 self.tab = match self.tab {
-                    Tab::Language => Tab::Password,
+                    Tab::Language => Tab::Theme,
+                    Tab::Theme => Tab::Password,
                     Tab::Password => Tab::Security,
                     Tab::Security => Tab::AutoLock,
                     Tab::AutoLock => Tab::Language,
@@ -149,6 +167,7 @@ impl SettingsState {
 
         match self.tab {
             Tab::Language => self.handle_language_key(key),
+            Tab::Theme => self.handle_theme_key(key),
             Tab::Password => self.handle_password_key(key, strings),
             Tab::Security => self.handle_security_key(key, strings),
             Tab::AutoLock => self.handle_auto_lock_key(key),
@@ -170,6 +189,26 @@ impl SettingsState {
                 }
             }
             KeyCode::Enter => return SettingsOutcome::LanguageSelected(LANGS[self.lang_selected]),
+            _ => {}
+        }
+        SettingsOutcome::None
+    }
+
+    fn handle_theme_key(&mut self, key: KeyEvent) -> SettingsOutcome {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.theme_selected > 0 {
+                    self.theme_selected -= 1;
+                    self.theme_list_state.select(Some(self.theme_selected));
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.theme_selected + 1 < THEMES.len() {
+                    self.theme_selected += 1;
+                    self.theme_list_state.select(Some(self.theme_selected));
+                }
+            }
+            KeyCode::Enter => return SettingsOutcome::ThemeSelected(THEMES[self.theme_selected]),
             _ => {}
         }
         SettingsOutcome::None
@@ -294,6 +333,7 @@ impl SettingsState {
             .map(|t| {
                 let label = match t {
                     Tab::Language => strings.settings_tab_language,
+                    Tab::Theme => strings.settings_tab_theme,
                     Tab::Password => strings.settings_tab_password,
                     Tab::Security => strings.settings_tab_security,
                     Tab::AutoLock => strings.settings_tab_auto_lock,
@@ -314,6 +354,7 @@ impl SettingsState {
     fn render_content(&mut self, frame: &mut Frame, area: Rect, strings: &Strings) {
         match self.tab {
             Tab::Language => self.render_language_tab(frame, area, strings),
+            Tab::Theme => self.render_theme_tab(frame, area, strings),
             Tab::Password => self.render_password_tab(frame, area, strings),
             Tab::Security => self.render_security_tab(frame, area, strings),
             Tab::AutoLock => self.render_auto_lock_tab(frame, area, strings),
@@ -344,11 +385,45 @@ impl SettingsState {
         frame.render_stateful_widget(list, chunks[0], &mut self.auto_lock_list_state);
 
         let footer = if let Some(err) = &self.error {
-            Span::styled(err.clone(), Style::default().fg(Color::Red))
+            Span::styled(err.clone(), Style::default().fg(theme::error()))
         } else if let Some(info) = &self.info {
-            Span::styled(info.clone(), Style::default().fg(Color::Green))
+            Span::styled(info.clone(), Style::default().fg(theme::success()))
         } else {
-            Span::styled(strings.settings_auto_lock_hint, Style::default().fg(Color::DarkGray))
+            Span::styled(strings.settings_auto_lock_hint, Style::default().fg(theme::hint()))
+        };
+        frame.render_widget(Paragraph::new(Line::from(footer)), chunks[1]);
+    }
+
+    fn render_theme_tab(&mut self, frame: &mut Frame, area: Rect, strings: &Strings) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(1)])
+            .split(area);
+
+        let items: Vec<ListItem> = THEMES
+            .iter()
+            .map(|t| {
+                ListItem::new(match t {
+                    Theme::Dark => strings.theme_dark,
+                    Theme::Light => strings.theme_light,
+                })
+            })
+            .collect();
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title(strings.settings_tab_theme))
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+            .highlight_symbol("> ");
+        frame.render_stateful_widget(list, chunks[0], &mut self.theme_list_state);
+
+        // Picking a preset under `NO_COLOR` still stores it and still applies
+        // the next time the variable is unset — but nothing changes on screen
+        // right now, and a setting that silently does nothing needs saying.
+        let footer = if theme::no_color() {
+            Span::styled(strings.theme_no_color_note, Style::default().fg(theme::warning()))
+        } else {
+            // The same keys as the language list, so the same string — and the
+            // help overlay stays one row per binding rather than two identical ones.
+            Span::styled(strings.settings_lang_hint, Style::default().fg(theme::hint()))
         };
         frame.render_widget(Paragraph::new(Line::from(footer)), chunks[1]);
     }
@@ -371,7 +446,7 @@ impl SettingsState {
 
         let hint = Paragraph::new(Line::from(Span::styled(
             strings.settings_lang_hint,
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::hint()),
         )));
         frame.render_widget(hint, chunks[1]);
     }
@@ -380,7 +455,7 @@ impl SettingsState {
         let field_line = |label: &str, value: String, field: PwField, this: &Self| {
             let cursor = if this.pw_focus == field { "_" } else { "" };
             let style = if this.pw_focus == field {
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(theme::accent())
             } else {
                 Style::default()
             };
@@ -403,13 +478,13 @@ impl SettingsState {
         ];
 
         if let Some(err) = &self.error {
-            lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(Color::Red))));
+            lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(theme::error()))));
         } else if let Some(info) = &self.info {
-            lines.push(Line::from(Span::styled(info.clone(), Style::default().fg(Color::Green))));
+            lines.push(Line::from(Span::styled(info.clone(), Style::default().fg(theme::success()))));
         } else {
             lines.push(Line::from(Span::styled(
                 strings.settings_password_hint,
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::hint()),
             )));
         }
 
@@ -425,7 +500,7 @@ impl SettingsState {
 
         let lines = vec![
             Line::from(format!("{}: {}", strings.settings_security_current, setup::mode_title(self.auth_mode, strings))),
-            Line::from(Span::styled(setup::mode_description(self.auth_mode, strings), Style::default().fg(Color::DarkGray))),
+            Line::from(Span::styled(setup::mode_description(self.auth_mode, strings), Style::default().fg(theme::hint()))),
             Line::from(""),
             Line::from(Span::styled(strings.settings_action_change_mode, Style::default().add_modifier(Modifier::REVERSED))),
         ];
@@ -441,5 +516,60 @@ fn native_name(lang: Lang) -> &'static str {
         Lang::Tr => "Türkçe",
         Lang::Es => "Español",
         Lang::Ru => "Русский",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::i18n::EN;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn state() -> SettingsState {
+        SettingsState::new(Lang::En, Theme::Dark, AuthMode::Password, false, 15)
+    }
+
+    fn press(state: &mut SettingsState, code: KeyCode) -> SettingsOutcome {
+        state.handle_key(KeyEvent::from(code), &EN)
+    }
+
+    fn render(state: &mut SettingsState) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("test backend");
+        terminal.draw(|frame| state.render(frame, frame.area(), &EN)).expect("render");
+        terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    /// The theme sits next to the language, which is where the issue asks for
+    /// it and where a reader looking for "display settings" will go.
+    #[test]
+    fn the_theme_tab_is_the_one_after_language() {
+        let mut s = state();
+        press(&mut s, KeyCode::Right);
+        let screen = render(&mut s);
+        assert!(screen.contains("Dark"));
+        assert!(screen.contains("Light"));
+    }
+
+    #[test]
+    fn enter_picks_the_highlighted_preset() {
+        let mut s = state();
+        press(&mut s, KeyCode::Right);
+        press(&mut s, KeyCode::Down);
+        let SettingsOutcome::ThemeSelected(theme) = press(&mut s, KeyCode::Enter) else {
+            panic!("Enter should select a theme");
+        };
+        assert_eq!(theme, Theme::Light);
+    }
+
+    /// Every tab has to stay reachable by walking right — a new one inserted
+    /// mid-cycle is exactly how that breaks.
+    #[test]
+    fn the_tab_cycle_returns_to_where_it_started() {
+        let mut s = state();
+        for _ in 0..TABS.len() {
+            press(&mut s, KeyCode::Right);
+        }
+        assert!(render(&mut s).contains("English"), "back on the language tab");
     }
 }

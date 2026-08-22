@@ -13,12 +13,13 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use super::widgets::centered_rect;
 use crate::i18n::Strings;
+use crate::tui::theme;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum OverwriteChoice {
@@ -75,16 +76,16 @@ impl OverwriteState {
             let mark = if self.apply_to_all { "[x]" } else { "[ ]" };
             lines.push(Line::from(Span::styled(
                 format!("{mark} {}", strings.overwrite_apply_all_label),
-                Style::default().fg(if self.apply_to_all { Color::Yellow } else { Color::DarkGray }),
+                Style::default().fg(if self.apply_to_all { theme::warning() } else { theme::hint() }),
             )));
         }
-        lines.push(Line::from(Span::styled(strings.overwrite_hint, Style::default().fg(Color::DarkGray))));
+        lines.push(Line::from(Span::styled(strings.overwrite_hint, Style::default().fg(theme::hint()))));
 
         let box_area = centered_rect(60, lines.len() as u16 + 2, area);
         let block = Block::default()
             .borders(Borders::ALL)
             .title(strings.overwrite_title)
-            .style(Style::default().fg(Color::Yellow));
+            .style(Style::default().fg(theme::warning()));
         frame.render_widget(Clear, box_area);
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }).block(block), box_area);
     }

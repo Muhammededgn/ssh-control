@@ -12,13 +12,14 @@ use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use uuid::Uuid;
 
 use super::widgets::{format_size, render_if_too_small, render_list_scrollbar};
 use crate::i18n::Strings;
+use crate::tui::theme;
 
 /// Two bordered panes need more room than a single form: at 60 columns each
 /// pane has ~28 usable, which is already tight for a name plus a size.
@@ -354,7 +355,7 @@ impl FileBrowserState {
 
         let mut footer = Vec::new();
         if let Some(status) = &self.status {
-            footer.push(Line::from(Span::styled(status.clone(), Style::default().fg(Color::Yellow))));
+            footer.push(Line::from(Span::styled(status.clone(), Style::default().fg(theme::warning()))));
         }
         footer.push(Line::from(strings.file_browser_hint));
         frame.render_widget(Paragraph::new(footer).block(Block::default().borders(Borders::ALL)), rows[1]);
@@ -391,7 +392,7 @@ fn render_progress(frame: &mut Frame, area: Rect, progress: &TransferProgress, s
             format_size(progress.total_bytes)
         )));
     }
-    lines.push(Line::from(Span::styled(strings.transfer_hint, Style::default().fg(Color::DarkGray))));
+    lines.push(Line::from(Span::styled(strings.transfer_hint, Style::default().fg(theme::hint()))));
 
     let box_area = super::widgets::centered_rect(60, lines.len() as u16 + 2, area);
     frame.render_widget(ratatui::widgets::Clear, box_area);
@@ -403,7 +404,7 @@ fn render_progress(frame: &mut Frame, area: Rect, progress: &TransferProgress, s
 
 fn render_pane(frame: &mut Frame, area: Rect, pane: &mut PaneState, label: &str, focused: bool, strings: &Strings) {
     let items: Vec<ListItem> = if let Some(error) = &pane.error {
-        vec![ListItem::new(Line::from(Span::styled(error.clone(), Style::default().fg(Color::Red))))]
+        vec![ListItem::new(Line::from(Span::styled(error.clone(), Style::default().fg(theme::error()))))]
     } else if pane.entries.is_empty() {
         vec![ListItem::new(strings.file_browser_empty)]
     } else {
@@ -415,15 +416,15 @@ fn render_pane(frame: &mut Frame, area: Rect, pane: &mut PaneState, label: &str,
                 let size = if entry.is_dir { String::new() } else { format_size(entry.size) };
                 let mut style = Style::default();
                 if entry.is_dir {
-                    style = style.fg(Color::Cyan);
+                    style = style.fg(theme::accent());
                 }
                 if marked {
-                    style = style.fg(Color::Yellow).add_modifier(Modifier::BOLD);
+                    style = style.fg(theme::warning()).add_modifier(Modifier::BOLD);
                 }
                 ListItem::new(Line::from(vec![
                     Span::styled(if marked { "*" } else { " " }, style),
                     Span::styled(name, style),
-                    Span::styled(format!("  {size}"), Style::default().fg(Color::DarkGray)),
+                    Span::styled(format!("  {size}"), Style::default().fg(theme::hint())),
                 ]))
             })
             .collect()
@@ -434,7 +435,7 @@ fn render_pane(frame: &mut Frame, area: Rect, pane: &mut PaneState, label: &str,
     // the middle rather than either end.
     let width = area.width.saturating_sub(label.len() as u16 + 6) as usize;
     let title = format!(" {label}: {} ", ellipsize_middle(&pane.cwd, width.max(8)));
-    let border = if focused { Style::default().fg(Color::Cyan) } else { Style::default().fg(Color::DarkGray) };
+    let border = if focused { Style::default().fg(theme::accent()) } else { Style::default().fg(theme::hint()) };
 
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).border_style(border).title(title))

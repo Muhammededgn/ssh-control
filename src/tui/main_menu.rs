@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use uuid::Uuid;
@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::config::device::now_unix;
 use crate::config::{ServerEntry, ServerSort, SystemInfo};
 use crate::i18n::Strings;
+use crate::tui::theme;
 use crate::tui::widgets::{list_title_with_position, render_list_scrollbar};
 
 fn gib(bytes: u64) -> f64 {
@@ -426,7 +427,7 @@ impl MainMenuState {
                     if !details.is_empty() {
                         lines.push(Line::from(Span::styled(
                             format!("    {}", details.join("  |  ")),
-                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(theme::hint()),
                         )));
                     }
                     ListItem::new(lines)
@@ -451,14 +452,14 @@ impl MainMenuState {
             let caret = if self.typing { "█" } else { "" };
             help_text.push(Line::from(Span::styled(
                 format!("{}{}{caret}", strings.main_menu_filter_label, self.filter),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(theme::accent()),
             )));
         }
 
         if let Some(s) = status {
             help_text.push(Line::from(Span::styled(
                 s.to_string(),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme::warning()),
             )));
         }
         // Which order is in force has to be visible, or `o` reorders the list
@@ -466,7 +467,7 @@ impl MainMenuState {
         if !self.typing {
             help_text.push(Line::from(Span::styled(
                 format!("{}{}", strings.main_menu_sort_prefix, sort_label(sort, strings)),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::hint()),
             )));
         }
         help_text.push(Line::from(if self.typing {

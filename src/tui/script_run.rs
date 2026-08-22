@@ -1,12 +1,13 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use uuid::Uuid;
 
 use crate::i18n::Strings;
+use crate::tui::theme;
 
 /// Live-updating log for one script run. `app.rs`'s async execution loop
 /// pushes lines into this as `ssh::script_runner::run_script`'s `on_event`
@@ -110,7 +111,7 @@ impl ScriptRunState {
     pub fn step_started(&mut self, command: &str) {
         self.log.push(Line::from(Span::styled(
             format!("$ {command}"),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
         )));
     }
 
@@ -131,7 +132,7 @@ impl ScriptRunState {
 
     pub fn step_finished(&mut self, exit_code: i32, strings: &Strings) {
         self.flush_partial();
-        let color = if exit_code == 0 { Color::Green } else { Color::Red };
+        let color = if exit_code == 0 { theme::success() } else { theme::error() };
         self.log.push(Line::from(Span::styled(
             format!("[{}{exit_code}]", strings.log_exit_prefix),
             Style::default().fg(color),
@@ -144,26 +145,26 @@ impl ScriptRunState {
         self.flush_partial();
         self.log.push(Line::from(Span::styled(
             format!("{}{seconds}{}", strings.log_timed_out_prefix, strings.log_timed_out_suffix),
-            Style::default().fg(Color::Red),
+            Style::default().fg(theme::error()),
         )));
     }
 
     pub fn step_skipped(&mut self, strings: &Strings) {
-        self.log.push(Line::from(Span::styled(strings.log_skipped, Style::default().fg(Color::DarkGray))));
+        self.log.push(Line::from(Span::styled(strings.log_skipped, Style::default().fg(theme::hint()))));
     }
 
     pub fn step_error(&mut self, message: &str, strings: &Strings) {
         self.flush_partial();
         self.log.push(Line::from(Span::styled(
             format!("{}{message}", strings.log_error_prefix),
-            Style::default().fg(Color::Red),
+            Style::default().fg(theme::error()),
         )));
     }
 
     pub fn connect_error(&mut self, message: &str, strings: &Strings) {
         self.log.push(Line::from(Span::styled(
             format!("{}{message}", strings.log_error_prefix),
-            Style::default().fg(Color::Red),
+            Style::default().fg(theme::error()),
         )));
         self.finished = true;
     }
@@ -316,11 +317,11 @@ impl ScriptRunState {
         // order: while editing, the path is the only thing worth showing there.
         let footer_line = if let Some(path) = &self.save_path {
             Line::from(vec![
-                Span::styled(format!("{} ", strings.script_run_save_prompt), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{} ", strings.script_run_save_prompt), Style::default().fg(theme::accent())),
                 Span::raw(format!("{path}_")),
             ])
         } else if let Some((message, ok)) = &self.save_result {
-            let colour = if *ok { Color::Green } else { Color::Red };
+            let colour = if *ok { theme::success() } else { theme::error() };
             Line::from(Span::styled(message.clone(), Style::default().fg(colour)))
         } else {
             let hint = if self.is_scrolled_back() {
@@ -331,7 +332,7 @@ impl ScriptRunState {
                 strings.script_run_hint_running
             };
             let style =
-                if self.is_scrolled_back() { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::DarkGray) };
+                if self.is_scrolled_back() { Style::default().fg(theme::warning()) } else { Style::default().fg(theme::hint()) };
             Line::from(Span::styled(hint, style))
         };
         let footer = Paragraph::new(footer_line).block(Block::default().borders(Borders::ALL));

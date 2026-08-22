@@ -1,12 +1,13 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::widgets::centered_rect;
 use crate::i18n::Strings;
+use crate::tui::theme;
 
 /// Full unlock screen for "TOTP-only" mode vaults — no password is ever
 /// asked; the live 6-digit code is the only input.
@@ -57,11 +58,11 @@ impl TotpUnlockState {
         let mut lines = vec![Line::from(""), Line::from(format!("{}: {}_", strings.totp_code_label, self.code)), Line::from("")];
 
         if let Some(err) = &self.error {
-            lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(Color::Red))));
+            lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(theme::error()))));
         } else if let Some(info) = &self.info {
-            lines.push(Line::from(Span::styled(info.clone(), Style::default().fg(Color::Yellow))));
+            lines.push(Line::from(Span::styled(info.clone(), Style::default().fg(theme::warning()))));
         } else {
-            lines.push(Line::from(Span::styled(strings.totp_unlock_hint, Style::default().fg(Color::DarkGray))));
+            lines.push(Line::from(Span::styled(strings.totp_unlock_hint, Style::default().fg(theme::hint()))));
         }
 
         let block = Block::default().borders(Borders::ALL).title(strings.totp_unlock_title);

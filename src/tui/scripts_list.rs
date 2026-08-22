@@ -1,13 +1,14 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use uuid::Uuid;
 
 use crate::config::Script;
 use crate::i18n::Strings;
+use crate::tui::theme;
 use crate::tui::widgets::{list_title_with_position, render_list_scrollbar};
 
 pub struct ScriptsListState {
@@ -118,7 +119,7 @@ impl ScriptsListState {
         let mut help_text = Vec::new();
 
         if let Some(s) = status {
-            help_text.push(Line::from(Span::styled(s.to_string(), Style::default().fg(Color::Yellow))));
+            help_text.push(Line::from(Span::styled(s.to_string(), Style::default().fg(theme::warning()))));
         }
         help_text.push(Line::from(strings.scripts_list_hint));
 

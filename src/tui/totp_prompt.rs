@@ -1,12 +1,13 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::widgets::centered_rect;
 use crate::i18n::Strings;
+use crate::tui::theme;
 
 /// Second-factor prompt shown after a successful master-password unlock, when
 /// the vault has "Password + TOTP (2FA)" enabled. Esc re-locks the whole app
@@ -54,9 +55,9 @@ impl TotpPromptState {
         let mut lines = vec![Line::from(""), Line::from(format!("{}: {}_", strings.totp_code_label, self.code)), Line::from("")];
 
         if let Some(err) = &self.error {
-            lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(Color::Red))));
+            lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(theme::error()))));
         } else {
-            lines.push(Line::from(Span::styled(strings.totp_prompt_hint, Style::default().fg(Color::DarkGray))));
+            lines.push(Line::from(Span::styled(strings.totp_prompt_hint, Style::default().fg(theme::hint()))));
         }
 
         let block = Block::default().borders(Borders::ALL).title(strings.totp_prompt_title);

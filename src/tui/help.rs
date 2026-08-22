@@ -1,11 +1,12 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use super::widgets::centered_rect;
 use crate::i18n::Strings;
+use crate::tui::theme;
 
 /// Which screen's keys the overlay is showing. Deliberately coarser than
 /// `Screen`: the two confirm screens and the two forms answer the same
@@ -76,7 +77,7 @@ pub fn render(frame: &mut Frame, area: Rect, topic: HelpTopic, strings: &'static
         }
     }
     rows.push(Line::from(""));
-    rows.push(Line::from(Span::styled(strings.help_hint, Style::default().fg(Color::DarkGray))));
+    rows.push(Line::from(Span::styled(strings.help_hint, Style::default().fg(theme::hint()))));
 
     let width = rows.iter().map(|l| l.width()).max().unwrap_or(0).saturating_add(4) as u16;
     let height = rows.len().saturating_add(2) as u16;

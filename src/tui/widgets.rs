@@ -2,9 +2,11 @@ use qrcode::QrCode;
 use qrcode::render::unicode;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
+
+use crate::tui::theme;
 
 /// Returns a rect of `width`x`height` centered within `area`, clamped so it
 /// never exceeds `area`'s bounds. Used for popups/overlays (unlock screen,
@@ -98,7 +100,7 @@ pub fn render_if_too_small(
     let paragraph = Paragraph::new(message)
         .wrap(Wrap { trim: true })
         .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Yellow));
+        .style(Style::default().fg(theme::warning()));
     frame.render_widget(Clear, area);
     frame.render_widget(paragraph, area);
     true

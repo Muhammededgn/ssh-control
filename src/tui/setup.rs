@@ -8,12 +8,13 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use zeroize::Zeroizing;
 
 use crate::i18n::Strings;
+use crate::tui::theme;
 use crate::totp::{self, AuthMode};
 use crate::tui::widgets::{centered_rect, mask, qr_lines};
 
@@ -261,13 +262,13 @@ impl SetupState {
     }
 
     fn render_choose_mode(&self, frame: &mut Frame, area: Rect, strings: &Strings) {
-        let mut lines = vec![Line::from(Span::styled(strings.setup_intro, Style::default().fg(Color::DarkGray))), Line::from("")];
+        let mut lines = vec![Line::from(Span::styled(strings.setup_intro, Style::default().fg(theme::hint()))), Line::from("")];
 
         for (i, mode) in MODES.iter().enumerate() {
             let available = self.mode_available(*mode);
             let marker = if i == self.selected { "> " } else { "  " };
             let style = if !available {
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+                Style::default().fg(theme::hint()).add_modifier(Modifier::DIM)
             } else if i == self.selected {
                 Style::default().add_modifier(Modifier::REVERSED)
             } else {
@@ -276,21 +277,21 @@ impl SetupState {
             lines.push(Line::from(Span::styled(format!("{marker}{}", mode_title(*mode, strings)), style)));
             lines.push(Line::from(Span::styled(
                 format!("    {}", mode_description(*mode, strings)),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::hint()),
             )));
             if !available {
                 lines.push(Line::from(Span::styled(
                     format!("    {}", strings.setup_needs_credential_store),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(theme::warning()),
                 )));
             }
             lines.push(Line::from(""));
         }
 
         if let Some(err) = &self.error {
-            lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(Color::Red))));
+            lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(theme::error()))));
         } else {
-            lines.push(Line::from(Span::styled(strings.setup_choose_hint, Style::default().fg(Color::DarkGray))));
+            lines.push(Line::from(Span::styled(strings.setup_choose_hint, Style::default().fg(theme::hint()))));
         }
 
         let height = (lines.len() as u16 + 2).min(area.height);
@@ -301,11 +302,11 @@ impl SetupState {
 
     fn render_offer_recovery(&self, frame: &mut Frame, area: Rect, strings: &Strings) {
         let lines = vec![
-            Line::from(Span::styled(strings.setup_recovery_warning, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+            Line::from(Span::styled(strings.setup_recovery_warning, Style::default().fg(theme::warning()).add_modifier(Modifier::BOLD))),
             Line::from(""),
             Line::from(strings.setup_recovery_question),
             Line::from(""),
-            Line::from(Span::styled(strings.setup_recovery_hint, Style::default().fg(Color::DarkGray))),
+            Line::from(Span::styled(strings.setup_recovery_hint, Style::default().fg(theme::hint()))),
         ];
         let rect = centered_rect(70, lines.len() as u16 + 2, area);
         let block = Block::default().borders(Borders::ALL).title(strings.setup_recovery_title);
@@ -322,9 +323,9 @@ impl SetupState {
             Line::from(""),
         ];
         if let Some(err) = &self.error {
-            lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(Color::Red))));
+            lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(theme::error()))));
         } else {
-            lines.push(Line::from(Span::styled(strings.setup_password_hint, Style::default().fg(Color::DarkGray))));
+            lines.push(Line::from(Span::styled(strings.setup_password_hint, Style::default().fg(theme::hint()))));
         }
 
         let rect = centered_rect(64, lines.len() as u16 + 2, area);
@@ -341,7 +342,7 @@ impl SetupState {
 
         let top = vec![
             Line::from(format!("{}: {}", strings.tf_secret_label, self.pending_secret.as_str())),
-            Line::from(Span::styled(strings.tf_scan_hint, Style::default().fg(Color::DarkGray))),
+            Line::from(Span::styled(strings.tf_scan_hint, Style::default().fg(theme::hint()))),
         ];
 
         let chunks = Layout::default()
@@ -355,9 +356,9 @@ impl SetupState {
 
         let mut bottom = vec![Line::from(format!("{}: {}_", strings.totp_code_label, self.code))];
         if let Some(err) = &self.error {
-            bottom.push(Line::from(Span::styled(err.clone(), Style::default().fg(Color::Red))));
+            bottom.push(Line::from(Span::styled(err.clone(), Style::default().fg(theme::error()))));
         } else {
-            bottom.push(Line::from(Span::styled(strings.tf_verify_hint, Style::default().fg(Color::DarkGray))));
+            bottom.push(Line::from(Span::styled(strings.tf_verify_hint, Style::default().fg(theme::hint()))));
         }
         frame.render_widget(Paragraph::new(bottom).block(Block::default().borders(Borders::ALL)), chunks[2]);
     }
@@ -386,7 +387,7 @@ pub fn mode_description(mode: AuthMode, strings: &Strings) -> &'static str {
 /// offering a prompt that could never succeed.
 pub fn render_unopenable(frame: &mut Frame, area: Rect, strings: &Strings) {
     let lines = vec![
-        Line::from(Span::styled(strings.unopenable_message, Style::default().fg(Color::Red))),
+        Line::from(Span::styled(strings.unopenable_message, Style::default().fg(theme::error()))),
     ];
     let rect = centered_rect(70, 10, area);
     let block = Block::default().borders(Borders::ALL).title(strings.unopenable_title);
@@ -398,7 +399,7 @@ pub fn render_unopenable(frame: &mut Frame, area: Rect, strings: &Strings) {
 /// once the user does the thing the message names, so they are yellow rather
 /// than red and the caller supplies the wording.
 pub fn render_cannot_open(frame: &mut Frame, area: Rect, title: &str, message: &str) {
-    let lines = vec![Line::from(Span::styled(message.to_string(), Style::default().fg(Color::Yellow)))];
+    let lines = vec![Line::from(Span::styled(message.to_string(), Style::default().fg(theme::warning())))];
     let rect = centered_rect(70, 10, area);
     let block = Block::default().borders(Borders::ALL).title(title.to_string());
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), rect);

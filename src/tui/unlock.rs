@@ -1,13 +1,14 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use zeroize::Zeroizing;
 
 use super::widgets::{centered_rect, mask};
 use crate::i18n::Strings;
+use crate::tui::theme;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum UnlockMode {
@@ -146,7 +147,7 @@ impl UnlockState {
 
         let mut lines = Vec::new();
         if self.mode == UnlockMode::MigrateTotpOnly {
-            lines.push(Line::from(Span::styled(strings.migrate_totp_only_message, Style::default().fg(Color::Yellow))));
+            lines.push(Line::from(Span::styled(strings.migrate_totp_only_message, Style::default().fg(theme::warning()))));
         }
         lines.extend([
             Line::from(""),
@@ -173,13 +174,13 @@ impl UnlockState {
 
         lines.push(Line::from(""));
         if let Some(err) = &self.error {
-            lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(Color::Red))));
+            lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(theme::error()))));
         } else if let Some(info) = &self.info {
-            lines.push(Line::from(Span::styled(info.clone(), Style::default().fg(Color::Yellow))));
+            lines.push(Line::from(Span::styled(info.clone(), Style::default().fg(theme::warning()))));
         } else {
             lines.push(Line::from(Span::styled(
                 strings.unlock_hint,
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::hint()),
             )));
         }
 

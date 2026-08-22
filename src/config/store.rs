@@ -15,6 +15,7 @@ use crate::error::{AppError, Result};
 
 const CONFIG_FILE_NAME: &str = "config.enc";
 const PREFS_FILE_NAME: &str = "prefs.lang";
+const THEME_FILE_NAME: &str = "prefs.theme";
 const TOTP_ONLY_FILE_NAME: &str = "totp-only.secret";
 const VAULT_ID_FILE_NAME: &str = "vault-id";
 
@@ -74,6 +75,15 @@ impl ConfigStore {
     /// remembered language).
     pub fn prefs_path(&self) -> PathBuf {
         self.path.with_file_name(PREFS_FILE_NAME)
+    }
+
+    /// Path for the colour-theme preference. Beside `prefs.lang` and for the
+    /// same reason: the unlock screen is coloured, so this has to be readable
+    /// before the master password is. Its own file rather than a second line
+    /// in `prefs.lang`, which every already-installed copy would misparse as a
+    /// language code.
+    pub fn theme_path(&self) -> PathBuf {
+        self.path.with_file_name(THEME_FILE_NAME)
     }
 
     /// Path for the secret left behind by the retired "TOTP-only" mode.

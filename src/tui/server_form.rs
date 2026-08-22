@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -9,6 +9,7 @@ use zeroize::Zeroizing;
 use super::widgets::{mask, render_form};
 use crate::config::{AuthMethod, Secret, ServerEntry};
 use crate::i18n::Strings;
+use crate::tui::theme;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FormMode {
@@ -268,7 +269,7 @@ impl ServerFormState {
         let field_line = |label: &str, value: String, field: Field, this: &Self| {
             let cursor = if this.focus == field { "_" } else { "" };
             let style = if this.focus == field {
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(theme::accent())
             } else {
                 Style::default()
             };
@@ -312,11 +313,11 @@ impl ServerFormState {
 
         lines.push(Line::from(""));
         if let Some(err) = &self.error {
-            lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(Color::Red))));
+            lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(theme::error()))));
         } else {
             lines.push(Line::from(Span::styled(
                 strings.form_hint,
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::hint()),
             )));
         }
 

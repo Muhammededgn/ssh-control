@@ -26,6 +26,7 @@ use crate::tui::scripts_list::{ScriptsListAction, ScriptsListState};
 use crate::tui::server_form::{FormMode, FormOutcome, ServerFormData, ServerFormState};
 use crate::tui::settings::{SettingsOutcome, SettingsState};
 use crate::tui::setup::{SetupOutcome, SetupState};
+use crate::tui::theme::{self, Theme};
 use crate::tui::totp_prompt::{TotpPromptOutcome, TotpPromptState};
 use crate::ssh::{sftp, transfer};
 use crate::tui::file_browser::{BrowserEntry, FileBrowserOutcome, FileBrowserState, Side, TransferProgress};
@@ -146,6 +147,7 @@ enum NextStep {
     ConfirmNo,
     SettingsClose,
     SettingsLangSelected(Lang),
+    SettingsThemeSelected(Theme),
     SettingsAutoLockSelected(u32),
     SettingsChangePassword { current: Zeroizing<String>, new: Zeroizing<String> },
     ChangeSecurityMode { mode: AuthMode, password: Option<Zeroizing<String>>, totp_secret: Option<Zeroizing<String>> },
@@ -175,6 +177,7 @@ pub struct App {
     store: ConfigStore,
     state: AppState,
     lang: Lang,
+    theme: Theme,
     should_quit: bool,
     /// When the last key was pressed, for the idle auto-lock. Also re-stamped
     /// after every `handle_key`, so time spent inside an SSH session or a
@@ -214,10 +217,14 @@ const STATUS_TTL: Duration = Duration::from_secs(4);
 impl App {
     pub fn new(store: ConfigStore) -> Self {
         let lang = Lang::load_from_file(&store.prefs_path());
+        // Before the first frame — the unlock screen is coloured too.
+        let theme = Theme::load_from_file(&store.theme_path());
+        theme::init(theme);
         let mut app = Self {
             store,
             state: AppState::Locked(UnlockState::new(UnlockMode::Unlock)),
             lang,
+            theme,
             should_quit: false,
             last_activity: Instant::now(),
             remote: None,
@@ -862,6 +869,7 @@ impl App {
                     SettingsOutcome::None => NextStep::None,
                     SettingsOutcome::Close => NextStep::SettingsClose,
                     SettingsOutcome::LanguageSelected(lang) => NextStep::SettingsLangSelected(lang),
+                    SettingsOutcome::ThemeSelected(t) => NextStep::SettingsThemeSelected(t),
                     SettingsOutcome::AutoLockSelected(minutes) => NextStep::SettingsAutoLockSelected(minutes),
                     SettingsOutcome::ChangePassword { current, new } => {
                         NextStep::SettingsChangePassword { current, new }
@@ -952,10 +960,12 @@ impl App {
             }),
             NextStep::GoSettings => {
                 let lang = self.lang;
+                let current_theme = self.theme;
                 let auth_mode = self.current_auth_mode();
                 self.with_unlocked(|u| {
                     let auto_lock_minutes = u.config.auto_lock_minutes;
-                    u.screen = Screen::Settings(SettingsState::new(lang, auth_mode, device::credential_store_available(), auto_lock_minutes));
+                    u.screen =
+                        Screen::Settings(SettingsState::new(lang, current_theme, auth_mode, device::credential_store_available(), auto_lock_minutes));
                 });
             }
             NextStep::FormCancel => self.with_unlocked(|u| {
@@ -978,6 +988,14 @@ impl App {
             NextStep::SettingsLangSelected(lang) => {
                 self.lang = lang;
                 lang.save_to_file(&self.store.prefs_path());
+            }
+            // Applied immediately and written straight away, like the
+            // language: both are non-secret conveniences beside the vault, and
+            // a best-effort write that fails is not worth an error screen.
+            NextStep::SettingsThemeSelected(t) => {
+                self.theme = t;
+                theme::set(t);
+                t.save_to_file(&self.store.theme_path());
             }
             NextStep::SettingsAutoLockSelected(minutes) => self.set_auto_lock(minutes),
             NextStep::SettingsChangePassword { current, new } => {

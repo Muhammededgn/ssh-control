@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use uuid::Uuid;
@@ -9,6 +9,7 @@ use uuid::Uuid;
 use super::widgets::{MIN_FORM_WIDTH, render_form, render_if_too_small};
 use crate::config::{ScriptStep, StepCondition};
 use crate::i18n::Strings;
+use crate::tui::theme;
 use crate::ssh::script_runner::STEP_TIMEOUT;
 
 const CONDITION_COUNT: usize = 4;
@@ -362,7 +363,7 @@ impl ScriptFormState {
 
         let field_line = |label: &str, value: String, focused: bool| {
             let cursor = if focused { "_" } else { "" };
-            let style = if focused { Style::default().fg(Color::Cyan) } else { Style::default() };
+            let style = if focused { Style::default().fg(theme::accent()) } else { Style::default() };
             Line::from(vec![
                 Span::styled(format!("{label}: "), style),
                 Span::raw(format!("{value}{cursor}")),
@@ -391,7 +392,7 @@ impl ScriptFormState {
         let highlight_style = if self.focus == Focus::Steps {
             Style::default().add_modifier(Modifier::REVERSED)
         } else {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(theme::accent())
         };
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(strings.steps_list_title))
@@ -403,13 +404,13 @@ impl ScriptFormState {
         let save_style = if self.focus == Focus::Save {
             Style::default().add_modifier(Modifier::REVERSED)
         } else {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(theme::accent())
         };
         let save_line = Line::from(Span::styled(format!("[ {} ]", strings.field_save_script), save_style));
         let hint_line = if let Some(err) = &self.error {
-            Line::from(Span::styled(err.clone(), Style::default().fg(Color::Red)))
+            Line::from(Span::styled(err.clone(), Style::default().fg(theme::error())))
         } else {
-            Line::from(Span::styled(strings.steps_list_hint, Style::default().fg(Color::DarkGray)))
+            Line::from(Span::styled(strings.steps_list_hint, Style::default().fg(theme::hint())))
         };
         frame.render_widget(
             Paragraph::new(vec![save_line, hint_line]).block(Block::default().borders(Borders::ALL)),
@@ -423,7 +424,7 @@ impl ScriptFormState {
 
         let field_line = |label: &str, value: String, focused: bool| {
             let cursor = if focused { "_" } else { "" };
-            let style = if focused { Style::default().fg(Color::Cyan) } else { Style::default() };
+            let style = if focused { Style::default().fg(theme::accent()) } else { Style::default() };
             Line::from(vec![
                 Span::styled(format!("{label}: "), style),
                 Span::raw(format!("{value}{cursor}")),
@@ -461,11 +462,11 @@ impl ScriptFormState {
         // Its own line rather than part of `step_edit_hint`: that string is
         // what the help overlay splits into keybinding rows, and this is not a
         // key.
-        lines.push(Line::from(Span::styled(strings.step_vars_hint, Style::default().fg(Color::DarkGray))));
+        lines.push(Line::from(Span::styled(strings.step_vars_hint, Style::default().fg(theme::hint()))));
         if let Some(err) = &self.error {
-            lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(Color::Red))));
+            lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(theme::error()))));
         } else {
-            lines.push(Line::from(Span::styled(strings.step_edit_hint, Style::default().fg(Color::DarkGray))));
+            lines.push(Line::from(Span::styled(strings.step_edit_hint, Style::default().fg(theme::hint()))));
         }
 
         // Same order as `step_focus_order`, so the focus index is the row.
