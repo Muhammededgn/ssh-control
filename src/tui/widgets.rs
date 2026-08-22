@@ -196,7 +196,20 @@ pub fn panel(title: &str) -> Block<'static> {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::hint()))
         .padding(Padding::horizontal(1))
-        .title(Span::styled(title.to_string(), Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(pad_title(title), Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD)))
+}
+
+/// A title with a space either side of it, unless it already has one.
+///
+/// Most of the title strings in `i18n` carry their own padding and a few do
+/// not, which put `╭ Settings ─` next to `╭Language───` on the same screen.
+/// Normalising here rather than editing the strings keeps it one rule instead
+/// of four translations of a convention.
+fn pad_title(title: &str) -> String {
+    if title.is_empty() {
+        return String::new();
+    }
+    format!("{}{}{}", if title.starts_with(' ') { "" } else { " " }, title, if title.ends_with(' ') { "" } else { " " })
 }
 
 /// `panel`, with the border in the accent while focused — the convention
@@ -244,11 +257,12 @@ fn render_lines_scrolled(frame: &mut Frame, rect: Rect, title: &str, lines: Vec<
     // without them a clamped form looks like the whole form.
     let more_above = offset > 0;
     let more_below = offset + visible < total;
+    let title = pad_title(title);
     let title = match (more_above, more_below) {
         (true, true) => format!("{title}↑↓ "),
         (true, false) => format!("{title}↑ "),
         (false, true) => format!("{title}↓ "),
-        (false, false) => title.to_string(),
+        (false, false) => title,
     };
 
     let block = block.title(Span::styled(title, Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD)));
