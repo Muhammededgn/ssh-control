@@ -404,6 +404,7 @@ impl SettingsState {
             .iter()
             .map(|t| {
                 ListItem::new(match t {
+                    Theme::Auto => strings.theme_auto,
                     Theme::Dark => strings.theme_dark,
                     Theme::Light => strings.theme_light,
                 })
@@ -547,6 +548,7 @@ mod tests {
         let mut s = state();
         press(&mut s, KeyCode::Right);
         let screen = render(&mut s);
+        assert!(screen.contains("Auto"));
         assert!(screen.contains("Dark"));
         assert!(screen.contains("Light"));
     }
