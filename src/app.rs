@@ -15,7 +15,7 @@ use crate::crypto::kdf::KdfParams;
 use crate::error::{AppError, Result};
 use crate::i18n::{Lang, Strings};
 use crate::ssh;
-use crate::ssh::script_runner::{self, RunEvent};
+use crate::ssh::script_runner::{self, RunEvent, ScriptVars};
 use crate::terminal::TerminalGuard;
 use crate::totp::{self, AuthMode};
 use crate::tui::confirm::{ConfirmOutcome, ConfirmState};
@@ -1464,7 +1464,10 @@ impl App {
         // extra credential copy and every `Script` behind (see `ssh::Target`).
         let target = match &self.state {
             AppState::Unlocked(u) => u.config.servers.iter().find(|s| s.id == id).map(|e| {
-                (ssh::Target::from_entry(e), e.scripts.iter().filter(|s| s.run_on_connect).cloned().collect::<Vec<_>>())
+                // Placeholders are resolved here, where the entry is still
+                // borrowed — the expanded copies are what crosses the await.
+                let vars = ScriptVars::from_entry(e);
+                (ssh::Target::from_entry(e), e.scripts.iter().filter(|s| s.run_on_connect).map(|s| vars.expand_script(s)).collect::<Vec<_>>())
             }),
             AppState::Setup(_) | AppState::Unopenable | AppState::CannotOpen { .. } | AppState::Locked(_) | AppState::LockedTotpDaily(_) => None,
         };
@@ -1545,7 +1548,7 @@ impl App {
         let strings = self.lang.strings();
         let prepared = match &self.state {
             AppState::Unlocked(u) => u.config.servers.iter().find(|s| s.id == server_id).and_then(|e| {
-                let script = e.scripts.iter().find(|s| s.id == script_id).cloned()?;
+                let script = ScriptVars::from_entry(e).expand_script(e.scripts.iter().find(|s| s.id == script_id)?);
                 Some((ssh::Target::from_entry(e), e.name.clone(), script))
             }),
             AppState::Setup(_) | AppState::Unopenable | AppState::CannotOpen { .. } | AppState::Locked(_) | AppState::LockedTotpDaily(_) => None,

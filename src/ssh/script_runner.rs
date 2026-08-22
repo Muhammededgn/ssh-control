@@ -4,12 +4,102 @@ use russh::ChannelMsg;
 use russh::client;
 
 use super::client::Handler;
-use crate::config::{Script, StepCondition};
+use crate::config::{Script, ScriptStep, ServerEntry, StepCondition};
 use crate::error::Result;
 
 /// What a step gets when `ScriptStep::timeout_secs` is unset — which is every
 /// step written before that field existed.
 pub const STEP_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The `{{host}}`-style placeholders a step command may use, resolved from
+/// the `ServerEntry` the script belongs to.
+///
+/// Built where the entry is still borrowed and carried across the `.await`
+/// like `ssh::Target`, for the same reason: the connect flows may not hold a
+/// borrow of `App::state` while they run (see the `NextStep` pattern).
+/// Deliberately *not* part of `Target` — expansion happens before a
+/// connection exists, and `Target` is what `connect` needs, nothing more.
+pub struct ScriptVars {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+}
+
+impl ScriptVars {
+    pub fn from_entry(entry: &ServerEntry) -> Self {
+        Self { name: entry.name.clone(), host: entry.host.clone(), port: entry.port, username: entry.username.clone() }
+    }
+
+    fn value(&self, key: &str) -> Option<String> {
+        match key {
+            "name" => Some(self.name.clone()),
+            "host" => Some(self.host.clone()),
+            "port" => Some(self.port.to_string()),
+            "username" => Some(self.username.clone()),
+            _ => None,
+        }
+    }
+
+    /// Substitutes every known `{{key}}` in `command`, **literally and without
+    /// quoting**.
+    ///
+    /// That is the deliberate half of this. The whole point of the feature is
+    /// commands like `ssh {{username}}@{{host}}` and
+    /// `curl http://{{host}}:{{port}}/health` — auto-quoting would turn those
+    /// into a single quoted word and break every one of them. The values come
+    /// from the vault entry the user typed themselves, so quoting is the
+    /// user's job, exactly as it is in a shell alias.
+    ///
+    /// An unknown placeholder is left standing rather than replaced with an
+    /// empty string: `awk '{{print $1}}'` is a real command, and silently
+    /// eating it would turn a working script into a subtly wrong one.
+    pub fn expand(&self, command: &str) -> String {
+        let mut out = String::with_capacity(command.len());
+        let mut rest = command;
+        while let Some(open) = rest.find("{{") {
+            out.push_str(&rest[..open]);
+            let after = &rest[open + 2..];
+            match after.find("}}") {
+                Some(close) => match self.value(after[..close].trim()) {
+                    Some(value) => {
+                        out.push_str(&value);
+                        rest = &after[close + 2..];
+                    }
+                    // Unknown key: emit the opener and resume *inside* it, so
+                    // a `}}` that closes nothing cannot swallow a later
+                    // placeholder.
+                    None => {
+                        out.push_str("{{");
+                        rest = after;
+                    }
+                },
+                // No closing delimiter at all — the rest is literal text.
+                None => {
+                    out.push_str("{{");
+                    rest = after;
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// A copy of `script` with every step's command expanded. Only the command
+    /// is substituted — a `StepCondition::OutputContains` needle is matched
+    /// against output, not sent to the shell, and expanding it would make the
+    /// same script behave differently on two servers for no stated reason.
+    pub fn expand_script(&self, script: &Script) -> Script {
+        Script {
+            steps: script
+                .steps
+                .iter()
+                .map(|step| ScriptStep { command: self.expand(&step.command), ..step.clone() })
+                .collect(),
+            ..script.clone()
+        }
+    }
+}
 
 /// Emitted synchronously as a script runs, so callers can drive either a live
 /// TUI redraw or a plain stdout print from the very same execution loop.
@@ -153,6 +243,56 @@ async fn run_step(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn vars() -> ScriptVars {
+        ScriptVars { name: "prod-web".into(), host: "example.com".into(), port: 2222, username: "deploy".into() }
+    }
+
+    #[test]
+    fn every_placeholder_resolves_from_the_entry() {
+        assert_eq!(vars().expand("ssh {{username}}@{{host}} -p {{port}}"), "ssh deploy@example.com -p 2222");
+        assert_eq!(vars().expand("echo {{name}}"), "echo prod-web");
+    }
+
+    /// Substitution is literal on purpose. A value with a space must land in
+    /// the command exactly as typed — quoting is the user's job, the same way
+    /// it is in a shell alias, because auto-quoting would break the
+    /// `{{username}}@{{host}}` form the feature exists for.
+    #[test]
+    fn values_are_substituted_literally_and_never_quoted() {
+        let v = ScriptVars { name: "two words".into(), host: "h".into(), port: 22, username: "u".into() };
+        assert_eq!(v.expand("echo {{name}}"), "echo two words");
+    }
+
+    /// `awk '{{print $1}}'` is a real command. Replacing an unknown key with
+    /// nothing would turn a working script into a subtly wrong one, so it is
+    /// left standing instead.
+    #[test]
+    fn an_unknown_placeholder_is_left_alone() {
+        assert_eq!(vars().expand("awk '{{print $1}}'"), "awk '{{print $1}}'");
+        assert_eq!(vars().expand("{{nope}} {{host}}"), "{{nope}} example.com");
+        assert_eq!(vars().expand("echo {{unclosed"), "echo {{unclosed");
+    }
+
+    /// The needle is matched against output, never sent to a shell — expanding
+    /// it would make one stored script behave differently per server.
+    #[test]
+    fn expand_script_touches_commands_only() {
+        let script = Script {
+            id: uuid::Uuid::nil(),
+            name: "s".into(),
+            run_on_connect: false,
+            steps: vec![ScriptStep {
+                command: "ping {{host}}".into(),
+                condition: StepCondition::OutputContains("{{host}}".into()),
+                timeout_secs: Some(5),
+            }],
+        };
+        let expanded = vars().expand_script(&script);
+        assert_eq!(expanded.steps[0].command, "ping example.com");
+        assert_eq!(expanded.steps[0].condition, StepCondition::OutputContains("{{host}}".into()));
+        assert_eq!(expanded.steps[0].timeout_secs, Some(5), "the rest of the step is carried through unchanged");
+    }
 
     fn ran(exit_code: i32) -> StepStatus {
         StepStatus::Ran { exit_code, output: String::new() }

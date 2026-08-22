@@ -458,6 +458,10 @@ impl ScriptFormState {
         lines.push(field_line(strings.step_field_timeout, timeout_value, se.focus == StepFocus::Timeout));
 
         lines.push(Line::from(""));
+        // Its own line rather than part of `step_edit_hint`: that string is
+        // what the help overlay splits into keybinding rows, and this is not a
+        // key.
+        lines.push(Line::from(Span::styled(strings.step_vars_hint, Style::default().fg(Color::DarkGray))));
         if let Some(err) = &self.error {
             lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(Color::Red))));
         } else {
