@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use uuid::Uuid;
 
 use crate::config::device::now_unix;
-use crate::config::{ServerEntry, SystemInfo};
+use crate::config::{ServerEntry, ServerSort, SystemInfo};
 use crate::i18n::Strings;
 use crate::tui::widgets::{list_title_with_position, render_list_scrollbar};
 
@@ -105,14 +105,58 @@ pub struct MainMenuState {
     typing: bool,
 }
 
-/// Case-insensitive substring over the three fields the user would type: the
-/// name they gave it, and the `user@host` they would otherwise have to remember.
-/// Port and auth kind are deliberately not searched — nobody looks for "22".
+/// Case-insensitive substring over the fields the user would type: the name
+/// they gave it, the `user@host` they would otherwise have to remember, and
+/// its tags. Port and auth kind are deliberately not searched — nobody looks
+/// for "22".
+///
+/// Tags go through this same needle rather than a filter of their own. That is
+/// what "composes with the text filter" means in practice: `/prod` narrows to
+/// everything named, hosted or tagged `prod`, with no second mode to learn.
 fn matches(entry: &ServerEntry, needle: &str) -> bool {
     let needle = needle.to_lowercase();
     entry.name.to_lowercase().contains(&needle)
         || entry.host.to_lowercase().contains(&needle)
         || entry.username.to_lowercase().contains(&needle)
+        || entry.tags.iter().any(|t| t.to_lowercase().contains(&needle))
+}
+
+/// Orders `indices` (into `servers`) for display.
+///
+/// Sorting happens here, on the index list, and nowhere else. `servers` itself
+/// is never reordered: `visible_indices` is the single mapping from what is on
+/// screen back to the vault, and rearranging the vector under it would break
+/// every handler that resolves through it — the exact bug this screen is
+/// shaped to prevent.
+///
+/// Every order falls back to the name, so the list has one stable answer
+/// rather than shuffling untagged or never-connected entries around between
+/// frames.
+fn sort_indices(indices: &mut [usize], servers: &[ServerEntry], sort: ServerSort) {
+    let name_key = |i: &usize| servers[*i].name.to_lowercase();
+    match sort {
+        ServerSort::Name => indices.sort_by_key(name_key),
+        // Untagged entries sort last rather than first: they are the ones the
+        // grouping has nothing to say about.
+        ServerSort::Tag => indices.sort_by_key(|i| {
+            let first = servers[*i].tags.first().map(|t| t.to_lowercase());
+            (first.is_none(), first.unwrap_or_default(), name_key(i))
+        }),
+        // Most recent first, and never-connected last — `Reverse` on the
+        // timestamp would otherwise put `None` at the top.
+        ServerSort::LastConnected => indices.sort_by_key(|i| {
+            let ts = servers[*i].last_connected_unix;
+            (ts.is_none(), std::cmp::Reverse(ts.unwrap_or(0)), name_key(i))
+        }),
+    }
+}
+
+fn sort_label(sort: ServerSort, strings: &Strings) -> &'static str {
+    match sort {
+        ServerSort::Name => strings.sort_by_name,
+        ServerSort::Tag => strings.sort_by_tag,
+        ServerSort::LastConnected => strings.sort_by_last_connected,
+    }
 }
 
 pub enum MainMenuAction {
@@ -125,6 +169,9 @@ pub enum MainMenuAction {
     Files(Uuid),
     Lock,
     Settings,
+    /// Advance to the next `ServerSort`. `app.rs` owns the change: the order
+    /// is persisted in `Config`, so this screen only asks for it.
+    CycleSort,
     /// `?` only reaches here outside `/` mode — while the filter is taking
     /// keystrokes it is a character like any other.
     Help,
@@ -144,22 +191,30 @@ impl MainMenuState {
         Self { selected: 0, list_state, filter: String::new(), typing: false }
     }
 
-    /// The entries currently on screen, as indices into `servers`. The one
-    /// mapping every key handler resolves through.
-    fn visible_indices(&self, servers: &[ServerEntry]) -> Vec<usize> {
-        if self.filter.is_empty() {
-            return (0..servers.len()).collect();
-        }
-        servers
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| matches(s, &self.filter))
-            .map(|(i, _)| i)
-            .collect()
+    /// The entries currently on screen, as indices into `servers`, filtered
+    /// *and* ordered. The one mapping every key handler resolves through.
+    ///
+    /// The sort is passed in each call rather than stored on this struct, for
+    /// the same reason `widgets::form_scroll_offset` is stateless: a copy kept
+    /// here could drift out of step with the `Config` that actually persists
+    /// it. `ServerSort` is `Copy`, so threading it costs nothing.
+    fn visible_indices(&self, servers: &[ServerEntry], sort: ServerSort) -> Vec<usize> {
+        let mut indices: Vec<usize> = if self.filter.is_empty() {
+            (0..servers.len()).collect()
+        } else {
+            servers
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| matches(s, &self.filter))
+                .map(|(i, _)| i)
+                .collect()
+        };
+        sort_indices(&mut indices, servers, sort);
+        indices
     }
 
-    fn selected_entry<'a>(&self, servers: &'a [ServerEntry]) -> Option<&'a ServerEntry> {
-        self.visible_indices(servers).get(self.selected).and_then(|&i| servers.get(i))
+    fn selected_entry<'a>(&self, servers: &'a [ServerEntry], sort: ServerSort) -> Option<&'a ServerEntry> {
+        self.visible_indices(servers, sort).get(self.selected).and_then(|&i| servers.get(i))
     }
 
     fn move_selection(&mut self, delta: isize, visible_len: usize) {
@@ -173,21 +228,21 @@ impl MainMenuState {
         self.list_state.select(Some(self.selected));
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent, servers: &[ServerEntry]) -> MainMenuAction {
+    pub fn handle_key(&mut self, key: KeyEvent, servers: &[ServerEntry], sort: ServerSort) -> MainMenuAction {
         if self.typing {
-            return self.handle_filter_key(key, servers);
+            return self.handle_filter_key(key, servers, sort);
         }
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
-                self.move_selection(-1, self.visible_indices(servers).len());
+                self.move_selection(-1, self.visible_indices(servers, sort).len());
                 MainMenuAction::None
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.move_selection(1, self.visible_indices(servers).len());
+                self.move_selection(1, self.visible_indices(servers, sort).len());
                 MainMenuAction::None
             }
             KeyCode::Enter => self
-                .selected_entry(servers)
+                .selected_entry(servers, sort)
                 .map(|s| MainMenuAction::Connect(s.id))
                 .unwrap_or(MainMenuAction::None),
             KeyCode::Char('/') => {
@@ -197,27 +252,28 @@ impl MainMenuState {
             KeyCode::Char('?') => MainMenuAction::Help,
             KeyCode::Char('a') => MainMenuAction::Add,
             KeyCode::Char('e') => self
-                .selected_entry(servers)
+                .selected_entry(servers, sort)
                 .map(|s| MainMenuAction::Edit(s.id))
                 .unwrap_or(MainMenuAction::None),
             KeyCode::Char('d') => self
-                .selected_entry(servers)
+                .selected_entry(servers, sort)
                 .map(|s| MainMenuAction::Delete(s.id))
                 .unwrap_or(MainMenuAction::None),
             KeyCode::Char('s') => self
-                .selected_entry(servers)
+                .selected_entry(servers, sort)
                 .map(|s| MainMenuAction::Scripts(s.id))
                 .unwrap_or(MainMenuAction::None),
             KeyCode::Char('f') => self
-                .selected_entry(servers)
+                .selected_entry(servers, sort)
                 .map(|s| MainMenuAction::Files(s.id))
                 .unwrap_or(MainMenuAction::None),
+            KeyCode::Char('o') => MainMenuAction::CycleSort,
             KeyCode::Char('l') => MainMenuAction::Lock,
             KeyCode::F(1) => MainMenuAction::Settings,
             // With a filter applied, Esc is the way back to the whole list; it
             // only quits once there is nothing left to clear.
             KeyCode::Esc if !self.filter.is_empty() => {
-                self.clear_filter(servers);
+                self.clear_filter(servers, sort);
                 MainMenuAction::None
             }
             KeyCode::Char('q') | KeyCode::Esc => MainMenuAction::Quit,
@@ -229,47 +285,47 @@ impl MainMenuState {
     /// that was selected before the keystroke where it survived the narrowing,
     /// and on the first match otherwise — so typing does not silently walk the
     /// selection down the list.
-    fn handle_filter_key(&mut self, key: KeyEvent, servers: &[ServerEntry]) -> MainMenuAction {
+    fn handle_filter_key(&mut self, key: KeyEvent, servers: &[ServerEntry], sort: ServerSort) -> MainMenuAction {
         match key.code {
             KeyCode::Char(c) => {
-                let anchor = self.selected_entry(servers).map(|s| s.id);
+                let anchor = self.selected_entry(servers, sort).map(|s| s.id);
                 self.filter.push(c);
-                self.reanchor(servers, anchor);
+                self.reanchor(servers, sort, anchor);
                 MainMenuAction::None
             }
             KeyCode::Backspace => {
-                let anchor = self.selected_entry(servers).map(|s| s.id);
+                let anchor = self.selected_entry(servers, sort).map(|s| s.id);
                 self.filter.pop();
-                self.reanchor(servers, anchor);
+                self.reanchor(servers, sort, anchor);
                 MainMenuAction::None
             }
             KeyCode::Up => {
-                self.move_selection(-1, self.visible_indices(servers).len());
+                self.move_selection(-1, self.visible_indices(servers, sort).len());
                 MainMenuAction::None
             }
             KeyCode::Down => {
-                self.move_selection(1, self.visible_indices(servers).len());
+                self.move_selection(1, self.visible_indices(servers, sort).len());
                 MainMenuAction::None
             }
             // Enter connects to what is visibly selected and leaves `/` mode
             // with the filter still applied, so the shortcuts come back.
             KeyCode::Enter => {
                 self.typing = false;
-                self.selected_entry(servers)
+                self.selected_entry(servers, sort)
                     .map(|s| MainMenuAction::Connect(s.id))
                     .unwrap_or(MainMenuAction::None)
             }
             KeyCode::Esc => {
                 self.typing = false;
-                self.clear_filter(servers);
+                self.clear_filter(servers, sort);
                 MainMenuAction::None
             }
             _ => MainMenuAction::None,
         }
     }
 
-    fn reanchor(&mut self, servers: &[ServerEntry], anchor: Option<Uuid>) {
-        let visible = self.visible_indices(servers);
+    fn reanchor(&mut self, servers: &[ServerEntry], sort: ServerSort, anchor: Option<Uuid>) {
+        let visible = self.visible_indices(servers, sort);
         self.selected = anchor
             .and_then(|id| visible.iter().position(|&i| servers[i].id == id))
             .unwrap_or(0);
@@ -278,15 +334,26 @@ impl MainMenuState {
 
     /// Dropping the filter keeps the user where they were: the entry that was
     /// selected in the narrowed list stays selected in the full one.
-    fn clear_filter(&mut self, servers: &[ServerEntry]) {
-        let anchor = self.selected_entry(servers).map(|s| s.id);
+    fn clear_filter(&mut self, servers: &[ServerEntry], sort: ServerSort) {
+        let anchor = self.selected_entry(servers, sort).map(|s| s.id);
         self.filter.clear();
-        self.reanchor(servers, anchor);
+        self.reanchor(servers, sort, anchor);
+    }
+
+    /// Keeps the selection on the same *server* across a reorder.
+    ///
+    /// `selected` indexes the visible list, and changing the sort moves rows
+    /// out from under it — leaving the index alone would quietly select a
+    /// different entry. This is `clear_filter`'s re-anchoring, applied to the
+    /// order rather than the filter.
+    pub fn resort(&mut self, servers: &[ServerEntry], from: ServerSort, to: ServerSort) {
+        let anchor = self.selected_entry(servers, from).map(|s| s.id);
+        self.reanchor(servers, to, anchor);
     }
 
     /// Clamps the selection after the server list changes (add/delete).
-    pub fn clamp_selection(&mut self, servers: &[ServerEntry]) {
-        let visible = self.visible_indices(servers).len();
+    pub fn clamp_selection(&mut self, servers: &[ServerEntry], sort: ServerSort) {
+        let visible = self.visible_indices(servers, sort).len();
         if visible == 0 {
             self.selected = 0;
         } else if self.selected >= visible {
@@ -300,15 +367,16 @@ impl MainMenuState {
         frame: &mut Frame,
         area: Rect,
         servers: &[ServerEntry],
+        sort: ServerSort,
         status: Option<&str>,
         strings: &Strings,
     ) {
-        let visible = self.visible_indices(servers);
+        let visible = self.visible_indices(servers, sort);
         let filter_shown = self.typing || !self.filter.is_empty();
 
         // The footer grows with what it has to say rather than reserving a
         // blank row: on a short terminal every row belongs to the list.
-        let footer_lines = 1 + u16::from(status.is_some()) + u16::from(filter_shown);
+        let footer_lines = 1 + u16::from(!self.typing) + u16::from(status.is_some()) + u16::from(filter_shown);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(3), Constraint::Length(footer_lines + 2)])
@@ -340,6 +408,11 @@ impl MainMenuState {
                     // host whose sysinfo probe never succeeds still has a
                     // last-connected time worth showing.
                     let mut details = Vec::new();
+                    // First, and in the user's own capitalization — it is the
+                    // grouping, so it belongs at the front of the detail line.
+                    if !s.tags.is_empty() {
+                        details.push(format!("[{}]", s.tags.join(", ")));
+                    }
                     if let Some(ts) = s.last_connected_unix {
                         details.push(format!(
                             "{}: {}",
@@ -388,6 +461,14 @@ impl MainMenuState {
                 Style::default().fg(Color::Yellow),
             )));
         }
+        // Which order is in force has to be visible, or `o` reorders the list
+        // with nothing on screen saying why.
+        if !self.typing {
+            help_text.push(Line::from(Span::styled(
+                format!("{}{}", strings.main_menu_sort_prefix, sort_label(sort, strings)),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
         help_text.push(Line::from(if self.typing {
             strings.main_menu_filter_hint
         } else {
@@ -422,14 +503,38 @@ mod tests {
                 scripts: Vec::new(),
                 last_remote_dir: None,
                 last_local_dir: None,
+                tags: Vec::new(),
             })
             .collect()
+    }
+
+    /// `servers(n)` with tags and last-connected times attached, so the three
+    /// orders have something to disagree about.
+    fn tagged() -> Vec<ServerEntry> {
+        let mut entries = servers(4);
+        entries[0].name = "delta".into();
+        entries[0].tags = vec!["prod".into()];
+        entries[0].last_connected_unix = Some(100);
+        entries[1].name = "alpha".into();
+        entries[1].tags = vec!["staging".into()];
+        entries[1].last_connected_unix = Some(300);
+        entries[2].name = "charlie".into();
+        entries[2].tags = vec![];
+        entries[2].last_connected_unix = Some(200);
+        entries[3].name = "bravo".into();
+        entries[3].tags = vec!["Prod".into(), "eu".into()];
+        entries[3].last_connected_unix = None;
+        entries
+    }
+
+    fn names(state: &MainMenuState, entries: &[ServerEntry], sort: ServerSort) -> Vec<String> {
+        state.visible_indices(entries, sort).iter().map(|&i| entries[i].name.clone()).collect()
     }
 
     fn render(state: &mut MainMenuState, servers: &[ServerEntry], height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(80, height)).expect("test backend");
         terminal
-            .draw(|frame| state.render(frame, frame.area(), servers, None, &EN))
+            .draw(|frame| state.render(frame, frame.area(), servers, ServerSort::Name, None, &EN))
             .expect("render");
         terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
     }
@@ -445,7 +550,7 @@ mod tests {
         assert!(top.contains("(1/40)"), "the title should say which entry is selected");
 
         for _ in 0..12 {
-            state.handle_key(KeyEvent::from(KeyCode::Down), &entries);
+            state.handle_key(KeyEvent::from(KeyCode::Down), &entries, ServerSort::Name);
         }
         let moved = render(&mut state, &entries, 20);
         assert!(moved.contains("(13/40)"), "the counter should follow the selection");
@@ -497,7 +602,7 @@ mod tests {
     }
 
     fn press(state: &mut MainMenuState, servers: &[ServerEntry], code: KeyCode) -> MainMenuAction {
-        state.handle_key(KeyEvent::from(code), servers)
+        state.handle_key(KeyEvent::from(code), servers, ServerSort::Name)
     }
 
     fn type_filter(state: &mut MainMenuState, servers: &[ServerEntry], text: &str) {
@@ -548,7 +653,7 @@ mod tests {
         entries[2].username = "alpha-admin".to_string();
         let state = MainMenuState { selected: 0, list_state: ListState::default(), filter: "ALPHA".to_string(), typing: false };
 
-        assert_eq!(state.visible_indices(&entries), vec![0, 1, 2]);
+        assert_eq!(state.visible_indices(&entries, ServerSort::Name), vec![0, 1, 2]);
     }
 
     /// While `/` is held open every character is filter text — otherwise typing
@@ -573,7 +678,7 @@ mod tests {
         type_filter(&mut state, &entries, "host-1");
         press(&mut state, &entries, KeyCode::Enter);
         assert!(matches!(press(&mut state, &entries, KeyCode::Esc), MainMenuAction::None));
-        assert_eq!(state.visible_indices(&entries).len(), 3, "the whole list should be back");
+        assert_eq!(state.visible_indices(&entries, ServerSort::Name).len(), 3, "the whole list should be back");
         assert!(matches!(press(&mut state, &entries, KeyCode::Esc), MainMenuAction::Quit));
     }
 
@@ -585,7 +690,7 @@ mod tests {
 
         type_filter(&mut state, &entries, "host-3");
         press(&mut state, &entries, KeyCode::Esc);
-        assert_eq!(state.selected_entry(&entries).map(|s| s.id), Some(entries[3].id));
+        assert_eq!(state.selected_entry(&entries, ServerSort::Name).map(|s| s.id), Some(entries[3].id));
     }
 
     /// A filter that matches nothing must not leave the previous selection
@@ -596,7 +701,7 @@ mod tests {
         let mut state = MainMenuState::new();
 
         type_filter(&mut state, &entries, "nonexistent");
-        assert!(state.selected_entry(&entries).is_none());
+        assert!(state.selected_entry(&entries, ServerSort::Name).is_none());
         assert!(matches!(press(&mut state, &entries, KeyCode::Enter), MainMenuAction::None));
 
         let rendered = render(&mut state, &entries, 20);
@@ -622,5 +727,77 @@ mod tests {
         let entries = servers(1);
         let rendered = render(&mut MainMenuState::new(), &entries, 20);
         assert!(!rendered.contains(EN.last_connected_label));
+    }
+
+    #[test]
+    fn each_order_puts_the_list_in_the_order_it_says() {
+        let entries = tagged();
+        let state = MainMenuState::new();
+
+        assert_eq!(names(&state, &entries, ServerSort::Name), ["alpha", "bravo", "charlie", "delta"]);
+
+        // Tag folds case (`Prod` groups with `prod`), and the untagged entry
+        // sorts last rather than first.
+        assert_eq!(names(&state, &entries, ServerSort::Tag), ["bravo", "delta", "alpha", "charlie"]);
+
+        // Most recent first, never-connected last.
+        assert_eq!(names(&state, &entries, ServerSort::LastConnected), ["alpha", "charlie", "delta", "bravo"]);
+    }
+
+    /// The acceptance criterion: tag filtering is not a second mode, it goes
+    /// through the same `/` needle as everything else.
+    #[test]
+    fn the_text_filter_matches_tags_too() {
+        let entries = tagged();
+        let mut state = MainMenuState::new();
+
+        press(&mut state, &entries, KeyCode::Char('/'));
+        for c in "prod".chars() {
+            press(&mut state, &entries, KeyCode::Char(c));
+        }
+        let mut visible = names(&state, &entries, ServerSort::Name);
+        visible.sort();
+        assert_eq!(visible, ["bravo", "delta"], "case-insensitive, and composed with the name/host search");
+    }
+
+    /// `selected` indexes the visible list, so a reorder moves rows out from
+    /// under it. Re-anchoring on the entry is the whole point.
+    #[test]
+    fn reordering_keeps_the_same_server_selected() {
+        let entries = tagged();
+        let mut state = MainMenuState::new();
+        render(&mut state, &entries, 20);
+
+        press(&mut state, &entries, KeyCode::Down);
+        let before = state.selected_entry(&entries, ServerSort::Name).map(|s| s.id);
+        assert_eq!(before, Some(entries[3].id), "bravo is second by name");
+
+        state.resort(&entries, ServerSort::Name, ServerSort::LastConnected);
+        assert_eq!(
+            state.selected_entry(&entries, ServerSort::LastConnected).map(|s| s.id),
+            before,
+            "the same server stays selected, not the same row"
+        );
+    }
+
+    #[test]
+    fn o_asks_for_the_next_order() {
+        let entries = tagged();
+        let mut state = MainMenuState::new();
+        assert!(matches!(press(&mut state, &entries, KeyCode::Char('o')), MainMenuAction::CycleSort));
+
+        // Not while `/` is taking keystrokes — a server called "ops" has to be
+        // typeable.
+        press(&mut state, &entries, KeyCode::Char('/'));
+        assert!(matches!(press(&mut state, &entries, KeyCode::Char('o')), MainMenuAction::None));
+    }
+
+    #[test]
+    fn tags_are_shown_on_the_entry() {
+        let entries = tagged();
+        let mut state = MainMenuState::new();
+        let screen = render(&mut state, &entries, 20);
+        assert!(screen.contains("[Prod, eu]"), "in the capitalization the user typed");
+        assert!(screen.contains("Sorted by: name"), "the order in force must be on screen");
     }
 }

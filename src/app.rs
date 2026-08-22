@@ -160,6 +160,7 @@ enum NextStep {
     ScriptFormSave(ScriptFormData),
     ConfirmDeleteScriptYes,
     ConfirmDeleteScriptNo,
+    CycleSort,
     RunScript(Uuid, Uuid),
     ScriptRunSave(String),
     ScriptRunClose,
@@ -436,7 +437,7 @@ impl App {
                 terminal.terminal.draw(|frame| {
                     let area = frame.area();
                     match screen {
-                        Screen::MainMenu(state) => state.render(frame, area, &config.servers, status.as_deref(), strings),
+                        Screen::MainMenu(state) => state.render(frame, area, &config.servers, config.server_sort, status.as_deref(), strings),
                         Screen::ServerForm(state) => state.render(frame, area, strings),
                         Screen::ConfirmDelete { state, .. } => state.render(frame, area, strings),
                         Screen::Settings(state) => state.render(frame, area, strings),
@@ -833,7 +834,7 @@ impl App {
                 return Ok(());
             };
             match &mut u.screen {
-                Screen::MainMenu(state) => match state.handle_key(key, &u.config.servers) {
+                Screen::MainMenu(state) => match state.handle_key(key, &u.config.servers, u.config.server_sort) {
                     MainMenuAction::None => NextStep::None,
                     MainMenuAction::Connect(id) => NextStep::Connect(id),
                     MainMenuAction::Add => NextStep::GoAdd,
@@ -843,6 +844,7 @@ impl App {
                     MainMenuAction::Files(id) => NextStep::GoFiles(id),
                     MainMenuAction::Lock => NextStep::Lock,
                     MainMenuAction::Settings => NextStep::GoSettings,
+                    MainMenuAction::CycleSort => NextStep::CycleSort,
                     MainMenuAction::Help => NextStep::Help,
                     MainMenuAction::Quit => NextStep::Quit,
                 },
@@ -958,19 +960,19 @@ impl App {
             }
             NextStep::FormCancel => self.with_unlocked(|u| {
                 let mut menu = MainMenuState::new();
-                menu.clamp_selection(&u.config.servers);
+                menu.clamp_selection(&u.config.servers, u.config.server_sort);
                 u.screen = Screen::MainMenu(menu);
             }),
             NextStep::FormSubmit(data) => self.submit_form(data)?,
             NextStep::ConfirmYes => self.confirm_delete()?,
             NextStep::ConfirmNo => self.with_unlocked(|u| {
                 let mut menu = MainMenuState::new();
-                menu.clamp_selection(&u.config.servers);
+                menu.clamp_selection(&u.config.servers, u.config.server_sort);
                 u.screen = Screen::MainMenu(menu);
             }),
             NextStep::SettingsClose => self.with_unlocked(|u| {
                 let mut menu = MainMenuState::new();
-                menu.clamp_selection(&u.config.servers);
+                menu.clamp_selection(&u.config.servers, u.config.server_sort);
                 u.screen = Screen::MainMenu(menu);
             }),
             NextStep::SettingsLangSelected(lang) => {
@@ -994,7 +996,7 @@ impl App {
             }),
             NextStep::ScriptsBack => self.with_unlocked(|u| {
                 let mut menu = MainMenuState::new();
-                menu.clamp_selection(&u.config.servers);
+                menu.clamp_selection(&u.config.servers, u.config.server_sort);
                 u.screen = Screen::MainMenu(menu);
             }),
             NextStep::GoScriptAdd => self.with_unlocked(|u| {
@@ -1065,6 +1067,7 @@ impl App {
                     u.screen = Screen::Scripts(ScriptsListState::new(server_id, server_name));
                 }
             }),
+            NextStep::CycleSort => self.cycle_server_sort(),
             NextStep::RunScript(server_id, script_id) => self.run_script_flow(terminal, server_id, script_id).await?,
             NextStep::GoFiles(id) => self.open_files_flow(terminal, id).await?,
             NextStep::FilesOpenRemote(path) => self.list_remote_flow(terminal, Some(path)).await?,
@@ -1075,7 +1078,7 @@ impl App {
                 self.drop_remote();
                 self.with_unlocked(|u| {
                     let mut menu = MainMenuState::new();
-                    menu.clamp_selection(&u.config.servers);
+                    menu.clamp_selection(&u.config.servers, u.config.server_sort);
                     u.screen = Screen::MainMenu(menu);
                 });
             }
@@ -1139,7 +1142,8 @@ impl App {
 
         match mode {
             FormMode::Add => {
-                let entry = ServerEntry::new(data.name, data.host, data.port, data.username, data.auth);
+                let mut entry = ServerEntry::new(data.name, data.host, data.port, data.username, data.auth);
+                entry.tags = data.tags;
                 u.config.servers.push(entry);
             }
             FormMode::Edit(id) => {
@@ -1148,6 +1152,7 @@ impl App {
                     entry.host = data.host;
                     entry.port = data.port;
                     entry.username = data.username;
+                    entry.tags = data.tags;
                     entry.auth = data.auth;
                 }
             }
@@ -1156,7 +1161,7 @@ impl App {
         match self.store.save(&u.config, &u.master_key, &u.slots) {
             Ok(()) => {
                 let mut menu = MainMenuState::new();
-                menu.clamp_selection(&u.config.servers);
+                menu.clamp_selection(&u.config.servers, u.config.server_sort);
                 u.status = Some(StatusMessage::new(strings.status_saved.to_string()));
                 u.screen = Screen::MainMenu(menu);
             }
@@ -1182,7 +1187,7 @@ impl App {
 
         let save_result = self.store.save(&u.config, &u.master_key, &u.slots);
         let mut menu = MainMenuState::new();
-        menu.clamp_selection(&u.config.servers);
+        menu.clamp_selection(&u.config.servers, u.config.server_sort);
         u.status = Some(StatusMessage::new(match save_result {
             Ok(()) => strings.status_deleted.to_string(),
             Err(e) => format!("{}{e}", strings.delete_error_prefix),
@@ -1453,7 +1458,7 @@ impl App {
 
         if totp::verify_enrollment(totp_config.secret_base32.as_str(), code) {
             let mut menu = MainMenuState::new();
-            menu.clamp_selection(&u.config.servers);
+            menu.clamp_selection(&u.config.servers, u.config.server_sort);
             u.screen = Screen::MainMenu(menu);
         } else if let Screen::TotpPrompt(state) = &mut u.screen {
             state.error = Some(strings.err_totp_invalid_code.to_string());
@@ -1591,6 +1596,36 @@ impl App {
         });
 
         Ok(())
+    }
+
+    /// Advances the server list's ordering and persists it.
+    ///
+    /// The selection is re-anchored on the entry that was selected before the
+    /// reorder, not on the index: the whole point of `selected` indexing the
+    /// visible list is that a reorder moves rows out from under it, and
+    /// leaving the index alone would silently select a different server.
+    ///
+    /// A failed save leaves the new order applied in memory. It is a display
+    /// preference, and refusing to reorder because the disk is full would be a
+    /// stranger outcome than forgetting it at the next unlock.
+    fn cycle_server_sort(&mut self) {
+        let strings = self.lang.strings();
+        let saved = {
+            let AppState::Unlocked(u) = &mut self.state else {
+                return;
+            };
+            let from = u.config.server_sort;
+            let to = from.next();
+            u.config.server_sort = to;
+            let UnlockedState { config, screen, .. } = &mut **u;
+            if let Screen::MainMenu(menu) = screen {
+                menu.resort(&config.servers, from, to);
+            }
+            self.store.save(&u.config, &u.master_key, &u.slots)
+        };
+        if let Err(e) = saved {
+            self.set_status(format!("{}{e}", strings.save_error_prefix));
+        }
     }
 
     /// Writes the finished run's log to `path`.

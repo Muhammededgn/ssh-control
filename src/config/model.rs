@@ -26,6 +26,36 @@ pub struct Config {
     /// it like `prefs.lang`) because nothing needs to read it before unlock.
     #[serde(default = "default_auto_lock_minutes")]
     pub auto_lock_minutes: u32,
+    /// How the server list is ordered. Inside the encrypted config for the
+    /// same reason as `auto_lock_minutes` — nothing needs it before unlock, so
+    /// it does not belong beside `prefs.lang`. Additive with `serde(default)`:
+    /// an older vault reads back as `Name`, and an older binary simply ignores
+    /// the field, so no `schema_version` bump.
+    #[serde(default)]
+    pub server_sort: ServerSort,
+}
+
+/// Ordering for the server list, cycled from the list itself and persisted.
+///
+/// `Tag` sorts by an entry's *first* tag: tags are a list, and sorting a list
+/// by a set has no single answer — the first one is the one the user typed
+/// first, which is the closest thing to "the group this belongs to".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServerSort {
+    #[default]
+    Name,
+    Tag,
+    LastConnected,
+}
+
+impl ServerSort {
+    pub fn next(self) -> Self {
+        match self {
+            ServerSort::Name => ServerSort::Tag,
+            ServerSort::Tag => ServerSort::LastConnected,
+            ServerSort::LastConnected => ServerSort::Name,
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -57,6 +87,7 @@ impl Default for Config {
             servers: Vec::new(),
             totp: None,
             auto_lock_minutes: DEFAULT_AUTO_LOCK_MINUTES,
+            server_sort: ServerSort::Name,
         }
     }
 }
@@ -99,6 +130,13 @@ pub struct ServerEntry {
     pub last_remote_dir: Option<String>,
     #[serde(default)]
     pub last_local_dir: Option<String>,
+    /// Free-text labels used for grouping and searching. Additive and
+    /// `serde(default)`, so an existing vault reads back with none.
+    ///
+    /// Never normalized to lowercase on the way in: the user's capitalization
+    /// is what shows in the list. Matching and sorting fold case themselves.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 impl ServerEntry {
@@ -116,6 +154,7 @@ impl ServerEntry {
             scripts: Vec::new(),
             last_remote_dir: None,
             last_local_dir: None,
+            tags: Vec::new(),
         }
     }
 }
@@ -217,6 +256,7 @@ impl std::fmt::Debug for ServerEntry {
             .field("scripts", &self.scripts)
             .field("last_remote_dir", &self.last_remote_dir)
             .field("last_local_dir", &self.last_local_dir)
+            .field("tags", &self.tags)
             .finish()
     }
 }
@@ -247,6 +287,8 @@ mod tests {
         assert_eq!(config.auto_lock_minutes, DEFAULT_AUTO_LOCK_MINUTES);
         assert_eq!(config.servers[0].last_remote_dir, None, "the browser's remembered directories are additive");
         assert_eq!(config.servers[0].last_local_dir, None);
+        assert!(config.servers[0].tags.is_empty(), "tags are additive; an existing vault has none");
+        assert_eq!(config.server_sort, ServerSort::Name, "an existing vault sorts by name");
         let AuthMethod::Password { password } = &config.servers[0].auth else {
             panic!("expected password auth");
         };

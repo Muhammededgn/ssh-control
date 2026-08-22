@@ -28,6 +28,7 @@ enum Field {
     Host,
     Port,
     Username,
+    Tags,
     AuthType,
     Password,
     KeyPath,
@@ -40,6 +41,7 @@ pub struct ServerFormState {
     host: String,
     port: String,
     username: String,
+    tags: String,
     auth_kind: AuthKind,
     password: Zeroizing<String>,
     key_path: String,
@@ -53,7 +55,24 @@ pub struct ServerFormData {
     pub host: String,
     pub port: u16,
     pub username: String,
+    pub tags: Vec<String>,
     pub auth: AuthMethod,
+}
+
+/// Splits the comma-separated tag field.
+///
+/// Blanks are dropped and duplicates collapse, so `a,,a, b` is `["a", "b"]` —
+/// a trailing comma while typing is the normal case, not an error worth
+/// stopping the save for. Case is preserved: what the user typed is what the
+/// list shows, and matching and sorting fold case themselves.
+fn parse_tags(raw: &str) -> Vec<String> {
+    let mut tags: Vec<String> = Vec::new();
+    for tag in raw.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+        if !tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+            tags.push(tag.to_string());
+        }
+    }
+    tags
 }
 
 pub enum FormOutcome {
@@ -70,6 +89,7 @@ impl ServerFormState {
             host: String::new(),
             port: "22".to_string(),
             username: String::new(),
+            tags: String::new(),
             auth_kind: AuthKind::Password,
             password: Zeroizing::new(String::new()),
             key_path: String::new(),
@@ -101,6 +121,7 @@ impl ServerFormState {
             host: entry.host.clone(),
             port: entry.port.to_string(),
             username: entry.username.clone(),
+            tags: entry.tags.join(", "),
             auth_kind,
             password,
             key_path,
@@ -111,7 +132,7 @@ impl ServerFormState {
     }
 
     fn fields(&self) -> Vec<Field> {
-        let mut f = vec![Field::Name, Field::Host, Field::Port, Field::Username, Field::AuthType];
+        let mut f = vec![Field::Name, Field::Host, Field::Port, Field::Username, Field::Tags, Field::AuthType];
         match self.auth_kind {
             AuthKind::Password => f.push(Field::Password),
             AuthKind::SshKey => {
@@ -177,6 +198,7 @@ impl ServerFormState {
             Field::Host => Some(&mut self.host),
             Field::Port => Some(&mut self.port),
             Field::Username => Some(&mut self.username),
+            Field::Tags => Some(&mut self.tags),
             Field::Password => Some(&mut self.password),
             Field::KeyPath => Some(&mut self.key_path),
             Field::KeyPassphrase => Some(&mut self.key_passphrase),
@@ -232,6 +254,7 @@ impl ServerFormState {
             host: self.host.trim().to_string(),
             port,
             username: self.username.trim().to_string(),
+            tags: parse_tags(&self.tags),
             auth,
         })
     }
@@ -260,6 +283,7 @@ impl ServerFormState {
             field_line(strings.field_host, self.host.clone(), Field::Host, self),
             field_line(strings.field_port, self.port.clone(), Field::Port, self),
             field_line(strings.field_username, self.username.clone(), Field::Username, self),
+            field_line(strings.field_tags, self.tags.clone(), Field::Tags, self),
             field_line(
                 strings.field_auth_type,
                 match self.auth_kind {
@@ -362,5 +386,29 @@ mod tests {
         let rendered = render(&state, 60, 4);
         assert!(rendered.contains("too small"));
         assert!(!rendered.contains(EN.field_name));
+    }
+
+    /// A trailing comma is what typing looks like halfway through, not an
+    /// error worth refusing the save for.
+    #[test]
+    fn the_tag_field_tolerates_how_people_actually_type_it() {
+        assert_eq!(parse_tags("prod, eu-west , "), vec!["prod", "eu-west"]);
+        assert_eq!(parse_tags(""), Vec::<String>::new());
+        assert_eq!(parse_tags(" , ,"), Vec::<String>::new());
+    }
+
+    /// Duplicates collapse case-insensitively, but the first spelling wins —
+    /// the list shows what the user typed.
+    #[test]
+    fn duplicate_tags_collapse_and_keep_the_first_spelling() {
+        assert_eq!(parse_tags("Prod, prod, PROD"), vec!["Prod"]);
+    }
+
+    #[test]
+    fn editing_an_entry_shows_its_tags_back() {
+        let mut entry = ServerEntry::new("box".into(), "h".into(), 22, "root".into(), AuthMethod::password("x"));
+        entry.tags = vec!["prod".into(), "eu".into()];
+        let state = ServerFormState::new_edit(&entry);
+        assert!(render(&state, 60, 20).contains("prod, eu"));
     }
 }
