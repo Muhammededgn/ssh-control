@@ -1,13 +1,14 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{ListItem, ListState};
 use uuid::Uuid;
 
 use crate::config::Script;
 use crate::i18n::Strings;
+use crate::tui::chrome;
 use crate::tui::theme;
 use crate::tui::widgets::{self, list_title_with_position, render_list_scrollbar};
 
@@ -81,50 +82,32 @@ impl ScriptsListState {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect, scripts: &[Script], status: Option<&str>, strings: &Strings) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            // 4, not 3: two borders plus room for both the status line and the
-            // hint that now sit under each other.
-            .constraints([Constraint::Min(3), Constraint::Length(4)])
-            .split(area);
-
-        let items: Vec<ListItem> = if scripts.is_empty() {
-            vec![ListItem::new(strings.scripts_list_empty)]
-        } else {
-            scripts
-                .iter()
-                .map(|s| {
-                    let run_marker = if s.run_on_connect { " [auto]" } else { "" };
-                    ListItem::new(format!("{}  ({} steps){run_marker}", s.name, s.steps.len()))
-                })
-                .collect()
-        };
-
-        let title = list_title_with_position(
-            &format!(" {} — {} ", strings.scripts_list_title, self.server_name),
-            self.selected,
-            scripts.len(),
-        );
-        let list = List::new(items)
-            .block(widgets::panel(&title))
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-            .highlight_symbol("> ");
-
-        frame.render_stateful_widget(list, chunks[0], &mut self.list_state);
-        render_list_scrollbar(frame, chunks[0], self.selected, scripts.len());
-
         // The status goes on its own line and the hint is always pushed, so a
         // "Saved." never takes the keybindings away — which is exactly when
         // someone still learning the screen needs them most.
-        let mut help_text = Vec::new();
-
+        let mut footer = Vec::new();
         if let Some(s) = status {
-            help_text.push(Line::from(Span::styled(s.to_string(), Style::default().fg(theme::warning()))));
+            footer.push(Line::from(Span::styled(s.to_string(), Style::default().fg(theme::warning()))));
         }
-        help_text.push(Line::from(strings.scripts_list_hint));
+        footer.push(Line::from(Span::styled(strings.scripts_list_hint, Style::default().fg(theme::hint()))));
 
-        let help = Paragraph::new(help_text).block(widgets::panel(""));
-        frame.render_widget(help, chunks[1]);
+        let body = chrome::render(frame, area, strings.scripts_list_title, footer, strings);
+
+        let items: Vec<ListItem> = scripts
+            .iter()
+            .map(|s| {
+                let run_marker = if s.run_on_connect { " [auto]" } else { "" };
+                ListItem::new(format!("{}  ({} steps){run_marker}", s.name, s.steps.len()))
+            })
+            .collect();
+
+        let title = list_title_with_position(
+            &format!(" {} — {} ", strings.scripts_list_title.trim(), self.server_name),
+            self.selected,
+            scripts.len(),
+        );
+        widgets::render_list(frame, body, &title, items, &mut self.list_state, Some(strings.scripts_list_empty), None, true);
+        render_list_scrollbar(frame, body, self.selected, scripts.len());
     }
 }
 

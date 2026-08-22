@@ -3,12 +3,13 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{ListItem, ListState, Paragraph, Wrap};
 use uuid::Uuid;
 
 use crate::config::device::now_unix;
 use crate::config::{ServerEntry, ServerSort, SystemInfo};
 use crate::i18n::Strings;
+use crate::tui::chrome;
 use crate::tui::theme;
 use crate::tui::widgets::{self, list_title_with_position, render_list_scrollbar};
 
@@ -20,6 +21,35 @@ fn gib(bytes: u64) -> f64 {
 /// GPU: ..." line from whatever fields were actually fetched. Missing fields
 /// are simply skipped rather than shown as errors — some remote shells lack
 /// `lspci`/`free`/etc.
+/// Everything known about an entry beyond its address, in the order it is
+/// worth reading: the grouping first, then when it was last reached, then what
+/// the machine is.
+///
+/// One function because two places show it — the detail pane when there is
+/// room and the row's second line when there is not — and they must not be
+/// able to disagree about what an entry says.
+fn detail_parts(entry: &ServerEntry, now: u64, strings: &Strings) -> Vec<String> {
+    let mut details = Vec::new();
+    // First, and in the user's own capitalization — it is the grouping, so it
+    // belongs at the front.
+    if !entry.tags.is_empty() {
+        details.push(format!("[{}]", entry.tags.join(", ")));
+    }
+    if let Some(ts) = entry.last_connected_unix {
+        details.push(format!("{}: {}", strings.last_connected_label, format_relative_time(ts, now, strings)));
+    }
+    if let Some(info) = &entry.system_info {
+        details.push(format_system_info(info, strings));
+    }
+    details
+}
+
+/// The list keeps at least this much before the detail pane is allowed to
+/// exist, and the pane itself is fixed: a card that grows with the frame just
+/// spreads four short lines across sixty columns.
+const MIN_LIST_WIDTH: u16 = 52;
+const DETAIL_WIDTH: u16 = 40;
+
 fn format_system_info(info: &SystemInfo, strings: &Strings) -> String {
     let mut parts = Vec::new();
 
@@ -374,76 +404,128 @@ impl MainMenuState {
     ) {
         let visible = self.visible_indices(servers, sort);
         let filter_shown = self.typing || !self.filter.is_empty();
+        let body = chrome::render(frame, area, strings.main_menu_title, self.footer(sort, status, filter_shown, strings), strings);
 
-        // The footer grows with what it has to say rather than reserving a
-        // blank row: on a short terminal every row belongs to the list.
-        let footer_lines = 1 + u16::from(!self.typing) + u16::from(status.is_some()) + u16::from(filter_shown);
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(footer_lines + 2)])
-            .split(area);
+        // The detail pane is the answer to a list of one server filling a
+        // 200-column frame with nothing in it. It is dropped rather than
+        // squeezed below `MIN_LIST_WIDTH`: at that point the list itself
+        // needs every column it can get.
+        let show_detail = body.width >= MIN_LIST_WIDTH + DETAIL_WIDTH && !visible.is_empty();
+        let (list_area, detail_area) = if show_detail {
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(MIN_LIST_WIDTH), Constraint::Length(DETAIL_WIDTH)])
+                .split(body);
+            (columns[0], Some(columns[1]))
+        } else {
+            (body, None)
+        };
 
         // Once per frame, not once per row: forty rows must not disagree about
         // what "now" is.
         let now = now_unix();
 
-        let items: Vec<ListItem> = if servers.is_empty() {
-            vec![ListItem::new(strings.main_menu_empty)]
-        } else if visible.is_empty() {
-            vec![ListItem::new(strings.main_menu_no_match)]
-        } else {
-            visible
-                .iter()
-                .map(|&i| &servers[i])
-                .map(|s| {
-                    let auth_label = match &s.auth {
-                        crate::config::AuthMethod::Password { .. } => strings.auth_label_password,
-                        crate::config::AuthMethod::SshKey { .. } => strings.auth_label_key,
-                    };
-                    let mut lines = vec![Line::from(format!(
-                        "{}  ({}@{}:{}, {})",
-                        s.name, s.username, s.host, s.port, auth_label
-                    ))];
-                    // One dim detail line carrying whatever is known. Built
-                    // from parts rather than keyed off `system_info` alone: a
-                    // host whose sysinfo probe never succeeds still has a
-                    // last-connected time worth showing.
-                    let mut details = Vec::new();
-                    // First, and in the user's own capitalization — it is the
-                    // grouping, so it belongs at the front of the detail line.
-                    if !s.tags.is_empty() {
-                        details.push(format!("[{}]", s.tags.join(", ")));
-                    }
-                    if let Some(ts) = s.last_connected_unix {
-                        details.push(format!(
-                            "{}: {}",
-                            strings.last_connected_label,
-                            format_relative_time(ts, now, strings)
-                        ));
-                    }
-                    if let Some(info) = &s.system_info {
-                        details.push(format_system_info(info, strings));
-                    }
+        // Padded to the longest name *on screen*, so the second column lines up
+        // instead of ragging along behind names of different lengths. Measured
+        // over the visible entries only — a filtered list should not carry the
+        // indentation of one it is not showing.
+        let name_width = visible.iter().map(|&i| servers[i].name.chars().count()).max().unwrap_or(0).min(28);
+
+        let items: Vec<ListItem> = visible
+            .iter()
+            .map(|&i| &servers[i])
+            .map(|s| {
+                let auth_label = match &s.auth {
+                    crate::config::AuthMethod::Password { .. } => strings.auth_label_password,
+                    crate::config::AuthMethod::SshKey { .. } => strings.auth_label_key,
+                };
+                let mut lines = vec![Line::from(vec![
+                    Span::raw(format!("{:<name_width$}", s.name)),
+                    Span::raw("  "),
+                    Span::styled(format!("{}@{}:{}", s.username, s.host, s.port), Style::default().fg(theme::hint())),
+                    Span::styled(format!("  {auth_label}"), Style::default().fg(theme::hint())),
+                ])];
+                // The second line only exists when the detail pane does not.
+                // Tags and a last-connected time are the reason someone scans
+                // this list, so a narrow terminal has to keep showing them
+                // inline rather than lose them with the pane.
+                if !show_detail {
+                    let details = detail_parts(s, now, strings);
                     if !details.is_empty() {
-                        lines.push(Line::from(Span::styled(
-                            format!("    {}", details.join("  |  ")),
-                            Style::default().fg(theme::hint()),
-                        )));
+                        lines.push(Line::from(Span::styled(format!("    {}", details.join("  |  ")), Style::default().fg(theme::hint()))));
                     }
-                    ListItem::new(lines)
-                })
-                .collect()
-        };
+                }
+                ListItem::new(lines)
+            })
+            .collect();
 
         let title = list_title_with_position(strings.main_menu_title, self.selected, visible.len());
-        let list = List::new(items)
-            .block(widgets::panel(&title))
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-            .highlight_symbol("> ");
+        let empty = if servers.is_empty() { strings.main_menu_empty } else { strings.main_menu_no_match };
+        widgets::render_list(frame, list_area, &title, items, &mut self.list_state, Some(empty), None, true);
+        render_list_scrollbar(frame, list_area, self.selected, visible.len());
 
-        frame.render_stateful_widget(list, chunks[0], &mut self.list_state);
-        render_list_scrollbar(frame, chunks[0], self.selected, visible.len());
+        if let Some(detail_area) = detail_area {
+            let entry = self.selected_entry(servers, sort);
+            self.render_detail(frame, detail_area, entry, now, strings);
+        }
+    }
 
+    /// The card beside the list: everything known about the selected server,
+    /// which used to be crammed into a second dim line under every row.
+    ///
+    /// Nothing here is new information and nothing here is a new string — it is
+    /// the same fields, given room to be read.
+    fn render_detail(&self, frame: &mut Frame, area: Rect, entry: Option<&ServerEntry>, now: u64, strings: &Strings) {
+        let Some(entry) = entry else {
+            frame.render_widget(widgets::panel(strings.main_menu_title), area);
+            return;
+        };
+
+        let label = |text: &str| Span::styled(format!("{text}: "), Style::default().fg(theme::hint()));
+        let auth_label = match &entry.auth {
+            crate::config::AuthMethod::Password { .. } => strings.auth_label_password,
+            crate::config::AuthMethod::SshKey { .. } => strings.auth_label_key,
+        };
+
+        let mut lines = vec![
+            Line::from(Span::styled(entry.name.clone(), Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD))),
+            Line::from(""),
+            Line::from(format!("{}@{}:{}", entry.username, entry.host, entry.port)),
+            Line::from(vec![label(strings.field_auth_type), Span::raw(auth_label)]),
+        ];
+
+        if !entry.tags.is_empty() {
+            lines.push(Line::from(Span::styled(format!("[{}]", entry.tags.join(", ")), Style::default().fg(theme::warning()))));
+        }
+        if let Some(ts) = entry.last_connected_unix {
+            lines.push(Line::from(vec![
+                label(strings.last_connected_label),
+                Span::raw(format_relative_time(ts, now, strings)),
+            ]));
+        }
+        if !entry.scripts.is_empty() {
+            lines.push(Line::from(vec![
+                label(strings.scripts_list_title.trim()),
+                Span::raw(entry.scripts.len().to_string()),
+            ]));
+        }
+        if let Some(info) = &entry.system_info {
+            lines.push(Line::from(""));
+            for part in format_system_info(info, strings).split("  |  ") {
+                lines.push(Line::from(Span::styled(part.to_string(), Style::default().fg(theme::hint()))));
+            }
+        }
+
+        frame.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }).block(widgets::panel(strings.main_menu_detail_title)),
+            area,
+        );
+    }
+
+    /// The status bar's contents. Built here rather than in `chrome` because
+    /// every line of it is this screen's: its filter box, its sort order, its
+    /// transient status, its keybindings.
+    fn footer(&self, sort: ServerSort, status: Option<&str>, filter_shown: bool, strings: &Strings) -> Vec<Line<'static>> {
         let mut help_text = Vec::new();
 
         if filter_shown {
@@ -457,10 +539,7 @@ impl MainMenuState {
         }
 
         if let Some(s) = status {
-            help_text.push(Line::from(Span::styled(
-                s.to_string(),
-                Style::default().fg(theme::warning()),
-            )));
+            help_text.push(Line::from(Span::styled(s.to_string(), Style::default().fg(theme::warning()))));
         }
         // Which order is in force has to be visible, or `o` reorders the list
         // with nothing on screen saying why.
@@ -470,14 +549,11 @@ impl MainMenuState {
                 Style::default().fg(theme::hint()),
             )));
         }
-        help_text.push(Line::from(if self.typing {
-            strings.main_menu_filter_hint
-        } else {
-            strings.main_menu_hint
-        }));
-
-        let help = Paragraph::new(help_text).block(widgets::panel(""));
-        frame.render_widget(help, chunks[1]);
+        help_text.push(Line::from(Span::styled(
+            if self.typing { strings.main_menu_filter_hint } else { strings.main_menu_hint },
+            Style::default().fg(theme::hint()),
+        )));
+        help_text
     }
 }
 
@@ -791,6 +867,45 @@ mod tests {
         // typeable.
         press(&mut state, &entries, KeyCode::Char('/'));
         assert!(matches!(press(&mut state, &entries, KeyCode::Char('o')), MainMenuAction::None));
+    }
+
+    fn render_wide(state: &mut MainMenuState, servers: &[ServerEntry], width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test backend");
+        terminal
+            .draw(|frame| state.render(frame, frame.area(), servers, ServerSort::Name, None, &EN))
+            .expect("render");
+        terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    /// A vault with one server used to leave a 200-column frame almost empty.
+    /// The detail pane is what that space is for.
+    #[test]
+    fn a_wide_frame_gets_a_detail_pane_for_the_selection() {
+        let entries = tagged();
+        let rendered = render_wide(&mut MainMenuState::new(), &entries, 120, 20);
+        assert!(rendered.contains(EN.main_menu_detail_title.trim()), "the pane has to be titled");
+        assert!(rendered.contains(&entries[0].host), "and to describe the selected entry");
+    }
+
+    /// The pane is dropped on a narrow frame, so what it was showing has to go
+    /// back onto the row. Losing tags and a last-connected time to a resize
+    /// would be a worse bug than the empty space the pane was added to fill.
+    #[test]
+    fn a_narrow_frame_keeps_the_details_on_the_row() {
+        let entries = tagged();
+        let rendered = render_wide(&mut MainMenuState::new(), &entries, 70, 20);
+        assert!(!rendered.contains(EN.main_menu_detail_title.trim()), "no room for a pane at 70 columns");
+        assert!(rendered.contains("[Prod, eu]"), "the tags have to survive the pane going away");
+    }
+
+    /// The empty state is a message, not a row: as a `ListItem` it picked up
+    /// the selection style and the marker, so a sentence the user cannot act
+    /// on was drawn as the highlighted, selectable entry.
+    #[test]
+    fn an_empty_vault_says_so_without_looking_selectable() {
+        let rendered = render_wide(&mut MainMenuState::new(), &[], 100, 20);
+        assert!(rendered.contains(EN.main_menu_empty.trim_start_matches('(').split(' ').next().expect("a word")));
+        assert!(!rendered.contains(widgets::SELECT_MARKER.trim()), "nothing is selected, so nothing is marked");
     }
 
     #[test]

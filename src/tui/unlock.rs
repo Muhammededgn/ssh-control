@@ -7,6 +7,7 @@ use zeroize::Zeroizing;
 
 use super::widgets::{self, mask};
 use crate::i18n::Strings;
+use crate::tui::chrome;
 use crate::tui::theme;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -195,6 +196,7 @@ impl UnlockState {
             Focus::Password => password_row,
             Focus::Confirm => password_row + 1,
         };
-        widgets::render_panel(frame, area, width, title, lines, focus_row, strings.terminal_too_small);
+        let body = chrome::locked_body(frame, area, title, None, strings);
+        widgets::render_panel(frame, body, width, title, lines, focus_row, strings.terminal_too_small);
     }
 }

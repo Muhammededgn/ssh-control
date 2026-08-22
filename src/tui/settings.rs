@@ -9,6 +9,7 @@ use zeroize::Zeroizing;
 use super::setup::{self, SetupOutcome, SetupState};
 use super::widgets::{self, mask};
 use crate::i18n::{Lang, Strings};
+use crate::tui::chrome;
 use crate::tui::theme::{self, THEMES, Theme};
 use crate::totp::AuthMode;
 
@@ -24,6 +25,18 @@ enum Tab {
 }
 
 const TABS: [Tab; 5] = [Tab::Language, Tab::Theme, Tab::Password, Tab::Security, Tab::AutoLock];
+
+/// One place a tab is named, because two things read it: the sidebar draws it
+/// and `render` measures the sidebar from it.
+fn tab_title(tab: Tab, strings: &Strings) -> &'static str {
+    match tab {
+        Tab::Language => strings.settings_tab_language,
+        Tab::Theme => strings.settings_tab_theme,
+        Tab::Password => strings.settings_tab_password,
+        Tab::Security => strings.settings_tab_security,
+        Tab::AutoLock => strings.settings_tab_auto_lock,
+    }
+}
 
 /// Idle auto-lock choices, in minutes. `0` is "off"; anything else is a
 /// timeout. Presets rather than a free-text field so the value can never be
@@ -312,16 +325,22 @@ impl SettingsState {
         }
 
         if key.code == KeyCode::Enter {
-            self.security_setup = Some(SetupState::new(self.credential_store));
+            self.security_setup = Some(SetupState::new(self.credential_store).embedded());
         }
         SettingsOutcome::None
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect, strings: &Strings) {
+        let body = chrome::render(frame, area, strings.settings_title, Vec::new(), strings);
+
+        // Measured rather than fixed at 24: a translated tab name is a
+        // different length in every language, and the old constant either
+        // clipped one or left a column of empty border beside it.
+        let sidebar = TABS.iter().map(|t| tab_title(*t, strings).chars().count()).max().unwrap_or(0) as u16 + 6;
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(0), Constraint::Length(24)])
-            .split(area);
+            .constraints([Constraint::Min(0), Constraint::Length(sidebar)])
+            .split(body);
 
         self.render_content(frame, chunks[0], strings);
         self.render_sidebar(frame, chunks[1], strings);
@@ -331,19 +350,8 @@ impl SettingsState {
         let items: Vec<ListItem> = TABS
             .iter()
             .map(|t| {
-                let label = match t {
-                    Tab::Language => strings.settings_tab_language,
-                    Tab::Theme => strings.settings_tab_theme,
-                    Tab::Password => strings.settings_tab_password,
-                    Tab::Security => strings.settings_tab_security,
-                    Tab::AutoLock => strings.settings_tab_auto_lock,
-                };
-                let style = if *t == self.tab {
-                    Style::default().add_modifier(Modifier::REVERSED)
-                } else {
-                    Style::default()
-                };
-                ListItem::new(label).style(style)
+                let style = if *t == self.tab { theme::selection() } else { Style::default() };
+                ListItem::new(tab_title(*t, strings)).style(style)
             })
             .collect();
 
@@ -362,11 +370,6 @@ impl SettingsState {
     }
 
     fn render_auto_lock_tab(&mut self, frame: &mut Frame, area: Rect, strings: &Strings) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(1)])
-            .split(area);
-
         let items: Vec<ListItem> = AUTO_LOCK_CHOICES
             .iter()
             .map(|m| {
@@ -378,12 +381,6 @@ impl SettingsState {
                 ListItem::new(label)
             })
             .collect();
-        let list = List::new(items)
-            .block(widgets::panel(strings.settings_tab_auto_lock))
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-            .highlight_symbol("> ");
-        frame.render_stateful_widget(list, chunks[0], &mut self.auto_lock_list_state);
-
         let footer = if let Some(err) = &self.error {
             Span::styled(err.clone(), Style::default().fg(theme::error()))
         } else if let Some(info) = &self.info {
@@ -391,15 +388,10 @@ impl SettingsState {
         } else {
             Span::styled(strings.settings_auto_lock_hint, Style::default().fg(theme::hint()))
         };
-        frame.render_widget(Paragraph::new(Line::from(footer)), chunks[1]);
+        widgets::render_list(frame, area, strings.settings_tab_auto_lock, items, &mut self.auto_lock_list_state, None, Some(Line::from(footer)), true);
     }
 
     fn render_theme_tab(&mut self, frame: &mut Frame, area: Rect, strings: &Strings) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(1)])
-            .split(area);
-
         let items: Vec<ListItem> = THEMES
             .iter()
             .map(|t| {
@@ -410,12 +402,6 @@ impl SettingsState {
                 })
             })
             .collect();
-        let list = List::new(items)
-            .block(widgets::panel(strings.settings_tab_theme))
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-            .highlight_symbol("> ");
-        frame.render_stateful_widget(list, chunks[0], &mut self.theme_list_state);
-
         // Picking a preset under `NO_COLOR` still stores it and still applies
         // the next time the variable is unset — but nothing changes on screen
         // right now, and a setting that silently does nothing needs saying.
@@ -426,30 +412,16 @@ impl SettingsState {
             // help overlay stays one row per binding rather than two identical ones.
             Span::styled(strings.settings_lang_hint, Style::default().fg(theme::hint()))
         };
-        frame.render_widget(Paragraph::new(Line::from(footer)), chunks[1]);
+        widgets::render_list(frame, area, strings.settings_tab_theme, items, &mut self.theme_list_state, None, Some(Line::from(footer)), true);
     }
 
     fn render_language_tab(&mut self, frame: &mut Frame, area: Rect, strings: &Strings) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(1)])
-            .split(area);
-
         let items: Vec<ListItem> = LANGS
             .iter()
             .map(|l| ListItem::new(format!("{} ({})", native_name(*l), l.code())))
             .collect();
-        let list = List::new(items)
-            .block(widgets::panel(strings.settings_tab_language))
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-            .highlight_symbol("> ");
-        frame.render_stateful_widget(list, chunks[0], &mut self.lang_list_state);
-
-        let hint = Paragraph::new(Line::from(Span::styled(
-            strings.settings_lang_hint,
-            Style::default().fg(theme::hint()),
-        )));
-        frame.render_widget(hint, chunks[1]);
+        let footer = Line::from(Span::styled(strings.settings_lang_hint, Style::default().fg(theme::hint())));
+        widgets::render_list(frame, area, strings.settings_tab_language, items, &mut self.lang_list_state, None, Some(footer), true);
     }
 
     fn render_password_tab(&self, frame: &mut Frame, area: Rect, strings: &Strings) {

@@ -6,6 +6,7 @@ use ratatui::text::{Line, Span};
 
 use super::widgets;
 use crate::i18n::Strings;
+use crate::tui::chrome;
 use crate::tui::theme;
 
 /// Full unlock screen for "TOTP-only" mode vaults — no password is ever
@@ -67,6 +68,7 @@ impl TotpUnlockState {
         // was refused is the reason to look at this screen at all, so it is the
         // line a clamped panel has to keep.
         let focus_row = lines.len() - 1;
-        widgets::render_panel(frame, area, 52, strings.totp_unlock_title, lines, focus_row, strings.terminal_too_small);
+        let body = chrome::locked_body(frame, area, strings.totp_unlock_title, None, strings);
+        widgets::render_panel(frame, body, 52, strings.totp_unlock_title, lines, focus_row, strings.terminal_too_small);
     }
 }

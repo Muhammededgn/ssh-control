@@ -14,6 +14,7 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 use zeroize::Zeroizing;
 
 use crate::i18n::Strings;
+use crate::tui::chrome;
 use crate::tui::theme;
 use crate::totp::{self, AuthMode};
 use crate::tui::widgets::{self, mask, qr_lines};
@@ -54,6 +55,11 @@ pub struct SetupState {
     /// they are only offered when one is actually reachable. Not being able to
     /// reach one is shown as a reason, never as a silent downgrade.
     credential_store: bool,
+    /// Whether this wizard is running inside the Settings pane rather than as
+    /// the pre-unlock first-run screen. Only the standalone one draws the
+    /// brand block: inside Settings the header already names the app, and a
+    /// second copy of it would push the mode list down for nothing.
+    embedded: bool,
     selected: usize,
     mode: AuthMode,
     /// Wiping buffers, like every other credential form (`unlock.rs`,
@@ -77,6 +83,7 @@ impl SetupState {
         Self {
             step: Step::ChooseMode,
             credential_store,
+            embedded: false,
             // Land on "password only": the safe default that works everywhere.
             selected: 1,
             mode: AuthMode::Password,
@@ -88,6 +95,12 @@ impl SetupState {
             code: String::new(),
             error: None,
         }
+    }
+
+    /// Marks this wizard as the one embedded in the Settings pane.
+    pub fn embedded(mut self) -> Self {
+        self.embedded = true;
+        self
     }
 
     fn mode_available(&self, mode: AuthMode) -> bool {
@@ -253,6 +266,11 @@ impl SetupState {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, strings: &Strings) {
+        // The wizard runs in two places: on its own before a vault exists, and
+        // inside the Settings content pane. Only the first is a pre-unlock
+        // screen, so only the first gets the brand block — inside Settings the
+        // header above it already names the app.
+        let area = if self.embedded { area } else { chrome::locked_body(frame, area, strings.setup_title, None, strings) };
         match self.step {
             Step::ChooseMode => self.render_choose_mode(frame, area, strings),
             Step::OfferRecovery => self.render_offer_recovery(frame, area, strings),
@@ -427,7 +445,8 @@ pub fn render_unopenable(frame: &mut Frame, area: Rect, strings: &Strings) {
     let lines = vec![
         Line::from(Span::styled(strings.unopenable_message, Style::default().fg(theme::error()))),
     ];
-    widgets::render_panel(frame, area, 70, strings.unopenable_title, lines, 0, strings.terminal_too_small);
+    let body = chrome::locked_body(frame, area, strings.unopenable_title, None, strings);
+    widgets::render_panel(frame, body, 70, strings.unopenable_title, lines, 0, strings.terminal_too_small);
 }
 
 /// A vault that cannot be opened *right now* — another instance holds it, or a
@@ -436,7 +455,8 @@ pub fn render_unopenable(frame: &mut Frame, area: Rect, strings: &Strings) {
 /// than red and the caller supplies the wording.
 pub fn render_cannot_open(frame: &mut Frame, area: Rect, title: &str, message: &str, strings: &Strings) {
     let lines = vec![Line::from(Span::styled(message.to_string(), Style::default().fg(theme::warning())))];
-    widgets::render_panel(frame, area, 70, title, lines, 0, strings.terminal_too_small);
+    let body = chrome::locked_body(frame, area, title, None, strings);
+    widgets::render_panel(frame, body, 70, title, lines, 0, strings.terminal_too_small);
 }
 
 #[cfg(test)]

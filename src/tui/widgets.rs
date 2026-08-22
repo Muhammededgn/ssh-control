@@ -334,6 +334,7 @@ pub const SELECT_MARKER: &str = "\u{258c} ";
 /// selection style and the marker, so a sentence the user cannot act on was
 /// drawn as the highlighted, selectable row. Here it is centred, dimmed, and
 /// outside the list entirely; `state` is not even consulted.
+#[allow(clippy::too_many_arguments)]
 pub fn render_list(
     frame: &mut Frame,
     area: Rect,
@@ -341,9 +342,17 @@ pub fn render_list(
     items: Vec<ListItem<'static>>,
     state: &mut ListState,
     empty_message: Option<&str>,
+    footer: Option<Line<'static>>,
     focused: bool,
 ) {
-    let block = focus_panel(title, focused);
+    // The hint rides the bottom border rather than sitting on a borderless row
+    // beneath the panel. Outside it, the hint and the panel it belonged to had
+    // different widths and different heights, and the settings tabs ended up
+    // with a line of text floating under a box that stopped above it.
+    let block = match footer {
+        Some(line) => focus_panel(title, focused).title_bottom(line),
+        None => focus_panel(title, focused),
+    };
     if let Some(message) = empty_message.filter(|_| items.is_empty()) {
         let inner = block.inner(area);
         frame.render_widget(block, area);

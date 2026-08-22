@@ -9,6 +9,7 @@ use zeroize::Zeroizing;
 use super::widgets::{mask, render_form};
 use crate::config::{AuthMethod, Secret, ServerEntry};
 use crate::i18n::Strings;
+use crate::tui::chrome;
 use crate::tui::theme;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -314,17 +315,13 @@ impl ServerFormState {
         lines.push(Line::from(""));
         if let Some(err) = &self.error {
             lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(theme::error()))));
-        } else {
-            lines.push(Line::from(Span::styled(
-                strings.form_hint,
-                Style::default().fg(theme::hint()),
-            )));
         }
 
         // `fields()` and `lines` are built in the same order, so the focused
         // field's index is its row — that is what `render_form` scrolls to.
         let focus_row = self.fields().iter().position(|f| *f == self.focus).unwrap_or(0);
-        render_form(frame, area, title, lines, focus_row, strings.terminal_too_small);
+        let body = chrome::render(frame, area, title, vec![Line::from(Span::styled(strings.form_hint, Style::default().fg(theme::hint())))], strings);
+        render_form(frame, body, title, lines, focus_row, strings.terminal_too_small);
     }
 }
 

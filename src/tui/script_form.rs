@@ -3,12 +3,13 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{ListItem, ListState, Paragraph};
 use uuid::Uuid;
 
 use super::widgets::{self, MIN_FORM_WIDTH, render_form, render_if_too_small};
 use crate::config::{ScriptStep, StepCondition};
 use crate::i18n::Strings;
+use crate::tui::chrome;
 use crate::tui::theme;
 use crate::ssh::script_runner::STEP_TIMEOUT;
 
@@ -356,10 +357,16 @@ impl ScriptFormState {
             FormMode::Edit(_) => strings.script_form_title_edit,
         };
 
+        let hint_line = if let Some(err) = &self.error {
+            Line::from(Span::styled(err.clone(), Style::default().fg(theme::error())))
+        } else {
+            Line::from(Span::styled(strings.steps_list_hint, Style::default().fg(theme::hint())))
+        };
+        let body = chrome::render(frame, area, title, vec![hint_line], strings);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(4), Constraint::Min(3), Constraint::Length(4)])
-            .split(area);
+            .constraints([Constraint::Length(4), Constraint::Min(3), Constraint::Length(3)])
+            .split(body);
 
         let field_line = |label: &str, value: String, focused: bool| {
             let cursor = if focused { "_" } else { "" };
@@ -389,16 +396,16 @@ impl ScriptFormState {
             .collect();
         let mut list_state = self.list_state;
         list_state.select(if self.steps.is_empty() { None } else { Some(self.selected_step) });
-        let highlight_style = if self.focus == Focus::Steps {
-            Style::default().add_modifier(Modifier::REVERSED)
-        } else {
-            Style::default().fg(theme::accent())
-        };
-        let list = List::new(items)
-            .block(widgets::focus_panel(strings.steps_list_title, self.focus == Focus::Steps))
-            .highlight_style(highlight_style)
-            .highlight_symbol("> ");
-        frame.render_stateful_widget(list, chunks[1], &mut list_state);
+        widgets::render_list(
+            frame,
+            chunks[1],
+            strings.steps_list_title,
+            items,
+            &mut list_state,
+            None,
+            None,
+            self.focus == Focus::Steps,
+        );
         self.list_state = list_state;
 
         let save_style = if self.focus == Focus::Save {
@@ -407,15 +414,7 @@ impl ScriptFormState {
             Style::default().fg(theme::accent())
         };
         let save_line = Line::from(Span::styled(format!("[ {} ]", strings.field_save_script), save_style));
-        let hint_line = if let Some(err) = &self.error {
-            Line::from(Span::styled(err.clone(), Style::default().fg(theme::error())))
-        } else {
-            Line::from(Span::styled(strings.steps_list_hint, Style::default().fg(theme::hint())))
-        };
-        frame.render_widget(
-            Paragraph::new(vec![save_line, hint_line]).block(widgets::panel("")),
-            chunks[2],
-        );
+        frame.render_widget(Paragraph::new(save_line).block(widgets::panel("")), chunks[2]);
     }
 
     fn render_step_edit(&self, frame: &mut Frame, area: Rect, strings: &Strings) {

@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use super::widgets::{self, format_size, render_if_too_small, render_list_scrollbar};
 use crate::i18n::Strings;
+use crate::tui::chrome;
 use crate::tui::theme;
 
 /// Two bordered panes need more room than a single form: at 60 columns each
@@ -340,25 +341,21 @@ impl FileBrowserState {
             return;
         }
 
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(if self.status.is_some() { 4 } else { 3 })])
-            .split(area);
-        let panes = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(rows[0]);
-
-        let focus = self.focus;
-        render_pane(frame, panes[0], &mut self.local, strings.file_browser_local_label, focus == Side::Local, strings);
-        render_pane(frame, panes[1], &mut self.remote, strings.file_browser_remote_label, focus == Side::Remote, strings);
-
         let mut footer = Vec::new();
         if let Some(status) = &self.status {
             footer.push(Line::from(Span::styled(status.clone(), Style::default().fg(theme::warning()))));
         }
-        footer.push(Line::from(strings.file_browser_hint));
-        frame.render_widget(Paragraph::new(footer).block(widgets::panel("")), rows[1]);
+        footer.push(Line::from(Span::styled(strings.file_browser_hint, Style::default().fg(theme::hint()))));
+        let body = chrome::render(frame, area, strings.file_browser_title, footer, strings);
+
+        let panes = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(body);
+
+        let focus = self.focus;
+        render_pane(frame, panes[0], &mut self.local, strings.file_browser_local_label, focus == Side::Local, strings);
+        render_pane(frame, panes[1], &mut self.remote, strings.file_browser_remote_label, focus == Side::Remote, strings);
 
         if let Some(progress) = &self.progress {
             render_progress(frame, area, progress, strings);

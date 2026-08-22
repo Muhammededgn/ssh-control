@@ -1,12 +1,13 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use uuid::Uuid;
 
 use crate::i18n::Strings;
+use crate::tui::chrome;
 use crate::tui::theme;
 use crate::tui::widgets::{self, wrapped_rows};
 
@@ -280,26 +281,12 @@ impl ScriptRunState {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect, strings: &Strings) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(3)])
-            .split(area);
-
-        // Stashed before anything reads it: `total_rows` and the paging keys
-        // both measure against the frame the user is actually looking at.
-        self.viewport = (chunks[0].width.saturating_sub(2), chunks[0].height.saturating_sub(2));
-
-        let title = format!("{}— {} / {} ", strings.script_run_title, self.server_name, self.script_name);
-        let scroll = self.scroll.unwrap_or_else(|| self.max_scroll()).min(self.max_scroll());
-
-        let paragraph = Paragraph::new(self.log.clone())
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0))
-            .block(widgets::panel(&title));
-        frame.render_widget(paragraph, chunks[0]);
-
         // The prompt and the save result both take the footer over, in that
         // order: while editing, the path is the only thing worth showing there.
+        //
+        // Built before the body rect exists, which is safe because none of it
+        // measures the frame — `is_scrolled_back` is a look at `self.scroll`
+        // and nothing else.
         let footer_line = if let Some(path) = &self.save_path {
             Line::from(vec![
                 Span::styled(format!("{} ", strings.script_run_save_prompt), Style::default().fg(theme::accent())),
@@ -320,8 +307,20 @@ impl ScriptRunState {
                 if self.is_scrolled_back() { Style::default().fg(theme::warning()) } else { Style::default().fg(theme::hint()) };
             Line::from(Span::styled(hint, style))
         };
-        let footer = Paragraph::new(footer_line).block(widgets::panel(""));
-        frame.render_widget(footer, chunks[1]);
+
+        let body = chrome::render(frame, area, strings.script_run_title, vec![footer_line], strings);
+
+        let title = format!("{}— {} / {} ", strings.script_run_title, self.server_name, self.script_name);
+        let block = widgets::panel(&title);
+        // Stashed before anything reads it, and taken from the block itself
+        // rather than guessed: `total_rows` and the paging keys both measure
+        // against the frame the user is actually looking at, and the panel's
+        // padding is part of that frame.
+        let inner = block.inner(body);
+        self.viewport = (inner.width, inner.height);
+
+        let scroll = self.scroll.unwrap_or_else(|| self.max_scroll()).min(self.max_scroll());
+        frame.render_widget(Paragraph::new(self.log.clone()).wrap(Wrap { trim: false }).scroll((scroll, 0)).block(block), body);
     }
 }
 
