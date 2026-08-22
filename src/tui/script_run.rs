@@ -174,6 +174,17 @@ impl ScriptRunState {
         self.finished = true;
     }
 
+    /// Ends the run at the user's request, with a marker saying so.
+    ///
+    /// The log stays exactly as it was — a cancelled run's output is the whole
+    /// reason someone cancelled it, and throwing it away would make the
+    /// feature useless. `finished` is set, so the close keys come back.
+    pub fn mark_cancelled(&mut self, strings: &Strings) {
+        self.flush_partial();
+        self.log.push(Line::from(Span::styled(strings.log_cancelled, Style::default().fg(theme::warning()))));
+        self.finished = true;
+    }
+
     /// Total rows the log occupies at the width of the last frame.
     fn total_rows(&self) -> usize {
         let (width, _) = self.viewport;
@@ -542,5 +553,33 @@ mod tests {
         press(&mut state, KeyCode::Home);
         let top = render(&mut state, 40, 12);
         assert!(top.contains("start"), "the beginning of the wrapped line is reachable");
+    }
+
+    /// The issue's second acceptance criterion: the output collected before
+    /// the cancel is the reason the user was watching, so it stays, with a
+    /// marker saying what happened.
+    #[test]
+    fn cancelling_keeps_the_log_and_says_so() {
+        let mut state = run_with(3);
+        state.step_started("sleep 300");
+        assert!(!state.finished);
+
+        state.mark_cancelled(&EN);
+        assert!(state.finished, "the close keys have to come back");
+
+        let screen = render(&mut state, 60, 12);
+        assert!(screen.contains("cancelled"));
+        assert!(screen.contains("line-0"), "the output collected so far survives");
+        assert!(matches!(press(&mut state, KeyCode::Esc), ScriptRunOutcome::Close));
+    }
+
+    /// A partial line with no trailing newline is still output worth keeping —
+    /// a cancel usually lands in the middle of one.
+    #[test]
+    fn a_half_written_line_is_flushed_by_the_cancel() {
+        let mut state = ScriptRunState::new(Uuid::new_v4(), Uuid::new_v4(), "host".into(), "deploy".into());
+        state.output(b"partial output with no newline");
+        state.mark_cancelled(&EN);
+        assert!(state.plain_text().contains("partial output with no newline"));
     }
 }

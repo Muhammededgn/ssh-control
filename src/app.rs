@@ -15,7 +15,7 @@ use crate::crypto::kdf::KdfParams;
 use crate::error::{AppError, Result};
 use crate::i18n::{Lang, Strings};
 use crate::ssh;
-use crate::ssh::script_runner::{self, RunEvent, ScriptVars};
+use crate::ssh::script_runner::{self, OwnedRunEvent, RunEvent, ScriptVars};
 use crate::terminal::TerminalGuard;
 use crate::totp::{self, AuthMode};
 use crate::tui::confirm::{ConfirmOutcome, ConfirmState};
@@ -1587,22 +1587,62 @@ impl App {
 
         match ssh::connect(&target).await {
             Ok(mut connected) => {
-                script_runner::run_script(&mut connected.handle, &script, |event| {
-                    match event {
-                        RunEvent::StepStarted { command, .. } => run_state.step_started(command),
-                        RunEvent::Output { chunk, .. } => run_state.output(chunk),
-                        RunEvent::StepFinished { exit_code, .. } => run_state.step_finished(exit_code, strings),
-                        RunEvent::StepSkipped { .. } => run_state.step_skipped(strings),
-                        RunEvent::StepError { message, .. } => run_state.step_error(message, strings),
-                        RunEvent::StepTimedOut { seconds, .. } => run_state.step_timed_out(seconds, strings),
+                // The events travel through a channel rather than straight
+                // into `run_state`, and that is what makes the whole thing
+                // work: the run future must not borrow the screen, or the
+                // `select!` arm that redraws and reads keys could not touch it
+                // either.
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                let cancelled = {
+                    let mut run = std::pin::pin!(script_runner::run_script(&mut connected.handle, &script, move |event| {
+                        let _ = tx.send(event.into_owned());
+                    }));
+                    let mut cancelled = false;
+                    loop {
+                        tokio::select! {
+                            // A finished run wins over a tick that came due in
+                            // the same wakeup; the leftover events are drained
+                            // below either way.
+                            biased;
+                            _ = &mut run => break,
+                            Some(event) = rx.recv() => {
+                                apply_run_event(event, &mut run_state, strings);
+                                // Whatever else is already queued goes on in
+                                // the same pass — one redraw per batch rather
+                                // than one per output chunk.
+                                while let Ok(more) = rx.try_recv() {
+                                    apply_run_event(more, &mut run_state, strings);
+                                }
+                                draw_run(terminal, &mut run_state, strings);
+                            }
+                            // Polling on a timer rather than an `EventStream`:
+                            // `event::poll(ZERO)` is what `transfer_flow`
+                            // already uses, needs no extra dependency, and
+                            // 50 ms is well under what a keypress feels like.
+                            _ = tokio::time::sleep(KEY_POLL_INTERVAL) => {
+                                if poll_run_keys(&mut run_state) {
+                                    cancelled = true;
+                                    break;
+                                }
+                                draw_run(terminal, &mut run_state, strings);
+                            }
+                        }
                     }
-                    let _ = terminal.terminal.draw(|frame| {
-                        let area = frame.area();
-                        run_state.render(frame, area, strings);
-                    });
-                })
-                .await;
-                run_state.mark_finished();
+                    cancelled
+                };
+
+                // Events the run emitted just before it ended (or before the
+                // cancel) are still in the channel. Dropping them would lose
+                // the last step's exit code.
+                while let Ok(event) = rx.try_recv() {
+                    apply_run_event(event, &mut run_state, strings);
+                }
+
+                if cancelled {
+                    run_state.mark_cancelled(strings);
+                } else {
+                    run_state.mark_finished();
+                }
             }
             Err(e) => {
                 run_state.connect_error(&format!("{}{e}", strings.connect_error_prefix), strings);
@@ -2175,6 +2215,61 @@ fn remote_entries(entries: Vec<sftp::RemoteEntry>, show_hidden: bool) -> Vec<Bro
         .collect()
 }
 
+/// How often the run loop looks for a keypress while a step is running.
+///
+/// The events a script emits are not a heartbeat — `sleep 300` produces none
+/// at all — so a callback-driven cancel like `transfer_flow`'s cannot work
+/// here. This tick is what makes Esc reachable during a step that says nothing.
+const KEY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+fn apply_run_event(event: OwnedRunEvent, run_state: &mut ScriptRunState, strings: &'static Strings) {
+    match event {
+        OwnedRunEvent::StepStarted { command } => run_state.step_started(&command),
+        OwnedRunEvent::Output { chunk } => run_state.output(&chunk),
+        OwnedRunEvent::StepFinished { exit_code } => run_state.step_finished(exit_code, strings),
+        OwnedRunEvent::StepSkipped => run_state.step_skipped(strings),
+        OwnedRunEvent::StepError { message } => run_state.step_error(&message, strings),
+        OwnedRunEvent::StepTimedOut { seconds } => run_state.step_timed_out(seconds, strings),
+    }
+}
+
+fn draw_run(terminal: &mut TerminalGuard, run_state: &mut ScriptRunState, strings: &'static Strings) {
+    let _ = terminal.terminal.draw(|frame| {
+        let area = frame.area();
+        run_state.render(frame, area, strings);
+    });
+}
+
+/// Drains what the user typed during a step: `true` if they asked to stop.
+///
+/// Everything else goes to `ScriptRunState::handle_key`, which is what finally
+/// makes that screen's scrolling reachable during a run — until now `App::run`
+/// was blocked inside this flow, so those keys sat in the terminal buffer and
+/// replayed against the script list once it returned.
+fn is_cancel_key(key: KeyEvent) -> bool {
+    key.code == KeyCode::Esc || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+fn poll_run_keys(run_state: &mut ScriptRunState) -> bool {
+    let mut cancel = false;
+    while event::poll(Duration::ZERO).unwrap_or(false) {
+        match event::read() {
+            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                if is_cancel_key(key) {
+                    cancel = true;
+                } else {
+                    // The close keys are gated on `finished`, so a stray Enter
+                    // cannot dismiss a run that is still going.
+                    let _ = run_state.handle_key(key);
+                }
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    cancel
+}
+
 /// Plain (non-TUI) sink for `run_on_connect` scripts, since they execute
 /// while the terminal is suspended for the interactive SSH session — see
 /// `TerminalGuard::suspend`. Raw mode is never toggled off process-wide, so
@@ -2220,4 +2315,22 @@ fn print_script_event_plain(event: RunEvent, strings: &Strings, partial: &mut St
         }
     }
     let _ = out.flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The cancel contract, pinned: only these two stop a run. Every other key
+    /// is forwarded to the screen, so widening this set silently takes a
+    /// binding away from it.
+    #[test]
+    fn only_esc_and_ctrl_c_stop_a_run() {
+        assert!(is_cancel_key(KeyEvent::from(KeyCode::Esc)));
+        assert!(is_cancel_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+
+        assert!(!is_cancel_key(KeyEvent::from(KeyCode::Char('c'))), "a bare c is output, not a cancel");
+        assert!(!is_cancel_key(KeyEvent::from(KeyCode::Enter)));
+        assert!(!is_cancel_key(KeyEvent::from(KeyCode::Char('q'))));
+    }
 }

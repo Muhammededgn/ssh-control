@@ -117,6 +117,40 @@ pub enum RunEvent<'a> {
     StepTimedOut { index: usize, seconds: u64 },
 }
 
+/// A `RunEvent` with nothing borrowed.
+///
+/// `RunEvent` borrows the command and the output chunk from the loop that
+/// produced them, which is exactly right for a caller that consumes them
+/// inline (`connect_flow`'s plain printer still does). The TUI flow cannot:
+/// it runs the script inside a `tokio::select!` and has to keep the screen
+/// state *out* of the run future so the other branch can touch it, which means
+/// the events have to travel through a channel and therefore own themselves.
+///
+/// The step index is dropped on the way. Nothing downstream reads it — the
+/// screen appends events in the order they arrive, which is the order they
+/// happened.
+pub enum OwnedRunEvent {
+    StepStarted { command: String },
+    Output { chunk: Vec<u8> },
+    StepFinished { exit_code: i32 },
+    StepSkipped,
+    StepError { message: String },
+    StepTimedOut { seconds: u64 },
+}
+
+impl RunEvent<'_> {
+    pub fn into_owned(self) -> OwnedRunEvent {
+        match self {
+            RunEvent::StepStarted { command, .. } => OwnedRunEvent::StepStarted { command: command.to_string() },
+            RunEvent::Output { chunk, .. } => OwnedRunEvent::Output { chunk: chunk.to_vec() },
+            RunEvent::StepFinished { exit_code, .. } => OwnedRunEvent::StepFinished { exit_code },
+            RunEvent::StepSkipped { .. } => OwnedRunEvent::StepSkipped,
+            RunEvent::StepError { message, .. } => OwnedRunEvent::StepError { message: message.to_string() },
+            RunEvent::StepTimedOut { seconds, .. } => OwnedRunEvent::StepTimedOut { seconds },
+        }
+    }
+}
+
 /// Exit code a timed-out step is recorded with, so the next step's
 /// `OnFailure` / `OutputContains` sees a failure rather than a skip. 124 is
 /// what coreutils `timeout(1)` reports, for the same reason.
@@ -243,6 +277,28 @@ async fn run_step(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The TUI flow reconstructs the log purely from these, so a variant that
+    /// loses its payload on the way through the channel loses a log line.
+    #[test]
+    fn owning_an_event_keeps_everything_the_screen_renders() {
+        let owned = RunEvent::StepStarted { index: 3, command: "uptime" }.into_owned();
+        assert!(matches!(owned, OwnedRunEvent::StepStarted { command } if command == "uptime"));
+
+        let owned = RunEvent::Output { index: 0, chunk: b"hello" }.into_owned();
+        assert!(matches!(owned, OwnedRunEvent::Output { chunk } if chunk == b"hello"));
+
+        let owned = RunEvent::StepFinished { index: 0, exit_code: 7 }.into_owned();
+        assert!(matches!(owned, OwnedRunEvent::StepFinished { exit_code: 7 }));
+
+        let owned = RunEvent::StepError { index: 0, message: "channel gone" }.into_owned();
+        assert!(matches!(owned, OwnedRunEvent::StepError { message } if message == "channel gone"));
+
+        let owned = RunEvent::StepTimedOut { index: 0, seconds: 120 }.into_owned();
+        assert!(matches!(owned, OwnedRunEvent::StepTimedOut { seconds: 120 }));
+
+        assert!(matches!(RunEvent::StepSkipped { index: 0 }.into_owned(), OwnedRunEvent::StepSkipped));
+    }
 
     fn vars() -> ScriptVars {
         ScriptVars { name: "prod-web".into(), host: "example.com".into(), port: 2222, username: "deploy".into() }
