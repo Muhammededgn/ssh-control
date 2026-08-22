@@ -161,6 +161,7 @@ enum NextStep {
     ConfirmDeleteScriptYes,
     ConfirmDeleteScriptNo,
     RunScript(Uuid, Uuid),
+    ScriptRunSave(String),
     ScriptRunClose,
     GoFiles(Uuid),
     FilesBack,
@@ -905,6 +906,7 @@ impl App {
                     ScriptRunOutcome::None => NextStep::None,
                     ScriptRunOutcome::Close => NextStep::ScriptRunClose,
                     ScriptRunOutcome::Help => NextStep::Help,
+                    ScriptRunOutcome::Save(path) => NextStep::ScriptRunSave(path),
                 },
                 Screen::FileBrowser(state) => match state.handle_key(key) {
                     FileBrowserOutcome::None => NextStep::None,
@@ -1077,6 +1079,7 @@ impl App {
                     u.screen = Screen::MainMenu(menu);
                 });
             }
+            NextStep::ScriptRunSave(path) => self.save_script_log(&path),
             NextStep::ScriptRunClose => self.with_unlocked(|u| {
                 let ctx = match &u.screen {
                     Screen::ScriptRun(state) => Some((state.server_id, state.server_name.clone())),
@@ -1588,6 +1591,30 @@ impl App {
         });
 
         Ok(())
+    }
+
+    /// Writes the finished run's log to `path`.
+    ///
+    /// Not `write_file_atomic`: that exists because the vault is rewritten on
+    /// every connect and has no backup copy. A log the user just asked for at
+    /// a path they typed is neither, and staging a sibling `.tmp` beside it
+    /// would only add a file to explain.
+    ///
+    /// The result is reported on the run screen rather than through `status`,
+    /// since the run screen has no status line and is what the user is looking
+    /// at.
+    fn save_script_log(&mut self, path: &str) {
+        let strings = self.lang.strings();
+        let AppState::Unlocked(u) = &mut self.state else {
+            return;
+        };
+        let Screen::ScriptRun(state) = &mut u.screen else {
+            return;
+        };
+        match std::fs::write(path, state.plain_text()) {
+            Ok(()) => state.save_succeeded(path, strings),
+            Err(e) => state.save_failed(&e.to_string(), strings),
+        }
     }
 
     /// Opens the file browser: connect if needed, ask the server where "." is,

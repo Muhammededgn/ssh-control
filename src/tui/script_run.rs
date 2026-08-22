@@ -29,6 +29,14 @@ pub struct ScriptRunState {
     /// need the viewport, and only `render` knows it — the key handler runs
     /// with no `Rect` in sight.
     viewport: (u16, u16),
+    /// The editable destination path while the save prompt is open, `None`
+    /// otherwise. An inline field rather than a `Screen` of its own: the log
+    /// has to stay on screen behind it, and a new screen would mean pushing
+    /// this whole state aside and putting it back.
+    save_path: Option<String>,
+    /// Result of the last save attempt, already formatted for the footer.
+    /// `app.rs` sets it — the write itself is I/O and does not belong here.
+    save_result: Option<(String, bool)>,
 }
 
 /// Rows one logical line occupies once `Wrap { trim: false }` has had it.
@@ -62,6 +70,24 @@ pub enum ScriptRunOutcome {
     None,
     Close,
     Help,
+    /// Write the log to this path. The screen never touches the filesystem
+    /// itself; `app.rs` does the write and reports back through
+    /// `save_succeeded` / `save_failed`.
+    Save(String),
+}
+
+/// Default destination offered by the save prompt: the script's name, unix
+/// seconds, `.log`. Seconds rather than a formatted date because the crate has
+/// no date library and the only job here is to not silently overwrite the
+/// previous run's file.
+fn default_log_name(script_name: &str, now_unix: u64) -> String {
+    let stem: String = script_name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let stem = stem.trim_matches('-');
+    let stem = if stem.is_empty() { "script" } else { stem };
+    format!("{stem}-{now_unix}.log")
 }
 
 impl ScriptRunState {
@@ -76,6 +102,8 @@ impl ScriptRunState {
             finished: false,
             scroll: None,
             viewport: (0, 0),
+            save_path: None,
+            save_result: None,
         }
     }
 
@@ -172,7 +200,52 @@ impl ScriptRunState {
         self.scroll.is_some()
     }
 
+    /// The log as plain text — what gets written to disk.
+    ///
+    /// `Line::to_string` yields the spans' content and nothing else, so the
+    /// colours the TUI uses simply do not survive the conversion. There is no
+    /// ANSI to strip: the styling was never in the text, it lives in ratatui's
+    /// `Style`.
+    pub fn plain_text(&self) -> String {
+        let mut out = String::new();
+        for line in &self.log {
+            out.push_str(&line.to_string());
+            out.push('\n');
+        }
+        out
+    }
+
+    pub fn save_succeeded(&mut self, path: &str, strings: &Strings) {
+        self.save_result = Some((format!("{}{path}", strings.script_run_saved_prefix), true));
+    }
+
+    pub fn save_failed(&mut self, message: &str, strings: &Strings) {
+        self.save_result = Some((format!("{}{message}", strings.script_run_save_error_prefix), false));
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> ScriptRunOutcome {
+        // The prompt owns every key while it is open, including the scroll and
+        // close keys — a path is text, and `q` or `j` in a filename must not
+        // close the screen or move the view.
+        if let Some(path) = &mut self.save_path {
+            match key.code {
+                KeyCode::Char(c) => path.push(c),
+                KeyCode::Backspace => {
+                    path.pop();
+                }
+                KeyCode::Esc => self.save_path = None,
+                KeyCode::Enter => {
+                    let path = self.save_path.take().unwrap_or_default();
+                    let path = path.trim().to_string();
+                    if !path.is_empty() {
+                        return ScriptRunOutcome::Save(path);
+                    }
+                }
+                _ => {}
+            }
+            return ScriptRunOutcome::None;
+        }
+
         // Scrolling works during the run too — that is the point, a long build
         // is exactly when you want to look back at what already scrolled past.
         let page = self.viewport.1.saturating_sub(1).max(1) as i32;
@@ -208,6 +281,13 @@ impl ScriptRunState {
             return ScriptRunOutcome::None;
         }
         match key.code {
+            // Only once the run is over: the log is still growing before that,
+            // and a file saved mid-run would be a truncated one.
+            KeyCode::Char('s') => {
+                self.save_result = None;
+                self.save_path = Some(default_log_name(&self.script_name, crate::config::device::now_unix()));
+                ScriptRunOutcome::None
+            }
             KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => ScriptRunOutcome::Close,
             _ => ScriptRunOutcome::None,
         }
@@ -232,16 +312,29 @@ impl ScriptRunState {
             .block(Block::default().borders(Borders::ALL).title(title));
         frame.render_widget(paragraph, chunks[0]);
 
-        let hint = if self.is_scrolled_back() {
-            strings.script_run_hint_scrolled
-        } else if self.finished {
-            strings.script_run_hint_done
+        // The prompt and the save result both take the footer over, in that
+        // order: while editing, the path is the only thing worth showing there.
+        let footer_line = if let Some(path) = &self.save_path {
+            Line::from(vec![
+                Span::styled(format!("{} ", strings.script_run_save_prompt), Style::default().fg(Color::Cyan)),
+                Span::raw(format!("{path}_")),
+            ])
+        } else if let Some((message, ok)) = &self.save_result {
+            let colour = if *ok { Color::Green } else { Color::Red };
+            Line::from(Span::styled(message.clone(), Style::default().fg(colour)))
         } else {
-            strings.script_run_hint_running
+            let hint = if self.is_scrolled_back() {
+                strings.script_run_hint_scrolled
+            } else if self.finished {
+                strings.script_run_hint_done
+            } else {
+                strings.script_run_hint_running
+            };
+            let style =
+                if self.is_scrolled_back() { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::DarkGray) };
+            Line::from(Span::styled(hint, style))
         };
-        let style = if self.is_scrolled_back() { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::DarkGray) };
-        let footer = Paragraph::new(Line::from(Span::styled(hint, style)))
-            .block(Block::default().borders(Borders::ALL));
+        let footer = Paragraph::new(footer_line).block(Block::default().borders(Borders::ALL));
         frame.render_widget(footer, chunks[1]);
     }
 }
@@ -339,6 +432,85 @@ mod tests {
 
         state.mark_finished();
         assert!(matches!(press(&mut state, KeyCode::Enter), ScriptRunOutcome::Close));
+    }
+
+    /// The colours the TUI uses live in ratatui's `Style`, never in the text,
+    /// so a saved log is plain by construction — there is no ANSI to strip.
+    #[test]
+    fn the_saved_text_carries_no_styling() {
+        let mut state = run_with(2);
+        state.step_started("uptime");
+        state.step_finished(0, &EN);
+        let text = state.plain_text();
+        assert!(text.contains("line-0\n"));
+        assert!(text.contains("$ uptime\n"));
+        assert!(!text.contains('\u{1b}'), "no escape sequences reach the file");
+    }
+
+    /// The prompt owns every key while it is open. A path containing `q` or
+    /// `j` must not close the screen or scroll the log out from under it.
+    #[test]
+    fn the_save_prompt_takes_the_keys_the_screen_would_otherwise_use() {
+        let mut state = run_with(50);
+        state.mark_finished();
+        render(&mut state, 40, 12);
+
+        press(&mut state, KeyCode::Char('s'));
+        assert!(state.save_path.is_some());
+
+        for c in "q/j.log".chars() {
+            assert!(matches!(press(&mut state, KeyCode::Char(c)), ScriptRunOutcome::None));
+        }
+        assert!(!state.is_scrolled_back(), "typing must not scroll");
+        let ScriptRunOutcome::Save(path) = press(&mut state, KeyCode::Enter) else {
+            panic!("Enter should hand the path to app.rs");
+        };
+        assert!(path.ends_with("q/j.log"));
+        assert!(state.save_path.is_none(), "the prompt closes on submit");
+    }
+
+    /// The log is still growing before the run ends, so a file saved mid-run
+    /// would be a truncated one.
+    #[test]
+    fn saving_is_only_offered_once_the_run_is_over() {
+        let mut state = run_with(5);
+        render(&mut state, 40, 12);
+        press(&mut state, KeyCode::Char('s'));
+        assert!(state.save_path.is_none());
+
+        state.mark_finished();
+        press(&mut state, KeyCode::Char('s'));
+        assert!(state.save_path.is_some());
+    }
+
+    #[test]
+    fn escape_abandons_the_prompt_without_saving() {
+        let mut state = run_with(5);
+        state.mark_finished();
+        render(&mut state, 40, 12);
+        press(&mut state, KeyCode::Char('s'));
+        assert!(matches!(press(&mut state, KeyCode::Esc), ScriptRunOutcome::None));
+        assert!(state.save_path.is_none());
+        assert!(matches!(press(&mut state, KeyCode::Esc), ScriptRunOutcome::Close), "Esc closes again once the prompt is gone");
+    }
+
+    /// The default has to be usable as a filename on the first Enter — script
+    /// names are free text and routinely contain slashes and spaces.
+    #[test]
+    fn the_offered_filename_is_safe_to_use_as_typed() {
+        assert_eq!(default_log_name("deploy web/prod", 1_700_000_000), "deploy-web-prod-1700000000.log");
+        assert_eq!(default_log_name("///", 42), "script-42.log");
+    }
+
+    #[test]
+    fn the_footer_reports_where_the_log_went() {
+        let mut state = run_with(2);
+        state.mark_finished();
+        state.save_succeeded("/tmp/run.log", &EN);
+        assert!(render(&mut state, 60, 12).contains("/tmp/run.log"));
+
+        state.save_failed("permission denied", &EN);
+        assert!(render(&mut state, 60, 12).contains("permission denied"));
     }
 
     /// `Wrap { trim: false }` is on, so a logical line can be several rows and
