@@ -22,6 +22,9 @@ pub struct ScriptsListState {
 pub enum ScriptsListAction {
     None,
     Run(Uuid),
+    /// Pick which servers to run it on first. `Run` stays the one-key path for
+    /// the script's own server — the overwhelmingly common case.
+    RunOn(Uuid),
     Add,
     Edit(Uuid),
     Delete(Uuid),
@@ -55,6 +58,10 @@ impl ScriptsListState {
             KeyCode::Enter => scripts
                 .get(self.selected)
                 .map(|s| ScriptsListAction::Run(s.id))
+                .unwrap_or(ScriptsListAction::None),
+            KeyCode::Char('m') => scripts
+                .get(self.selected)
+                .map(|s| ScriptsListAction::RunOn(s.id))
                 .unwrap_or(ScriptsListAction::None),
             KeyCode::Char('a') => ScriptsListAction::Add,
             KeyCode::Char('e') => scripts

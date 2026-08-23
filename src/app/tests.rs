@@ -80,6 +80,7 @@ fn screen_name(app: &App) -> &'static str {
             Screen::Settings(_) => "Settings",
             Screen::TotpPrompt(_) => "TotpPrompt",
             Screen::Scripts(_) => "Scripts",
+            Screen::ScriptTargets(_) => "ScriptTargets",
             Screen::ScriptForm(_) => "ScriptForm",
             Screen::ConfirmDeleteScript { .. } => "ConfirmDeleteScript",
             Screen::ScriptRun(_) => "ScriptRun",
@@ -343,4 +344,69 @@ fn only_esc_and_ctrl_c_stop_a_run() {
     assert!(!is_cancel_key(KeyEvent::from(KeyCode::Char('c'))), "a bare c is output, not a cancel");
     assert!(!is_cancel_key(KeyEvent::from(KeyCode::Enter)));
     assert!(!is_cancel_key(KeyEvent::from(KeyCode::Char('q'))));
+}
+
+// ---------------------------------------------------------------------------
+// Running a script on several servers (#21)
+// ---------------------------------------------------------------------------
+
+/// `m` is the only way to a fleet run, and it has to open with the script's own
+/// server already checked — `Enter` and `m` must agree about the default.
+#[test]
+fn m_on_the_script_list_opens_the_target_picker() {
+    let (_dir, mut app) = password_vault(|c| {
+        let mut e = entry("web-1");
+        e.scripts.push(Script { id: Uuid::new_v4(), name: "deploy".into(), run_on_connect: false, steps: Vec::new() });
+        c.servers.push(e);
+        c.servers.push(entry("web-2"));
+    });
+    type_password(&mut app, PASSWORD);
+
+    press(&mut app, char_key('s'));
+    press(&mut app, char_key('m'));
+    assert_eq!(screen_name(&app), "ScriptTargets");
+
+    let origin = unlocked(&app).config.servers[0].id;
+    match &unlocked(&app).screen {
+        Screen::ScriptTargets(state) => assert_eq!(state.origin_server_id, origin),
+        _ => unreachable!(),
+    }
+
+    press(&mut app, KeyEvent::from(KeyCode::Esc));
+    assert_eq!(screen_name(&app), "Scripts", "cancelling goes back to the script it came from");
+}
+
+/// The picker resolves to a `RunScript` carrying its targets, and `Enter` on the
+/// list resolves to the same step with one — the two paths share a flow, so a
+/// divergence here would be a second code path nobody tests.
+#[test]
+fn both_run_paths_resolve_to_the_same_step() {
+    let (_dir, mut app) = password_vault(|c| {
+        let mut e = entry("web-1");
+        e.scripts.push(Script { id: Uuid::new_v4(), name: "deploy".into(), run_on_connect: false, steps: Vec::new() });
+        c.servers.push(e);
+        c.servers.push(entry("web-2"));
+    });
+    type_password(&mut app, PASSWORD);
+    let (origin, second) = (unlocked(&app).config.servers[0].id, unlocked(&app).config.servers[1].id);
+
+    press(&mut app, char_key('s'));
+    match app.resolve_next_step(KeyEvent::from(KeyCode::Enter)) {
+        NextStep::RunScript { origin_server_id, targets, .. } => {
+            assert_eq!(origin_server_id, origin);
+            assert_eq!(targets, vec![origin], "Enter still runs on the script's own server and nowhere else");
+        }
+        _ => panic!("Enter on the script list must run the script"),
+    }
+
+    press(&mut app, char_key('m'));
+    press(&mut app, KeyEvent::from(KeyCode::Down));
+    press(&mut app, char_key(' '));
+    match app.resolve_next_step(KeyEvent::from(KeyCode::Enter)) {
+        NextStep::RunScript { origin_server_id, targets, .. } => {
+            assert_eq!(origin_server_id, origin, "the definition still comes from where it lives");
+            assert_eq!(targets, vec![origin, second]);
+        }
+        _ => panic!("the picker must run the script"),
+    }
 }

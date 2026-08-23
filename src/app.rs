@@ -23,6 +23,7 @@ use crate::tui::confirm::{ConfirmOutcome, ConfirmState};
 use crate::tui::main_menu::{MainMenuAction, MainMenuState};
 use crate::tui::script_form::{FormMode as ScriptFormMode, ScriptFormData, ScriptFormOutcome, ScriptFormState};
 use crate::tui::script_run::{ScriptRunOutcome, ScriptRunState};
+use crate::tui::script_targets::{ScriptTargetsOutcome, ScriptTargetsState};
 use crate::tui::scripts_list::{ScriptsListAction, ScriptsListState};
 use crate::tui::server_form::{FormMode, FormOutcome, ServerFormData, ServerFormState};
 use crate::tui::settings::{SettingsOutcome, SettingsState};
@@ -45,6 +46,9 @@ pub(crate) enum Screen {
     /// when the vault has "Password + TOTP (2FA)" enabled.
     TotpPrompt(TotpPromptState),
     Scripts(ScriptsListState),
+    /// Which servers a script is about to run on. Ephemeral: nothing it holds
+    /// is persisted (see `tui::script_targets`).
+    ScriptTargets(ScriptTargetsState),
     ScriptForm(ScriptFormState),
     ConfirmDeleteScript { server_id: Uuid, script_id: Uuid, state: ConfirmState },
     ScriptRun(ScriptRunState),
@@ -64,6 +68,7 @@ pub(crate) fn help_topic(screen: &Screen) -> HelpTopic {
         Screen::Settings(_) => HelpTopic::Settings,
         Screen::TotpPrompt(_) => HelpTopic::TotpPrompt,
         Screen::Scripts(_) => HelpTopic::ScriptList,
+        Screen::ScriptTargets(_) => HelpTopic::ScriptTargets,
         Screen::ScriptForm(_) => HelpTopic::ScriptForm,
         Screen::ScriptRun(_) => HelpTopic::ScriptRun,
         Screen::FileBrowser(_) => HelpTopic::FileBrowser,
@@ -164,7 +169,12 @@ pub(crate) enum NextStep {
     ConfirmDeleteScriptYes,
     ConfirmDeleteScriptNo,
     CycleSort,
-    RunScript(Uuid, Uuid),
+    GoScriptTargets(Uuid),
+    ScriptTargetsCancel,
+    /// The script's own server, the script, and every server to run it on. A
+    /// plain `Enter` on the script list is this with a one-element list, so
+    /// there is one flow rather than two.
+    RunScript { origin_server_id: Uuid, script_id: Uuid, targets: Vec<Uuid> },
     ScriptRunSave(String),
     ScriptRunClose,
     GoFiles(Uuid),
@@ -465,6 +475,7 @@ impl App {
                                 .unwrap_or(&[]);
                             state.render(frame, area, scripts, status.as_deref(), strings);
                         }
+                        Screen::ScriptTargets(state) => state.render(frame, area, &config.servers, strings),
                         Screen::ScriptForm(state) => state.render(frame, area, strings),
                         Screen::ConfirmDeleteScript { state, .. } => state.render(frame, area, strings),
                         Screen::ScriptRun(state) => state.render(frame, area, strings),
@@ -849,7 +860,9 @@ impl App {
         };
         match next {
             NextStep::Connect(id) => self.connect_flow(terminal, id).await?,
-            NextStep::RunScript(server_id, script_id) => self.run_script_flow(terminal, server_id, script_id).await?,
+            NextStep::RunScript { origin_server_id, script_id, targets } => {
+                self.run_script_flow(terminal, origin_server_id, script_id, targets).await?
+            }
             NextStep::GoFiles(id) => self.open_files_flow(terminal, id).await?,
             NextStep::FilesOpenRemote(path) => self.list_remote_flow(terminal, Some(path)).await?,
             NextStep::FilesRefresh => self.list_remote_flow(terminal, None).await?,
@@ -942,12 +955,24 @@ impl App {
                         .unwrap_or(&[]);
                     match state.handle_key(key, scripts) {
                         ScriptsListAction::None => NextStep::None,
-                        ScriptsListAction::Run(script_id) => NextStep::RunScript(server_id, script_id),
+                        ScriptsListAction::Run(script_id) => {
+                            NextStep::RunScript { origin_server_id: server_id, script_id, targets: vec![server_id] }
+                        }
+                        ScriptsListAction::RunOn(script_id) => NextStep::GoScriptTargets(script_id),
                         ScriptsListAction::Add => NextStep::GoScriptAdd,
                         ScriptsListAction::Edit(script_id) => NextStep::GoScriptEdit(script_id),
                         ScriptsListAction::Delete(script_id) => NextStep::GoScriptDeleteConfirm(script_id),
                         ScriptsListAction::Back => NextStep::ScriptsBack,
                         ScriptsListAction::Help => NextStep::Help,
+                    }
+                }
+                Screen::ScriptTargets(state) => {
+                    let (origin_server_id, script_id) = (state.origin_server_id, state.script_id);
+                    match state.handle_key(key, &u.config.servers) {
+                        ScriptTargetsOutcome::None => NextStep::None,
+                        ScriptTargetsOutcome::Cancel => NextStep::ScriptTargetsCancel,
+                        ScriptTargetsOutcome::Help => NextStep::Help,
+                        ScriptTargetsOutcome::Run(targets) => NextStep::RunScript { origin_server_id, script_id, targets },
                     }
                 }
                 Screen::ScriptForm(state) => match state.handle_key(key, strings) {
@@ -1145,7 +1170,34 @@ impl App {
                 }
             }),
             NextStep::CycleSort => self.cycle_server_sort(),
-            NextStep::RunScript(server_id, script_id) => return Ok(Some(NextStep::RunScript(server_id, script_id))),
+            NextStep::GoScriptTargets(script_id) => self.with_unlocked(|u| {
+                let ctx = match &u.screen {
+                    Screen::Scripts(state) => u
+                        .config
+                        .servers
+                        .iter()
+                        .find(|s| s.id == state.server_id)
+                        .and_then(|e| e.scripts.iter().find(|s| s.id == script_id))
+                        .map(|script| (state.server_id, script.name.clone())),
+                    _ => None,
+                };
+                if let Some((server_id, script_name)) = ctx {
+                    u.screen = Screen::ScriptTargets(ScriptTargetsState::new(server_id, script_id, script_name));
+                }
+            }),
+            NextStep::ScriptTargetsCancel => self.with_unlocked(|u| {
+                let ctx = match &u.screen {
+                    Screen::ScriptTargets(state) => Some(state.origin_server_id),
+                    _ => None,
+                };
+                if let Some(server_id) = ctx {
+                    let server_name = u.config.servers.iter().find(|s| s.id == server_id).map(|e| e.name.clone()).unwrap_or_default();
+                    u.screen = Screen::Scripts(ScriptsListState::new(server_id, server_name));
+                }
+            }),
+            NextStep::RunScript { origin_server_id, script_id, targets } => {
+                return Ok(Some(NextStep::RunScript { origin_server_id, script_id, targets }));
+            }
             NextStep::GoFiles(id) => return Ok(Some(NextStep::GoFiles(id))),
             NextStep::FilesOpenRemote(path) => return Ok(Some(NextStep::FilesOpenRemote(path))),
             NextStep::FilesRefresh => return Ok(Some(NextStep::FilesRefresh)),
@@ -1629,83 +1681,131 @@ impl App {
     /// PTY here, so ratatui keeps rendering throughout, and the live log
     /// screen is updated straight from `script_runner::run_script`'s
     /// `on_event` callback as it fires.
-    async fn run_script_flow(&mut self, terminal: &mut TerminalGuard, server_id: Uuid, script_id: Uuid) -> Result<()> {
+    /// Runs one script on one or more servers, in the order they were picked.
+    ///
+    /// **Sequential, never concurrent.** The run screen is a single stream with
+    /// one scroll position and one cancel key. Interleaving several hosts into
+    /// it would mean tagging every output chunk with where it came from and a
+    /// cancel story per connection, for a feature whose whole point is being
+    /// able to read what happened.
+    ///
+    /// The definition comes from `origin_server_id` — a target needs no copy of
+    /// its own — but **each target expands its own placeholders**. Expanding
+    /// once against the origin would send one host's name to all the others,
+    /// which is exactly what `ScriptVars` exists to prevent.
+    ///
+    /// A plain `Enter` on the script list arrives here with a one-element
+    /// `targets`, so there is one flow rather than two.
+    async fn run_script_flow(
+        &mut self,
+        terminal: &mut TerminalGuard,
+        origin_server_id: Uuid,
+        script_id: Uuid,
+        targets: Vec<Uuid>,
+    ) -> Result<()> {
         let strings = self.lang.strings();
+        // Everything that crosses the `.await` is built here, while the entries
+        // are still borrowed — the `NextStep` rule. What comes out owns its
+        // credentials and its already-expanded commands.
         let prepared = match &self.state {
-            AppState::Unlocked(u) => u.config.servers.iter().find(|s| s.id == server_id).and_then(|e| {
-                let script = ScriptVars::from_entry(e).expand_script(e.scripts.iter().find(|s| s.id == script_id)?);
-                Some((ssh::Target::from_entry(e), e.name.clone(), script))
-            }),
+            AppState::Unlocked(u) => {
+                let origin = u.config.servers.iter().find(|s| s.id == origin_server_id);
+                origin.and_then(|origin| {
+                    let definition = origin.scripts.iter().find(|s| s.id == script_id)?;
+                    let runs: Vec<(String, ssh::Target, Script)> = targets
+                        .iter()
+                        .filter_map(|id| u.config.servers.iter().find(|s| s.id == *id))
+                        .map(|e| (e.name.clone(), ssh::Target::from_entry(e), ScriptVars::from_entry(e).expand_script(definition)))
+                        .collect();
+                    Some((origin.name.clone(), definition.name.clone(), runs))
+                })
+            }
             AppState::Setup(_) | AppState::Unopenable | AppState::CannotOpen { .. } | AppState::Locked(_) | AppState::LockedTotpDaily(_) => None,
         };
-        let Some((target, server_name, script)) = prepared else {
+        let Some((origin_name, script_name, runs)) = prepared.filter(|(_, _, runs)| !runs.is_empty()) else {
             return Ok(());
         };
 
-        let mut run_state = ScriptRunState::new(server_id, script_id, server_name, script.name.clone());
+        let mut run_state = ScriptRunState::new(origin_server_id, script_id, origin_name, script_name, runs.len());
+        let mut cancelled = false;
 
-        match ssh::connect(&target).await {
-            Ok(mut connected) => {
-                // The events travel through a channel rather than straight
-                // into `run_state`, and that is what makes the whole thing
-                // work: the run future must not borrow the screen, or the
-                // `select!` arm that redraws and reads keys could not touch it
-                // either.
-                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-                let cancelled = {
-                    let mut run = std::pin::pin!(script_runner::run_script(&mut connected.handle, &script, move |event| {
-                        let _ = tx.send(event.into_owned());
-                    }));
-                    let mut cancelled = false;
-                    loop {
-                        tokio::select! {
-                            // A finished run wins over a tick that came due in
-                            // the same wakeup; the leftover events are drained
-                            // below either way.
-                            biased;
-                            _ = &mut run => break,
-                            Some(event) = rx.recv() => {
-                                apply_run_event(event, &mut run_state, strings);
-                                // Whatever else is already queued goes on in
-                                // the same pass — one redraw per batch rather
-                                // than one per output chunk.
-                                while let Ok(more) = rx.try_recv() {
-                                    apply_run_event(more, &mut run_state, strings);
+        for (server_name, target, script) in runs {
+            run_state.server_started(&server_name);
+            // Drawn before the connect, not after: a DNS lookup or a TCP
+            // timeout can take seconds, and without this the screen would sit
+            // on the previous host's output with no sign of which one it had
+            // moved on to.
+            draw_run(terminal, &mut run_state, strings);
+
+            match ssh::connect(&target).await {
+                Ok(mut connected) => {
+                    // The events travel through a channel rather than straight
+                    // into `run_state`, and that is what makes the whole thing
+                    // work: the run future must not borrow the screen, or the
+                    // `select!` arm that redraws and reads keys could not touch
+                    // it either.
+                    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                    {
+                        let mut run = std::pin::pin!(script_runner::run_script(&mut connected.handle, &script, move |event| {
+                            let _ = tx.send(event.into_owned());
+                        }));
+                        loop {
+                            tokio::select! {
+                                // A finished run wins over a tick that came due
+                                // in the same wakeup; the leftover events are
+                                // drained below either way.
+                                biased;
+                                _ = &mut run => break,
+                                Some(event) = rx.recv() => {
+                                    apply_run_event(event, &mut run_state, strings);
+                                    // Whatever else is already queued goes on in
+                                    // the same pass — one redraw per batch
+                                    // rather than one per output chunk.
+                                    while let Ok(more) = rx.try_recv() {
+                                        apply_run_event(more, &mut run_state, strings);
+                                    }
+                                    draw_run(terminal, &mut run_state, strings);
                                 }
-                                draw_run(terminal, &mut run_state, strings);
-                            }
-                            // Polling on a timer rather than an `EventStream`:
-                            // `event::poll(ZERO)` is what `transfer_flow`
-                            // already uses, needs no extra dependency, and
-                            // 50 ms is well under what a keypress feels like.
-                            _ = tokio::time::sleep(KEY_POLL_INTERVAL) => {
-                                if poll_run_keys(&mut run_state) {
-                                    cancelled = true;
-                                    break;
+                                // Polling on a timer rather than an
+                                // `EventStream`: `event::poll(ZERO)` is what
+                                // `transfer_flow` already uses, needs no extra
+                                // dependency, and 50 ms is well under what a
+                                // keypress feels like.
+                                _ = tokio::time::sleep(KEY_POLL_INTERVAL) => {
+                                    if poll_run_keys(&mut run_state) {
+                                        cancelled = true;
+                                        break;
+                                    }
+                                    draw_run(terminal, &mut run_state, strings);
                                 }
-                                draw_run(terminal, &mut run_state, strings);
                             }
                         }
                     }
-                    cancelled
-                };
 
-                // Events the run emitted just before it ended (or before the
-                // cancel) are still in the channel. Dropping them would lose
-                // the last step's exit code.
-                while let Ok(event) = rx.try_recv() {
-                    apply_run_event(event, &mut run_state, strings);
+                    // Events the run emitted just before it ended (or before
+                    // the cancel) are still in the channel. Dropping them would
+                    // lose the last step's exit code.
+                    while let Ok(event) = rx.try_recv() {
+                        apply_run_event(event, &mut run_state, strings);
+                    }
                 }
+                // Not fatal, and not `connect_error`: the hosts that *do*
+                // answer are the reason someone started a fleet run, so an
+                // unreachable one is logged and the loop moves on. A cancel is
+                // the only thing that stops everything.
+                Err(e) => run_state.server_connect_error(&format!("{}{e}", strings.connect_error_prefix), strings),
+            }
 
-                if cancelled {
-                    run_state.mark_cancelled(strings);
-                } else {
-                    run_state.mark_finished();
-                }
+            if cancelled {
+                break;
             }
-            Err(e) => {
-                run_state.connect_error(&format!("{}{e}", strings.connect_error_prefix), strings);
-            }
+            draw_run(terminal, &mut run_state, strings);
+        }
+
+        if cancelled {
+            run_state.mark_cancelled(strings);
+        } else {
+            run_state.mark_finished();
         }
 
         self.with_unlocked(|u| {

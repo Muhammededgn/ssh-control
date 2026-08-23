@@ -6,6 +6,7 @@ pub mod main_menu;
 pub mod overwrite;
 pub mod script_form;
 pub mod script_run;
+pub mod script_targets;
 pub mod scripts_list;
 pub mod server_form;
 pub mod setup;

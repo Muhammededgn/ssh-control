@@ -17,10 +17,16 @@ use crate::tui::widgets::{self, wrapped_rows};
 /// on its own, it's a plain data sink rendered by the normal draw loop too
 /// once the run finishes (waiting for the user to close it).
 pub struct ScriptRunState {
+    /// The entry the script definition lives on — where `Esc` goes back to,
+    /// which is not necessarily any of the servers it just ran on.
     pub server_id: Uuid,
     pub script_id: Uuid,
     pub server_name: String,
     pub script_name: String,
+    /// How many servers this run covers, and which one it is on. `1` is the
+    /// ordinary single-host run and reads exactly as it always did.
+    total_targets: usize,
+    current_target: usize,
     log: Vec<Line<'static>>,
     partial: String,
     pub finished: bool,
@@ -67,12 +73,14 @@ fn default_log_name(script_name: &str, now_unix: u64) -> String {
 }
 
 impl ScriptRunState {
-    pub fn new(server_id: Uuid, script_id: Uuid, server_name: String, script_name: String) -> Self {
+    pub fn new(server_id: Uuid, script_id: Uuid, server_name: String, script_name: String, total_targets: usize) -> Self {
         Self {
             server_id,
             script_id,
             server_name,
             script_name,
+            total_targets,
+            current_target: 0,
             log: Vec::new(),
             partial: String::new(),
             finished: false,
@@ -81,6 +89,26 @@ impl ScriptRunState {
             save_path: None,
             save_result: None,
         }
+    }
+
+    /// Opens one server's section of the log.
+    ///
+    /// Only drawn for a fleet run: with a single target the panel title already
+    /// names the server, and a `(1/1)` rule over every ordinary run would be a
+    /// row of noise where there used to be output.
+    pub fn server_started(&mut self, name: &str) {
+        self.current_target += 1;
+        if self.total_targets <= 1 {
+            return;
+        }
+        self.flush_partial();
+        if self.current_target > 1 {
+            self.log.push(Line::from(""));
+        }
+        self.log.push(Line::from(Span::styled(
+            format!("── {name} ({}/{}) ──", self.current_target, self.total_targets),
+            Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
+        )));
     }
 
     pub fn step_started(&mut self, command: &str) {
@@ -136,11 +164,20 @@ impl ScriptRunState {
         )));
     }
 
-    pub fn connect_error(&mut self, message: &str, strings: &Strings) {
+    /// A host that could not be reached, in a run that has more hosts to try.
+    ///
+    /// Deliberately does **not** set `finished`: the servers that *do* answer
+    /// are the reason someone started a fleet run, and one unreachable box must
+    /// not end it. Only `Esc`/`Ctrl+C` stops everything.
+    pub fn server_connect_error(&mut self, message: &str, strings: &Strings) {
         self.log.push(Line::from(Span::styled(
             format!("{}{message}", strings.log_error_prefix),
             Style::default().fg(theme::error()),
         )));
+    }
+
+    pub fn connect_error(&mut self, message: &str, strings: &Strings) {
+        self.server_connect_error(message, strings);
         self.finished = true;
     }
 
@@ -310,7 +347,15 @@ impl ScriptRunState {
 
         let body = chrome::render(frame, area, strings.script_run_title, vec![footer_line], strings);
 
-        let title = format!("{}— {} / {} ", strings.script_run_title, self.server_name, self.script_name);
+        // A fleet run names its progress rather than one server: the section
+        // rules in the log say which host each block belongs to, and a title
+        // stuck on the first of five would be actively misleading.
+        let subject = if self.total_targets > 1 {
+            format!("{}/{}{}", self.current_target.max(1), self.total_targets, strings.script_run_targets_suffix)
+        } else {
+            self.server_name.clone()
+        };
+        let title = format!("{}— {subject} / {} ", strings.script_run_title, self.script_name);
         let block = widgets::panel(&title);
         // Stashed before anything reads it, and taken from the block itself
         // rather than guessed: `total_rows` and the paging keys both measure
@@ -332,7 +377,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     fn run_with(lines: usize) -> ScriptRunState {
-        let mut state = ScriptRunState::new(Uuid::new_v4(), Uuid::new_v4(), "host".into(), "deploy".into());
+        let mut state = ScriptRunState::new(Uuid::new_v4(), Uuid::new_v4(), "host".into(), "deploy".into(), 1);
         for i in 0..lines {
             state.output(format!("line-{i}\n").as_bytes());
         }
@@ -352,6 +397,50 @@ mod tests {
 
     fn press(state: &mut ScriptRunState, code: KeyCode) -> ScriptRunOutcome {
         state.handle_key(KeyEvent::from(code))
+    }
+
+    /// A fleet run's log has to say which host each block came from — the
+    /// output of three `systemctl restart`s is otherwise indistinguishable.
+    #[test]
+    fn a_fleet_run_names_every_host_in_the_log() {
+        let mut state = ScriptRunState::new(Uuid::new_v4(), Uuid::new_v4(), "web-1".into(), "deploy".into(), 3);
+        for host in ["web-1", "web-2", "db-1"] {
+            state.server_started(host);
+            state.output(b"ok\n");
+        }
+
+        let text = state.plain_text();
+        for host in ["web-1", "web-2", "db-1"] {
+            assert!(text.contains(host), "the saved log must name {host}");
+        }
+        assert!(text.contains("(2/3)"), "and say where in the run it is");
+    }
+
+    /// A single-host run is byte for byte what it always was: the panel title
+    /// already names the server, so a `(1/1)` rule would be pure noise.
+    #[test]
+    fn a_single_host_run_gets_no_section_rule() {
+        let mut state = ScriptRunState::new(Uuid::new_v4(), Uuid::new_v4(), "web-1".into(), "deploy".into(), 1);
+        state.server_started("web-1");
+        state.output(b"ok\n");
+
+        assert_eq!(state.plain_text(), "ok\n");
+    }
+
+    /// One unreachable box must not end a run over five: the hosts that do
+    /// answer are the reason it was started.
+    #[test]
+    fn an_unreachable_host_does_not_finish_the_run() {
+        let mut state = ScriptRunState::new(Uuid::new_v4(), Uuid::new_v4(), "web-1".into(), "deploy".into(), 2);
+        state.server_started("web-1");
+        state.server_connect_error("no route to host", &EN);
+
+        assert!(!state.finished, "the next host still has to be tried");
+        assert!(state.plain_text().contains("no route to host"));
+
+        // Whereas the single-host form still ends it — there is nothing left.
+        state.connect_error("no route to host", &EN);
+        assert!(state.finished);
     }
 
     /// The issue's acceptance criterion: a long run has to be readable from the
@@ -515,7 +604,7 @@ mod tests {
     /// row would make `Home` stop short of the real top.
     #[test]
     fn a_single_very_long_line_is_scrollable() {
-        let mut state = ScriptRunState::new(Uuid::new_v4(), Uuid::new_v4(), "host".into(), "deploy".into());
+        let mut state = ScriptRunState::new(Uuid::new_v4(), Uuid::new_v4(), "host".into(), "deploy".into(), 1);
         state.output("start ".as_bytes());
         state.output("filler ".repeat(200).as_bytes());
         state.output(b"end\n");
@@ -550,7 +639,7 @@ mod tests {
     /// a cancel usually lands in the middle of one.
     #[test]
     fn a_half_written_line_is_flushed_by_the_cancel() {
-        let mut state = ScriptRunState::new(Uuid::new_v4(), Uuid::new_v4(), "host".into(), "deploy".into());
+        let mut state = ScriptRunState::new(Uuid::new_v4(), Uuid::new_v4(), "host".into(), "deploy".into(), 1);
         state.output(b"partial output with no newline");
         state.mark_cancelled(&EN);
         assert!(state.plain_text().contains("partial output with no newline"));
