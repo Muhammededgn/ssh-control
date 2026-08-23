@@ -75,6 +75,15 @@ pub enum AppError {
     #[error("{message} ({path})")]
     SftpStatus { code: u32, path: String, message: String },
 
+    /// A message already written for the person who typed the command.
+    ///
+    /// Displays as itself, with no `variant:` prefix — `cli::main` prints it
+    /// after `ssh-control: `, and "ssh-control: validation error: no server
+    /// named 'web-2'" reads like a bug report rather than an answer. Only the
+    /// CLI builds these; nothing inside the app should reach for it.
+    #[error("{0}")]
+    Cli(String),
+
     /// The OS credential store could not be reached or did not hold what was
     /// expected. Deliberately distinct from a missing entry, which is a normal
     /// outcome that means "this device is not enrolled" rather than a failure.

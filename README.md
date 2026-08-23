@@ -82,15 +82,15 @@ OS. CMake and the C compiler are for `aws-lc-sys`, which `russh` depends on.
 Run `ssh-control`. On first launch you set a master password (minimum 8
 characters); afterwards it asks for that password to unlock.
 
-`--version` and `--help` are the only flags; everything else is configured from
-inside the app. It is an interactive TUI and needs a terminal, so it says so
-rather than failing obscurely when piped or run from a service manager.
+Everything is configured from inside the app. It is an interactive TUI and
+needs a terminal, so it says so rather than failing obscurely when piped or run
+from a service manager.
 
 | Screen | Keys |
 |---|---|
 | Server list | `Enter` connect · `/` search · `a` add · `e` edit · `d` delete · `s` scripts · `f` files · `l` lock · `F1` settings · `q` quit |
 | Forms | `Tab` next field · `Ctrl+Enter` save · `Esc` cancel |
-| Script list | `Enter` run · `a` add · `e` edit · `d` delete · `Esc` back |
+| Script list | `Enter` run · `m` run on several servers · `a` add · `e` edit · `d` delete · `Esc` back |
 | Step editor | `←`/`→` change condition · `Ctrl+↑`/`Ctrl+↓` reorder · `Esc` cancel |
 | Run log | `↑`/`↓` `PgUp`/`PgDn` `Home` scroll · `End` follow the tail |
 | File browser | `Tab` switch pane · `Enter` open · `Backspace` up · `Space` mark · `t` transfer · `r` refresh · `.` hidden files · `Esc` back |
@@ -99,6 +99,35 @@ rather than failing obscurely when piped or run from a service manager.
 
 While `/` is open every key is filter text, so the single-letter shortcuts are
 unavailable until `Enter` (connect, keeping the filter) or `Esc` (clear it).
+
+### From a shell
+
+Two subcommands, so a vault built in the TUI is reachable from an alias or a
+script. With no subcommand the TUI launches exactly as before.
+
+```sh
+ssh-control list                 # the servers, never the credentials
+ssh-control connect prod-web     # unlock, then straight to the shell
+ssh-control --config ~/work.enc list
+```
+
+`list` prints aligned columns to a terminal and tab-separated fields when it is
+piped, so `ssh-control list | cut -f2` gives `user@host:port`. `connect` matches
+the name exactly, ignoring case, and refuses rather than guessing if more than
+one server matches.
+
+Both ask for whatever the vault's security mode needs — nothing at all in the
+passwordless modes, otherwise a password and/or an authenticator code. The
+password is read with the echo off from a terminal, or as a line from stdin
+when there is no terminal, so `ssh-control list < password-file` works from
+cron. `connect` still needs a terminal on stdin, because that is what it hands
+to the remote shell.
+
+Creating a vault, converting one from the old TOTP-only mode, and changing the
+security mode stay in the TUI: they are multi-step and have QR codes in them.
+
+`--config <path>` moves the whole set of files, not just the vault — the
+preferences, the credential-store id and the lock are all named relative to it.
 
 ## Transferring files
 
@@ -131,6 +160,7 @@ Linux), created `0700` with `0600` files:
 |---|---|
 | `config.enc` | The encrypted vault: servers, credentials, scripts, TOTP secret |
 | `prefs.lang` | UI language code — plain text, read before unlocking |
+| `prefs.theme` | Colour preset — plain text, read before unlocking, for the same reason |
 | `vault-id` | An identifier naming this vault's OS credential-store entry — plain text, not a secret |
 | `config.enc.lock` | Always empty. Only one running instance may hold the vault open, and this is what they contend on |
 

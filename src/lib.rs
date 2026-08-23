@@ -11,10 +11,12 @@ compile_error!(
 );
 
 pub mod app;
+pub mod cli;
 pub mod config;
 pub mod crypto;
 pub mod error;
 pub mod i18n;
+pub mod session;
 pub mod ssh;
 pub mod terminal;
 pub mod totp;

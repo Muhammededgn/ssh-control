@@ -15,7 +15,8 @@ use crate::crypto::kdf::KdfParams;
 use crate::error::{AppError, Result};
 use crate::i18n::{Lang, Strings};
 use crate::ssh;
-use crate::ssh::script_runner::{self, OwnedRunEvent, RunEvent, ScriptVars};
+use crate::session;
+use crate::ssh::script_runner::{self, OwnedRunEvent, ScriptVars};
 use crate::terminal::TerminalGuard;
 use crate::totp::{self, AuthMode};
 use crate::tui::chrome;
@@ -613,7 +614,7 @@ impl App {
     /// Every outcome other than a fresh, valid code lands on the password
     /// screen. That is the whole design: the code is convenience, the password
     /// is the thing that actually holds.
-    fn try_totp_daily_unlock(&mut self, code: &str) {
+    pub(crate) fn try_totp_daily_unlock(&mut self, code: &str) {
         let strings = self.lang.strings();
 
         let Ok(device_store) = self.store.device_store() else {
@@ -675,7 +676,7 @@ impl App {
         self.state = AppState::Locked(unlock);
     }
 
-    fn try_unlock(&mut self, password: &str, first_run: bool) {
+    pub(crate) fn try_unlock(&mut self, password: &str, first_run: bool) {
         let result = if first_run { self.store.init(password) } else { self.store.load(password) };
         match result {
             Ok(unlocked) => {
@@ -1575,7 +1576,7 @@ impl App {
         }
     }
 
-    fn verify_totp_prompt(&mut self, code: &str) {
+    pub(crate) fn verify_totp_prompt(&mut self, code: &str) {
         let strings = self.lang.strings();
         let AppState::Unlocked(u) = &mut self.state else {
             return;
@@ -1617,28 +1618,15 @@ impl App {
 
         let status_msg = match connect_result {
             Ok(mut connected) => {
-                if let ssh::HostKeyOutcome::FirstConnect { fingerprint } = &connected.host_key_outcome
-                    && let AppState::Unlocked(u) = &mut self.state {
-                        if let Some(e) = u.config.servers.iter_mut().find(|s| s.id == id) {
-                            e.host_key_fingerprint = Some(fingerprint.clone());
-                        }
-                        let _ = self.store.save(&u.config, &u.master_key, &u.slots);
-                    }
-
-                // Best-effort: a probe failure (restricted shell, no tools
-                // installed, timeout) never blocks the interactive session.
-                //
-                // The timestamp is stamped either way, and outside the `if let`
-                // for that reason — a host whose probe never succeeds is still
-                // a host the user connects to, and would otherwise show as
-                // never having been reached.
-                let info = ssh::sysinfo::fetch(&mut connected.handle).await.ok();
+                // What a connect teaches the vault is decided in one place, so
+                // `cli::connect` records exactly the same things (see
+                // `crate::session`). `observe` borrows only the connection, so
+                // the `&mut self.state` below is taken *after* the await
+                // rather than held across it.
+                let record = session::observe(&mut connected).await;
                 if let AppState::Unlocked(u) = &mut self.state {
                     if let Some(e) = u.config.servers.iter_mut().find(|s| s.id == id) {
-                        e.last_connected_unix = Some(device::now_unix());
-                        if info.is_some() {
-                            e.system_info = info;
-                        }
+                        record.apply_to(e);
                     }
                     let _ = self.store.save(&u.config, &u.master_key, &u.slots);
                 }
@@ -1650,7 +1638,7 @@ impl App {
                 for script in &on_connect_scripts {
                     let mut partial = String::new();
                     script_runner::run_script(&mut connected.handle, script, |event| {
-                        print_script_event_plain(event, strings, &mut partial);
+                        session::print_script_event_plain(event, strings, &mut partial);
                     })
                     .await;
                 }
@@ -2432,52 +2420,6 @@ fn poll_run_keys(run_state: &mut ScriptRunState) -> bool {
     cancel
 }
 
-/// Plain (non-TUI) sink for `run_on_connect` scripts, since they execute
-/// while the terminal is suspended for the interactive SSH session — see
-/// `TerminalGuard::suspend`. Raw mode is never toggled off process-wide, so
-/// line endings must be written as `\r\n` explicitly or output staircases.
-fn print_script_event_plain(event: RunEvent, strings: &Strings, partial: &mut String) {
-    use std::io::Write;
-    let mut out = std::io::stdout();
-
-    match event {
-        RunEvent::StepStarted { command, .. } => {
-            let _ = write!(out, "$ {command}\r\n");
-        }
-        RunEvent::Output { chunk, .. } => {
-            partial.push_str(&String::from_utf8_lossy(chunk));
-            while let Some(pos) = partial.find('\n') {
-                let line: String = partial.drain(..=pos).collect();
-                let _ = write!(out, "{}\r\n", line.trim_end_matches(['\r', '\n']));
-            }
-        }
-        RunEvent::StepFinished { exit_code, .. } => {
-            if !partial.is_empty() {
-                let line = std::mem::take(partial);
-                let _ = write!(out, "{line}\r\n");
-            }
-            let _ = write!(out, "[{}{exit_code}]\r\n", strings.log_exit_prefix);
-        }
-        RunEvent::StepSkipped { .. } => {
-            let _ = write!(out, "{}\r\n", strings.log_skipped);
-        }
-        RunEvent::StepError { message, .. } => {
-            if !partial.is_empty() {
-                let line = std::mem::take(partial);
-                let _ = write!(out, "{line}\r\n");
-            }
-            let _ = write!(out, "{}{message}\r\n", strings.log_error_prefix);
-        }
-        RunEvent::StepTimedOut { seconds, .. } => {
-            if !partial.is_empty() {
-                let line = std::mem::take(partial);
-                let _ = write!(out, "{line}\r\n");
-            }
-            let _ = write!(out, "{}{seconds}{}\r\n", strings.log_timed_out_prefix, strings.log_timed_out_suffix);
-        }
-    }
-    let _ = out.flush();
-}
 
 /// The state-machine tests live in `src/app/tests.rs` rather than under
 /// `tests/`: an integration test only ever sees the crate's `pub` API, and
