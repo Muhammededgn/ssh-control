@@ -36,7 +36,7 @@ use crate::tui::overwrite::{Decision, OverwriteChoice, OverwriteState};
 use crate::tui::totp_unlock::{TotpUnlockOutcome, TotpUnlockState};
 use crate::tui::unlock::{UnlockMode, UnlockOutcome, UnlockState};
 
-enum Screen {
+pub(crate) enum Screen {
     MainMenu(MainMenuState),
     ServerForm(ServerFormState),
     ConfirmDelete { target: Uuid, state: ConfirmState },
@@ -56,7 +56,7 @@ enum Screen {
 /// The step editor is part of `ScriptForm` as far as `Screen` is concerned, and
 /// that topic lists both its hint and the step list's, so it needs no case of
 /// its own here.
-fn help_topic(screen: &Screen) -> HelpTopic {
+pub(crate) fn help_topic(screen: &Screen) -> HelpTopic {
     match screen {
         Screen::MainMenu(_) => HelpTopic::ServerList,
         Screen::ServerForm(_) => HelpTopic::ServerForm,
@@ -76,8 +76,8 @@ fn help_topic(screen: &Screen) -> HelpTopic {
 /// Without the timestamp a message sits there until the screen changes, so a
 /// "Saved." from ten minutes ago still reads as if it describes whatever the
 /// user is looking at now.
-struct StatusMessage {
-    text: String,
+pub(crate) struct StatusMessage {
+    pub(crate) text: String,
     shown_at: Instant,
 }
 
@@ -87,19 +87,19 @@ impl StatusMessage {
     }
 }
 
-struct UnlockedState {
-    config: Config,
-    master_key: MasterKey,
-    slots: Vec<Slot>,
-    screen: Screen,
-    status: Option<StatusMessage>,
+pub(crate) struct UnlockedState {
+    pub(crate) config: Config,
+    pub(crate) master_key: MasterKey,
+    pub(crate) slots: Vec<Slot>,
+    pub(crate) screen: Screen,
+    pub(crate) status: Option<StatusMessage>,
     /// The keybinding overlay. Modal while it is up: it takes the next key to
     /// dismiss itself and hands nothing through to the screen underneath, so a
     /// key pressed to close it can never also act on the list behind it.
-    help_open: bool,
+    pub(crate) help_open: bool,
 }
 
-enum AppState {
+pub(crate) enum AppState {
     /// First run: choose a security mode and set it up.
     Setup(SetupState),
     /// Password prompt. Also where every escalation out of `LockedTotpDaily`
@@ -131,7 +131,7 @@ enum AppState {
 
 /// Actions resolved from a key event before any `.await` point, so no borrow
 /// of `self.state` needs to be held across the async `connect_flow`.
-enum NextStep {
+pub(crate) enum NextStep {
     None,
     /// `?` from a screen where it cannot be mistaken for text input.
     Help,
@@ -175,28 +175,28 @@ enum NextStep {
 }
 
 pub struct App {
-    store: ConfigStore,
-    state: AppState,
-    lang: Lang,
-    theme: Theme,
-    should_quit: bool,
+    pub(crate) store: ConfigStore,
+    pub(crate) state: AppState,
+    pub(crate) lang: Lang,
+    pub(crate) theme: Theme,
+    pub(crate) should_quit: bool,
     /// When the last key was pressed, for the idle auto-lock. Also re-stamped
     /// after every `handle_key`, so time spent inside an SSH session or a
     /// script run does not count as idle.
-    last_activity: Instant,
+    pub(crate) last_activity: Instant,
     /// The live connection the file browser lists and transfers over.
     ///
     /// A sibling of `state`, deliberately not a field inside `UnlockedState`:
     /// every remote operation awaits, and no borrow of `state` may be held
     /// across an await (see the `NextStep` pattern). As its own field it can be
     /// taken out, used across the await, and put back afterwards.
-    remote: Option<RemoteSession>,
+    pub(crate) remote: Option<RemoteSession>,
 }
 
 /// One authenticated connection plus its sftp channel. The russh handle has to
 /// be kept alive alongside the stream — dropping it closes the channel out from
 /// under the client.
-struct RemoteSession {
+pub(crate) struct RemoteSession {
     server_id: Uuid,
     #[allow(dead_code, reason = "owned to keep the channel alive for the lifetime of the sftp stream")]
     handle: russh::client::Handle<crate::ssh::client::Handler>,
@@ -480,6 +480,20 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: KeyEvent, terminal: &mut TerminalGuard) -> Result<()> {
+        if matches!(self.state, AppState::Unlocked(_)) {
+            return self.handle_unlocked_key(key, terminal).await;
+        }
+        self.handle_locked_key(key);
+        Ok(())
+    }
+
+    /// Every screen reachable before the vault is open.
+    ///
+    /// Split out from `handle_key` because none of it awaits and none of it
+    /// needs a terminal — only `draw` and the six flows behind
+    /// `handle_unlocked_key` do. That is what lets the tests drive an unlock
+    /// end to end without a `TerminalGuard` to hand them.
+    pub(crate) fn handle_locked_key(&mut self, key: KeyEvent) {
         match &mut self.state {
             AppState::Setup(setup) => match setup.handle_key(key, self.lang.strings()) {
                 SetupOutcome::None => {}
@@ -509,9 +523,9 @@ impl App {
                 TotpUnlockOutcome::Quit => self.should_quit = true,
                 TotpUnlockOutcome::Submit(code) => self.try_totp_daily_unlock(&code),
             },
-            AppState::Unlocked(_) => self.handle_unlocked_key(key, terminal).await?,
+            // Handled by `handle_key` before it ever gets here.
+            AppState::Unlocked(_) => {}
         }
-        Ok(())
     }
 
     /// Builds the slot set the chosen mode calls for and writes a brand-new
@@ -826,6 +840,33 @@ impl App {
     }
 
     async fn handle_unlocked_key(&mut self, key: KeyEvent, terminal: &mut TerminalGuard) -> Result<()> {
+        let next = self.resolve_next_step(key);
+        // Everything that can be done without a terminal is done here; what
+        // comes back is one of the six flows that suspend, redraw or hold a
+        // live connection, and only those need `terminal`.
+        let Some(next) = self.apply_local_step(next)? else {
+            return Ok(());
+        };
+        match next {
+            NextStep::Connect(id) => self.connect_flow(terminal, id).await?,
+            NextStep::RunScript(server_id, script_id) => self.run_script_flow(terminal, server_id, script_id).await?,
+            NextStep::GoFiles(id) => self.open_files_flow(terminal, id).await?,
+            NextStep::FilesOpenRemote(path) => self.list_remote_flow(terminal, Some(path)).await?,
+            NextStep::FilesRefresh => self.list_remote_flow(terminal, None).await?,
+            NextStep::FilesTransfer => self.transfer_flow(terminal).await?,
+            // `apply_local_step` returns `None` for every other variant.
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Resolves a key event into a `NextStep` without doing any of the work.
+    ///
+    /// This is the half of the `NextStep` pattern that holds the borrow of
+    /// `self.state`: the borrow ends when this returns, which is what lets the
+    /// async flows run afterwards. It is also the seam the tests drive — no
+    /// terminal, no `.await`.
+    pub(crate) fn resolve_next_step(&mut self, key: KeyEvent) -> NextStep {
         let strings = self.lang.strings();
 
         // F2 rather than `?` as the universal opener: `?` is a character the
@@ -835,17 +876,17 @@ impl App {
         if let AppState::Unlocked(u) = &mut self.state {
             if u.help_open {
                 u.help_open = false;
-                return Ok(());
+                return NextStep::None;
             }
             if key.code == crossterm::event::KeyCode::F(2) {
                 u.help_open = true;
-                return Ok(());
+                return NextStep::None;
             }
         }
 
-        let next = {
+        {
             let AppState::Unlocked(u) = &mut self.state else {
-                return Ok(());
+                return NextStep::None;
             };
             match &mut u.screen {
                 Screen::MainMenu(state) => match state.handle_key(key, &u.config.servers, u.config.server_sort) {
@@ -934,8 +975,18 @@ impl App {
                     FileBrowserOutcome::Transfer => NextStep::FilesTransfer,
                 },
             }
-        };
+        }
+    }
 
+    /// Carries out every `NextStep` that needs no terminal, which is all but
+    /// six of them.
+    ///
+    /// Returns `Ok(Some(step))` for the ones that do — `connect_flow` and the
+    /// file-browser flows suspend the alternate screen or redraw from inside an
+    /// `.await`, so they stay in `handle_unlocked_key`. Splitting it here is
+    /// what makes the transitions testable: everything below is plain state.
+    pub(crate) fn apply_local_step(&mut self, next: NextStep) -> Result<Option<NextStep>> {
+        let strings = self.lang.strings();
         match next {
             NextStep::None => {}
             NextStep::Help => {
@@ -1013,7 +1064,8 @@ impl App {
             }
             NextStep::TotpPromptSubmit(code) => self.verify_totp_prompt(&code),
             NextStep::TotpPromptCancel => self.state = self.locked_state(),
-            NextStep::Connect(id) => self.connect_flow(terminal, id).await?,
+            // The six that await with a terminal go back to `handle_unlocked_key`.
+            NextStep::Connect(id) => return Ok(Some(NextStep::Connect(id))),
             NextStep::GoScripts(server_id) => self.with_unlocked(|u| {
                 if let Some(entry) = u.config.servers.iter().find(|s| s.id == server_id) {
                     u.screen = Screen::Scripts(ScriptsListState::new(server_id, entry.name.clone()));
@@ -1093,11 +1145,11 @@ impl App {
                 }
             }),
             NextStep::CycleSort => self.cycle_server_sort(),
-            NextStep::RunScript(server_id, script_id) => self.run_script_flow(terminal, server_id, script_id).await?,
-            NextStep::GoFiles(id) => self.open_files_flow(terminal, id).await?,
-            NextStep::FilesOpenRemote(path) => self.list_remote_flow(terminal, Some(path)).await?,
-            NextStep::FilesRefresh => self.list_remote_flow(terminal, None).await?,
-            NextStep::FilesTransfer => self.transfer_flow(terminal).await?,
+            NextStep::RunScript(server_id, script_id) => return Ok(Some(NextStep::RunScript(server_id, script_id))),
+            NextStep::GoFiles(id) => return Ok(Some(NextStep::GoFiles(id))),
+            NextStep::FilesOpenRemote(path) => return Ok(Some(NextStep::FilesOpenRemote(path))),
+            NextStep::FilesRefresh => return Ok(Some(NextStep::FilesRefresh)),
+            NextStep::FilesTransfer => return Ok(Some(NextStep::FilesTransfer)),
             NextStep::FilesBack => {
                 self.remember_browser_dirs();
                 self.drop_remote();
@@ -1119,7 +1171,7 @@ impl App {
             }),
         }
 
-        Ok(())
+        Ok(None)
     }
 
     /// Closes the browser's connection.
@@ -2327,20 +2379,8 @@ fn print_script_event_plain(event: RunEvent, strings: &Strings, partial: &mut St
     let _ = out.flush();
 }
 
+/// The state-machine tests live in `src/app/tests.rs` rather than under
+/// `tests/`: an integration test only ever sees the crate's `pub` API, and
+/// `AppState` / `Screen` / `NextStep` are `pub(crate)` on purpose.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The cancel contract, pinned: only these two stop a run. Every other key
-    /// is forwarded to the screen, so widening this set silently takes a
-    /// binding away from it.
-    #[test]
-    fn only_esc_and_ctrl_c_stop_a_run() {
-        assert!(is_cancel_key(KeyEvent::from(KeyCode::Esc)));
-        assert!(is_cancel_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
-
-        assert!(!is_cancel_key(KeyEvent::from(KeyCode::Char('c'))), "a bare c is output, not a cancel");
-        assert!(!is_cancel_key(KeyEvent::from(KeyCode::Enter)));
-        assert!(!is_cancel_key(KeyEvent::from(KeyCode::Char('q'))));
-    }
-}
+mod tests;

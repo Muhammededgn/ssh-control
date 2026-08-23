@@ -1,0 +1,346 @@
+//! Transitions of the app state machine.
+//!
+//! In-crate rather than under `tests/`: an integration test only sees the
+//! crate's `pub` surface, and `AppState`, `Screen` and `NextStep` are
+//! `pub(crate)` precisely because nothing outside should name them.
+//!
+//! **Every fixture here is a password-only vault, and that is load-bearing.**
+//! `resolve_initial_state` only reaches for the OS credential store when the
+//! vault carries a device slot, and `reconcile_device_state` returns early
+//! without one — so nothing in this file touches the user's real keyring. A
+//! test that needed a device slot would not be hermetic and does not belong
+//! here.
+
+use super::*;
+use crate::config::model::{AuthMethod, ServerEntry};
+use crate::tui::server_form::ServerFormData;
+
+const PASSWORD: &str = "correct horse battery";
+
+/// A vault on disk plus an `App` sitting on its lock screen.
+///
+/// The store that writes the vault is dropped before the `App` is built, and
+/// that is not tidiness: `VaultLock` holds an `flock` in a `File` owned by the
+/// `ConfigStore` (`config::lock`), and `flock` conflicts between two
+/// descriptors on the same file *within one process*. A store still alive here
+/// would make the `App` report `VaultInUse` instead of opening.
+fn password_vault(f: impl FnOnce(&mut Config)) -> (tempfile::TempDir, App) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.enc");
+    {
+        let store = ConfigStore::new(path.clone());
+        let mut unlocked = store.init(PASSWORD).expect("init");
+        f(&mut unlocked.config);
+        store.save(&unlocked.config, &unlocked.master_key, &unlocked.slots).expect("save");
+    }
+    let app = App::new(ConfigStore::new(path));
+    (dir, app)
+}
+
+fn entry(name: &str) -> ServerEntry {
+    ServerEntry::new(name.to_string(), format!("{name}.example.com"), 22, "root".to_string(), AuthMethod::password("hunter2"))
+}
+
+fn char_key(c: char) -> KeyEvent {
+    KeyEvent::from(KeyCode::Char(c))
+}
+
+/// Drives one key through the unlocked half of the machine, the way
+/// `handle_unlocked_key` does minus the six flows that need a terminal.
+fn press(app: &mut App, key: KeyEvent) {
+    let next = app.resolve_next_step(key);
+    app.apply_local_step(next).expect("a local step never fails");
+}
+
+fn type_password(app: &mut App, password: &str) {
+    for c in password.chars() {
+        app.handle_locked_key(char_key(c));
+    }
+    app.handle_locked_key(KeyEvent::from(KeyCode::Enter));
+}
+
+fn unlocked(app: &App) -> &UnlockedState {
+    match &app.state {
+        AppState::Unlocked(u) => u,
+        _ => panic!("expected an unlocked vault"),
+    }
+}
+
+fn screen_name(app: &App) -> &'static str {
+    match &app.state {
+        AppState::Setup(_) => "Setup",
+        AppState::Locked(_) => "Locked",
+        AppState::LockedTotpDaily(_) => "LockedTotpDaily",
+        AppState::Unopenable => "Unopenable",
+        AppState::CannotOpen { .. } => "CannotOpen",
+        AppState::Unlocked(u) => match u.screen {
+            Screen::MainMenu(_) => "MainMenu",
+            Screen::ServerForm(_) => "ServerForm",
+            Screen::ConfirmDelete { .. } => "ConfirmDelete",
+            Screen::Settings(_) => "Settings",
+            Screen::TotpPrompt(_) => "TotpPrompt",
+            Screen::Scripts(_) => "Scripts",
+            Screen::ScriptForm(_) => "ScriptForm",
+            Screen::ConfirmDeleteScript { .. } => "ConfirmDeleteScript",
+            Screen::ScriptRun(_) => "ScriptRun",
+            Screen::FileBrowser(_) => "FileBrowser",
+        },
+    }
+}
+
+/// Makes the next `ConfigStore::save` fail without touching the vault that is
+/// already on disk.
+///
+/// `write_file_atomic` stages a sibling `<name>.tmp` and its very first move is
+/// `File::create` on it — a *directory* at that path fails with `EISDIR`. A
+/// read-only parent directory would do the same thing but is ignored when the
+/// tests run as root, and it would also block the rollback paths' own reads.
+fn block_saves(dir: &tempfile::TempDir) {
+    std::fs::create_dir(dir.path().join("config.enc.tmp")).expect("stage the blocker");
+}
+
+// ---------------------------------------------------------------------------
+// Unlock paths
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_password_vault_opens_on_the_lock_screen() {
+    let (_dir, app) = password_vault(|_| {});
+    assert_eq!(screen_name(&app), "Locked");
+}
+
+#[test]
+fn the_right_password_reaches_the_server_list() {
+    let (_dir, mut app) = password_vault(|c| c.servers.push(entry("web-1")));
+    type_password(&mut app, PASSWORD);
+
+    assert_eq!(screen_name(&app), "MainMenu");
+    assert_eq!(unlocked(&app).config.servers.len(), 1);
+}
+
+/// A wrong password and a corrupt file deliberately produce the same error —
+/// there is no verifier field to tell them apart. What matters here is that the
+/// vault stays shut and the screen says so.
+#[test]
+fn a_wrong_password_stays_on_the_lock_screen() {
+    let (_dir, mut app) = password_vault(|_| {});
+    type_password(&mut app, "not the password");
+
+    match &app.state {
+        AppState::Locked(unlock) => assert!(unlock.error.is_some(), "the screen must say why"),
+        _ => panic!("a wrong password must not change screens"),
+    }
+}
+
+/// Mode 3: the password opens the vault, but the server list is not reachable
+/// until a code has been checked too.
+#[test]
+fn a_two_factor_vault_stops_at_the_second_factor() {
+    let (_dir, mut app) = password_vault(|c| {
+        c.totp = Some(TotpConfig { secret_base32: Secret::from("JBSWY3DPEHPK3PXP".to_string()) });
+    });
+    type_password(&mut app, PASSWORD);
+    assert_eq!(screen_name(&app), "TotpPrompt");
+
+    for c in "000000".chars() {
+        press(&mut app, char_key(c));
+    }
+    press(&mut app, KeyEvent::from(KeyCode::Enter));
+    assert_eq!(screen_name(&app), "TotpPrompt", "a wrong code must not fall through to the list");
+}
+
+/// Cancelling the second factor goes back through `locked_state`, which
+/// re-derives which lock screen this vault belongs on. Naming
+/// `AppState::Locked` at the call site is the bug this pins.
+#[test]
+fn cancelling_the_second_factor_relocks_the_vault() {
+    let (_dir, mut app) = password_vault(|c| {
+        c.totp = Some(TotpConfig { secret_base32: Secret::from("JBSWY3DPEHPK3PXP".to_string()) });
+    });
+    type_password(&mut app, PASSWORD);
+
+    press(&mut app, KeyEvent::from(KeyCode::Esc));
+    assert_eq!(screen_name(&app), "Locked", "the decrypted config must be gone, not merely hidden");
+}
+
+/// A vault left over from the retired TOTP-only mode keeps its secret in
+/// plaintext beside itself, so the conversion is offered before anything else —
+/// including before any credential-store probe, which is why this much of the
+/// path is hermetic.
+#[test]
+fn a_totp_only_vault_is_offered_the_conversion_first() {
+    let (dir, mut app) = password_vault(|_| {});
+    std::fs::write(dir.path().join("totp-only.secret"), "JBSWY3DPEHPK3PXP").expect("plant the plaintext secret");
+
+    app.state = app.resolve_initial_state();
+    match &app.state {
+        AppState::Locked(unlock) => assert!(matches!(unlock.mode, UnlockMode::MigrateTotpOnly)),
+        _ => panic!("a plaintext secret beside the vault must be converted before anything else"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Screen transitions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn adding_a_server_persists_it_and_returns_to_the_list() {
+    let (dir, mut app) = password_vault(|_| {});
+    type_password(&mut app, PASSWORD);
+
+    press(&mut app, char_key('a'));
+    assert_eq!(screen_name(&app), "ServerForm");
+
+    let data = ServerFormData {
+        name: "web-1".into(),
+        host: "web-1.example.com".into(),
+        port: 22,
+        username: "root".into(),
+        tags: vec!["prod".into()],
+        auth: AuthMethod::password("hunter2"),
+    };
+    app.apply_local_step(NextStep::FormSubmit(data)).expect("submit");
+
+    assert_eq!(screen_name(&app), "MainMenu");
+    assert_eq!(unlocked(&app).config.servers[0].name, "web-1");
+
+    // And it is actually on disk, not just in memory.
+    drop(app);
+    let store = ConfigStore::new(dir.path().join("config.enc"));
+    assert_eq!(store.load(PASSWORD).expect("reopen").config.servers[0].name, "web-1");
+}
+
+#[test]
+fn deleting_a_server_asks_first_and_then_removes_it() {
+    let (_dir, mut app) = password_vault(|c| c.servers.push(entry("web-1")));
+    type_password(&mut app, PASSWORD);
+
+    press(&mut app, char_key('d'));
+    assert_eq!(screen_name(&app), "ConfirmDelete");
+
+    press(&mut app, char_key('n'));
+    assert_eq!(screen_name(&app), "MainMenu");
+    assert_eq!(unlocked(&app).config.servers.len(), 1, "answering no must keep the entry");
+
+    press(&mut app, char_key('d'));
+    press(&mut app, char_key('y'));
+    assert_eq!(screen_name(&app), "MainMenu");
+    assert!(unlocked(&app).config.servers.is_empty());
+}
+
+#[test]
+fn escape_from_the_scripts_list_goes_back_to_the_server_list() {
+    let (_dir, mut app) = password_vault(|c| c.servers.push(entry("web-1")));
+    type_password(&mut app, PASSWORD);
+
+    press(&mut app, char_key('s'));
+    assert_eq!(screen_name(&app), "Scripts");
+
+    press(&mut app, KeyEvent::from(KeyCode::Esc));
+    assert_eq!(screen_name(&app), "MainMenu");
+}
+
+/// The overlay is modal: the key that dismisses it must not also act on the
+/// list underneath, or closing help with `q` would quit the app.
+#[test]
+fn the_help_overlay_swallows_the_key_that_closes_it() {
+    let (_dir, mut app) = password_vault(|_| {});
+    type_password(&mut app, PASSWORD);
+
+    press(&mut app, KeyEvent::from(KeyCode::F(2)));
+    assert!(unlocked(&app).help_open);
+
+    press(&mut app, char_key('q'));
+    assert!(!unlocked(&app).help_open);
+    assert!(!app.should_quit, "the closing key must not reach the screen behind it");
+}
+
+// ---------------------------------------------------------------------------
+// Rollback, and the idle timer
+// ---------------------------------------------------------------------------
+
+/// The setting is only worth applying if it survives a restart, so a failed
+/// write puts the old value back rather than leaving the two out of step.
+#[test]
+fn a_failed_save_leaves_the_auto_lock_where_it_was() {
+    let (dir, mut app) = password_vault(|_| {});
+    type_password(&mut app, PASSWORD);
+    let before = unlocked(&app).config.auto_lock_minutes;
+    press(&mut app, KeyEvent::from(KeyCode::F(1)));
+    block_saves(&dir);
+
+    app.apply_local_step(NextStep::SettingsAutoLockSelected(before + 5)).expect("step");
+
+    assert_eq!(unlocked(&app).config.auto_lock_minutes, before);
+    match &unlocked(&app).screen {
+        Screen::Settings(s) => assert!(s.error.is_some(), "the screen must say the write failed"),
+        _ => panic!("expected the settings screen"),
+    }
+}
+
+/// The vault on disk was never replaced — writes are atomic — so undoing the
+/// in-memory half has to restore the previous state whole. A `config.totp` left
+/// set here would have the app demanding a second factor the vault knows
+/// nothing about.
+#[test]
+fn a_failed_security_mode_change_rolls_back_completely() {
+    let (dir, mut app) = password_vault(|_| {});
+    type_password(&mut app, PASSWORD);
+    press(&mut app, KeyEvent::from(KeyCode::F(1)));
+    let slots_before = unlocked(&app).slots.len();
+    block_saves(&dir);
+
+    // `password: None` keeps the slot already on the vault, so no Argon2 runs
+    // and the test stays fast; the rollback path is the same either way.
+    app.apply_local_step(NextStep::ChangeSecurityMode {
+        mode: AuthMode::PasswordTotp,
+        password: None,
+        totp_secret: Some(Zeroizing::new("JBSWY3DPEHPK3PXP".to_string())),
+    })
+    .expect("step");
+
+    assert!(unlocked(&app).config.totp.is_none(), "the second factor must not survive a failed write");
+    assert_eq!(unlocked(&app).slots.len(), slots_before);
+    assert_eq!(app.current_auth_mode(), AuthMode::Password);
+}
+
+#[test]
+fn the_idle_timer_locks_the_vault_and_says_so() {
+    let (_dir, mut app) = password_vault(|_| {});
+    type_password(&mut app, PASSWORD);
+    app.apply_local_step(NextStep::SettingsAutoLockSelected(1)).expect("step");
+
+    app.last_activity = Instant::now() - Duration::from_secs(3600);
+    app.auto_lock_if_idle();
+
+    match &app.state {
+        AppState::Locked(unlock) => assert!(unlock.info.is_some(), "the lock screen should explain itself"),
+        _ => panic!("an idle vault must re-lock"),
+    }
+}
+
+/// `0` is off, and it has to stay off however long the app sits there.
+#[test]
+fn an_auto_lock_of_zero_never_fires() {
+    let (_dir, mut app) = password_vault(|_| {});
+    type_password(&mut app, PASSWORD);
+    app.apply_local_step(NextStep::SettingsAutoLockSelected(0)).expect("step");
+
+    app.last_activity = Instant::now() - Duration::from_secs(86_400);
+    app.auto_lock_if_idle();
+
+    assert_eq!(screen_name(&app), "MainMenu");
+}
+
+/// The cancel contract, pinned: only these two stop a run. Every other key is
+/// forwarded to the screen, so widening this set silently takes a binding away
+/// from it.
+#[test]
+fn only_esc_and_ctrl_c_stop_a_run() {
+    assert!(is_cancel_key(KeyEvent::from(KeyCode::Esc)));
+    assert!(is_cancel_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+
+    assert!(!is_cancel_key(KeyEvent::from(KeyCode::Char('c'))), "a bare c is output, not a cancel");
+    assert!(!is_cancel_key(KeyEvent::from(KeyCode::Enter)));
+    assert!(!is_cancel_key(KeyEvent::from(KeyCode::Char('q'))));
+}
