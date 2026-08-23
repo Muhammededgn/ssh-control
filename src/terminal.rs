@@ -16,12 +16,17 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 /// sessions, since toggling raw mode on/off around each session would be a race.
 pub struct TerminalGuard {
     pub terminal: Tui,
+    /// Set the first time `suspend` hands the primary buffer over, and never
+    /// cleared. It answers "does the primary screen still hold a remote
+    /// session's tail?", which is the only reason `Drop` clears it — a run that
+    /// never connected must leave the user's own shell exactly where it was.
+    primary_dirty: bool,
 }
 
 impl TerminalGuard {
     pub fn init() -> Result<Self> {
         let terminal = ratatui::try_init()?;
-        Ok(Self { terminal })
+        Ok(Self { terminal, primary_dirty: false })
     }
 
     /// Leave the alternate screen so a real interactive SSH session can take over
@@ -34,6 +39,7 @@ impl TerminalGuard {
     /// throw away history the app never owned).
     pub fn suspend(&mut self) -> Result<()> {
         execute!(io::stdout(), LeaveAlternateScreen, Clear(ClearType::All), MoveTo(0, 0))?;
+        self.primary_dirty = true;
         Ok(())
     }
 
@@ -48,7 +54,24 @@ impl TerminalGuard {
 }
 
 impl Drop for TerminalGuard {
+    /// `restore()` leaves the alternate screen, which uncovers the primary
+    /// buffer — and after an SSH session that buffer holds the tail of the
+    /// remote shell, with the user's own screen long gone. The clear therefore
+    /// comes *after* `restore()`, never before, or it would wipe the alternate
+    /// screen instead. `ClearType::All` again: the session stays reachable in
+    /// scrollback, which is where the output of a `run_on_connect` script is.
+    ///
+    /// Skipped while unwinding. `ratatui::try_init` installs a panic hook that
+    /// restores and *then* runs the previous hook, so by the time this drop
+    /// runs the panic message is already printed on the primary buffer — the
+    /// one thing clearing must not erase.
+    ///
+    /// Untested by design: this needs a real tty, and `suspend` writes escape
+    /// codes to the stdout the test harness is printing to.
     fn drop(&mut self) {
         ratatui::restore();
+        if self.primary_dirty && !std::thread::panicking() {
+            let _ = execute!(io::stdout(), Clear(ClearType::All), MoveTo(0, 0));
+        }
     }
 }
