@@ -166,6 +166,16 @@ jobs:
     needs: [verify, linux-packages, arch-package]
     runs-on: ubuntu-latest
     steps:
+      # First, because actions/checkout cleans the workspace — the artifacts
+      # would be swept away if they were downloaded before it.
+      #
+      # `fetch-depth: 0` is required: the notes are built from the commit range
+      # since the previous tag, and the default shallow clone has neither the
+      # history nor the tags to find it.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -179,9 +189,23 @@ jobs:
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
 
+      # Not `generate_release_notes: true`. That lists only merged pull
+      # requests, and most work here goes straight to main — it produced empty
+      # notes for v0.2.0 and one of nine issues for v0.3.0. This walks the
+      # commit range instead; see the script's own header.
+      #
+      # Written outside dist/, or it would be published as a release asset.
+      - name: Build release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/release-notes.sh "${GITHUB_REF_NAME}" > "${RUNNER_TEMP}/notes.md"
+
+      - name: Show the notes
+        run: cat "${RUNNER_TEMP}/notes.md"
+
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          generate_release_notes: true
+          body_path: ${{ runner.temp }}/notes.md
           fail_on_unmatched_files: true
           prerelease: ${{ needs.verify.outputs.prerelease }}
