@@ -39,7 +39,10 @@ fn probe_command() -> String {
 /// parses CPU/RAM/disk/GPU info out of it. Best-effort: any missing/blank
 /// field is left `None` rather than failing the whole fetch, since not every
 /// remote shell has every tool (`lspci`, `free`, ...) installed.
-pub async fn fetch(handle: &mut client::Handle<Handler>) -> Result<SystemInfo> {
+///
+/// `&Handle`, for the same reason `pty_bridge::run_interactive` takes one: the
+/// TUI joins the two on one connection.
+pub async fn fetch(handle: &client::Handle<Handler>) -> Result<SystemInfo> {
     let mut channel = handle.channel_open_session().await?;
     channel.exec(true, probe_command()).await?;
 

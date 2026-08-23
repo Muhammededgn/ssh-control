@@ -50,7 +50,11 @@ impl Drop for NonBlockingStdin {
 /// output from tools like vim/htop isn't corrupted. Ctrl+C is not intercepted:
 /// raw mode already disables `ISIG`, so it arrives as a plain `0x03` byte and
 /// is forwarded to the remote shell like any real ssh client would.
-pub async fn run_interactive(handle: &mut client::Handle<Handler>) -> Result<()> {
+///
+/// Takes `&Handle` rather than `&mut`: opening a channel needs no exclusive
+/// access, and `App::connect_flow` runs the sysinfo probe on the same handle
+/// concurrently with this, so the shell is not held behind it.
+pub async fn run_interactive(handle: &client::Handle<Handler>) -> Result<()> {
     let mut channel = handle.channel_open_session().await?;
 
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));

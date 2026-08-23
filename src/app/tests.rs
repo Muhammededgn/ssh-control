@@ -12,7 +12,7 @@
 //! here.
 
 use super::*;
-use crate::config::model::{AuthMethod, ServerEntry};
+use crate::config::model::{AuthMethod, ServerEntry, SystemInfo};
 use crate::tui::server_form::ServerFormData;
 
 const PASSWORD: &str = "correct horse battery";
@@ -409,4 +409,63 @@ fn both_run_paths_resolve_to_the_same_step() {
         }
         _ => panic!("the picker must run the script"),
     }
+}
+
+/// `connect_flow` writes what the handshake taught it *before* handing the
+/// terminal to the shell — a fingerprint persisted only once the session ended
+/// would re-run TOFU if the process were killed during it. This is the half of
+/// that flow which needs no terminal.
+#[test]
+fn a_handshake_record_lands_on_the_entry_and_is_saved() {
+    let (dir, mut app) = password_vault(|c| c.servers.push(entry("web-1")));
+    type_password(&mut app, PASSWORD);
+    let id = unlocked(&app).config.servers[0].id;
+
+    app.record_session(id, &session::SessionRecord { fingerprint: Some("SHA256:abc".into()), connected_at: 100, system_info: None });
+
+    let e = &unlocked(&app).config.servers[0];
+    assert_eq!(e.host_key_fingerprint.as_deref(), Some("SHA256:abc"));
+    assert_eq!(e.last_connected_unix, Some(100));
+
+    // And it is on disk, not only in memory: the save is what the next launch
+    // reads. The app's own store holds the `flock`, so it is dropped first.
+    drop(app);
+    let store = ConfigStore::new(dir.path().join("config.enc"));
+    let reopened = store.load(PASSWORD).expect("reopen");
+    assert_eq!(reopened.config.servers[0].host_key_fingerprint.as_deref(), Some("SHA256:abc"));
+}
+
+/// The probe now runs beside the shell rather than in front of it, so the entry
+/// is written twice: once at the handshake, once when the probe comes back.
+/// The second write must not disturb what the first one stamped.
+#[test]
+fn the_probe_s_record_adds_system_info_without_moving_the_timestamp() {
+    let (_dir, mut app) = password_vault(|c| c.servers.push(entry("web-1")));
+    type_password(&mut app, PASSWORD);
+    let id = unlocked(&app).config.servers[0].id;
+
+    let mut record = session::SessionRecord { fingerprint: Some("SHA256:abc".into()), connected_at: 100, system_info: None };
+    app.record_session(id, &record);
+    record.system_info = Some(SystemInfo { cpu_cores: Some(8), ..SystemInfo::default() });
+    app.record_session(id, &record);
+
+    let e = &unlocked(&app).config.servers[0];
+    assert_eq!(e.last_connected_unix, Some(100), "the connection time is stamped once");
+    assert_eq!(e.system_info.as_ref().and_then(|i| i.cpu_cores), Some(8));
+}
+
+/// The six steps that need a terminal must keep coming back out of
+/// `apply_local_step` rather than being carried out inside it — putting one of
+/// them in there quietly makes it untestable, which is the whole point of the
+/// seam.
+#[test]
+fn the_steps_that_need_a_terminal_are_handed_back() {
+    let (_dir, mut app) = password_vault(|c| c.servers.push(entry("web-1")));
+    type_password(&mut app, PASSWORD);
+    let id = unlocked(&app).config.servers[0].id;
+
+    assert!(matches!(app.apply_local_step(NextStep::Connect(id)), Ok(Some(NextStep::Connect(_)))));
+    assert!(matches!(app.apply_local_step(NextStep::GoFiles(id)), Ok(Some(NextStep::GoFiles(_)))));
+    assert!(matches!(app.apply_local_step(NextStep::FilesRefresh), Ok(Some(NextStep::FilesRefresh))));
+    assert!(app.connecting.is_none(), "nothing local ever sets the connect indicator");
 }

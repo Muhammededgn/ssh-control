@@ -36,6 +36,20 @@ pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     horizontal[1]
 }
 
+/// One frame of a spinner, picked from how long the thing being waited on has
+/// been running.
+///
+/// It does not animate itself — nothing in this crate has a clock of its own.
+/// The caller redrawing on a tick (`App::await_redrawing`) is what advances it,
+/// which is the same arrangement `ScriptRunState` has with its live log.
+///
+/// Every frame is one column wide, so the row it sits on never changes width
+/// between draws.
+pub fn spinner_frame(elapsed: std::time::Duration) -> &'static str {
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    FRAMES[(elapsed.as_millis() / 100) as usize % FRAMES.len()]
+}
+
 /// Renders a text buffer as a run of `*` of the same length, for masked
 /// password/passphrase input fields.
 pub fn mask(s: &str) -> String {
@@ -444,6 +458,26 @@ pub fn qr_lines(data: &str) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The row a spinner sits on must not change width between frames, or the
+    /// server list would jitter for the whole of a ten-second connect.
+    #[test]
+    fn every_spinner_frame_is_one_column_wide() {
+        for ms in (0..2000).step_by(50) {
+            let frame = spinner_frame(std::time::Duration::from_millis(ms));
+            assert_eq!(frame.chars().count(), 1, "{frame:?} is not a single character");
+        }
+    }
+
+    /// It has no clock of its own: the same elapsed time always picks the same
+    /// frame, and a full turn comes back to where it started.
+    #[test]
+    fn the_spinner_advances_with_time_and_wraps() {
+        use std::time::Duration;
+        assert_eq!(spinner_frame(Duration::from_millis(0)), spinner_frame(Duration::from_millis(99)));
+        assert_ne!(spinner_frame(Duration::from_millis(0)), spinner_frame(Duration::from_millis(100)));
+        assert_eq!(spinner_frame(Duration::from_millis(0)), spinner_frame(Duration::from_millis(1000)));
+    }
 
     /// A screen that builds its own block is a screen the next border change
     /// cannot reach — the same failure mode as a screen that names its own

@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -12,6 +14,19 @@ use crate::i18n::Strings;
 use crate::tui::chrome;
 use crate::tui::theme;
 use crate::tui::widgets::{self, list_title_with_position, render_list_scrollbar};
+
+/// What the app wants this frame to say, over and above the servers.
+///
+/// Bundled rather than passed as two more parameters: both halves are
+/// transient app state threaded in per call — never stored here, for the same
+/// reason `ServerSort` is not — and `render` was at clippy's argument limit.
+#[derive(Clone, Copy, Default)]
+pub struct ListStatus<'a> {
+    /// The server a flow is currently reaching, and when the attempt started.
+    pub connecting: Option<(Uuid, Instant)>,
+    /// The transient message the footer shows.
+    pub message: Option<&'a str>,
+}
 
 fn gib(bytes: u64) -> f64 {
     bytes as f64 / 1_073_741_824.0
@@ -393,18 +408,23 @@ impl MainMenuState {
         self.list_state.select(Some(self.selected));
     }
 
+    /// `connecting` is the server a flow is currently reaching, and when the
+    /// attempt started — threaded in per call rather than kept on this state,
+    /// for the same reason `sort` is: a copy here could disagree with the one
+    /// the flow actually holds.
     pub fn render(
         &mut self,
         frame: &mut Frame,
         area: Rect,
         servers: &[ServerEntry],
         sort: ServerSort,
-        status: Option<&str>,
+        status: ListStatus<'_>,
         strings: &Strings,
     ) {
+        let ListStatus { connecting, message } = status;
         let visible = self.visible_indices(servers, sort);
         let filter_shown = self.typing || !self.filter.is_empty();
-        let body = chrome::render(frame, area, strings.main_menu_title, self.footer(sort, status, filter_shown, strings), strings);
+        let body = chrome::render(frame, area, strings.main_menu_title, self.footer(sort, connecting.is_some(), message, filter_shown, strings), strings);
 
         // The detail pane is the answer to a list of one server filling a
         // 200-column frame with nothing in it. It is dropped rather than
@@ -439,12 +459,25 @@ impl MainMenuState {
                     crate::config::AuthMethod::Password { .. } => strings.auth_label_password,
                     crate::config::AuthMethod::SshKey { .. } => strings.auth_label_key,
                 };
-                let mut lines = vec![Line::from(vec![
+                let mut spans = vec![
                     Span::raw(format!("{:<name_width$}", s.name)),
                     Span::raw("  "),
                     Span::styled(format!("{}@{}:{}", s.username, s.host, s.port), Style::default().fg(theme::hint())),
                     Span::styled(format!("  {auth_label}"), Style::default().fg(theme::hint())),
-                ])];
+                ];
+                // On the row rather than in the footer: the list is where the
+                // user is looking, and *which* server is half of what they need
+                // to know. Appended last so the `user@host` column stays where
+                // `name_width` lined it up.
+                if let Some((id, started)) = connecting
+                    && id == s.id
+                {
+                    spans.push(Span::styled(
+                        format!("  {} {}", widgets::spinner_frame(started.elapsed()), strings.server_connecting),
+                        Style::default().fg(theme::accent()),
+                    ));
+                }
+                let mut lines = vec![Line::from(spans)];
                 // The second line only exists when the detail pane does not.
                 // Tags and a last-connected time are the reason someone scans
                 // this list, so a narrow terminal has to keep showing them
@@ -531,7 +564,7 @@ impl MainMenuState {
     /// The status bar's contents. Built here rather than in `chrome` because
     /// every line of it is this screen's: its filter box, its sort order, its
     /// transient status, its keybindings.
-    fn footer(&self, sort: ServerSort, status: Option<&str>, filter_shown: bool, strings: &Strings) -> Vec<Line<'static>> {
+    fn footer(&self, sort: ServerSort, connecting: bool, status: Option<&str>, filter_shown: bool, strings: &Strings) -> Vec<Line<'static>> {
         let mut help_text = Vec::new();
 
         if filter_shown {
@@ -555,8 +588,15 @@ impl MainMenuState {
                 Style::default().fg(theme::hint()),
             )));
         }
+        // While a connect is in flight the only key that does anything is the
+        // one that abandons it, so that is the only one offered — the rest of
+        // the bindings are unreachable until the flow returns.
         help_text.push(Line::from(Span::styled(
-            if self.typing { strings.main_menu_filter_hint } else { strings.main_menu_hint },
+            match (connecting, self.typing) {
+                (true, _) => strings.esc_cancel_hint,
+                (false, true) => strings.main_menu_filter_hint,
+                (false, false) => strings.main_menu_hint,
+            },
             Style::default().fg(theme::hint()),
         )));
         help_text
@@ -615,11 +655,65 @@ mod tests {
     }
 
     fn render(state: &mut MainMenuState, servers: &[ServerEntry], height: u16) -> String {
+        render_connecting(state, servers, height, None)
+    }
+
+    fn render_connecting(state: &mut MainMenuState, servers: &[ServerEntry], height: u16, connecting: Option<(Uuid, Instant)>) -> String {
         let mut terminal = Terminal::new(TestBackend::new(80, height)).expect("test backend");
         terminal
-            .draw(|frame| state.render(frame, frame.area(), servers, ServerSort::Name, None, &EN))
+            .draw(|frame| state.render(frame, frame.area(), servers, ServerSort::Name, ListStatus { connecting, message: None }, &EN))
             .expect("render");
         terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    /// Rows rather than one flat string: an indicator is only right if it is on
+    /// the *same row* as the server it names.
+    fn render_rows(state: &mut MainMenuState, servers: &[ServerEntry], connecting: Option<(Uuid, Instant)>) -> Vec<String> {
+        let (width, height) = (80u16, 16u16);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test backend");
+        terminal
+            .draw(|frame| state.render(frame, frame.area(), servers, ServerSort::Name, ListStatus { connecting, message: None }, &EN))
+            .expect("render");
+        let cells: Vec<String> = terminal.backend().buffer().content().iter().map(|c| c.symbol().to_string()).collect();
+        cells.chunks(width as usize).map(|row| row.concat()).collect()
+    }
+
+    /// #51/#52: the connect indicator belongs against the server being reached,
+    /// not in the footer where two different flows used to phrase it two
+    /// different ways.
+    #[test]
+    fn the_connecting_indicator_sits_on_the_row_of_the_server_it_names() {
+        let entries = tagged();
+        let rows = render_rows(&mut MainMenuState::new(), &entries, Some((entries[2].id, Instant::now())));
+
+        let marked: Vec<&String> = rows.iter().filter(|r| r.contains("connecting…")).collect();
+        assert_eq!(marked.len(), 1, "exactly one row says it");
+        assert!(marked[0].contains("charlie"), "and it is the row of the server being connected to: {:?}", marked[0]);
+    }
+
+    /// The indicator is keyed by `Uuid` for the same reason `selected` indexes
+    /// the visible list: a filter moves rows out from under an index.
+    #[test]
+    fn the_connecting_indicator_follows_the_entry_through_a_filter() {
+        let entries = tagged();
+        let mut state = MainMenuState::new();
+        press(&mut state, &entries, KeyCode::Char('/'));
+        for c in "a".chars() {
+            press(&mut state, &entries, KeyCode::Char(c));
+        }
+
+        let rows = render_rows(&mut state, &entries, Some((entries[3].id, Instant::now())));
+        let marked: Vec<&String> = rows.iter().filter(|r| r.contains("connecting…")).collect();
+        assert_eq!(marked.len(), 1, "still exactly one row, on the narrowed list");
+        assert!(marked[0].contains("bravo"), "still the same entry: {:?}", marked[0]);
+    }
+
+    /// The ordinary case: a list with nothing in flight says nothing.
+    #[test]
+    fn nothing_says_connecting_when_nothing_is() {
+        let entries = tagged();
+        let rows = render_rows(&mut MainMenuState::new(), &entries, None);
+        assert!(!rows.iter().any(|r| r.contains("connecting")));
     }
 
     /// The issue's acceptance criterion: 40 servers on a 20-row terminal must
@@ -878,7 +972,7 @@ mod tests {
     fn render_wide(state: &mut MainMenuState, servers: &[ServerEntry], width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test backend");
         terminal
-            .draw(|frame| state.render(frame, frame.area(), servers, ServerSort::Name, None, &EN))
+            .draw(|frame| state.render(frame, frame.area(), servers, ServerSort::Name, ListStatus::default(), &EN))
             .expect("render");
         terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
     }

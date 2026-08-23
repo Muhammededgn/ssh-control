@@ -178,7 +178,7 @@ fn run_connect(path: PathBuf, name: &str) -> Result<()> {
         // The same three beats as the TUI's connect, through the same policy
         // (`crate::session`), so a CLI connect records what a TUI one would:
         // the host key on a first connect, the timestamp, the sysinfo probe.
-        let record = session::observe(&mut connected).await;
+        let record = session::observe(&connected).await;
         if let AppState::Unlocked(u) = &mut app.state {
             if let Some(e) = u.config.servers.iter_mut().find(|s| s.id == id) {
                 record.apply_to(e);
@@ -193,7 +193,7 @@ fn run_connect(path: PathBuf, name: &str) -> Result<()> {
             script_runner_run(&mut connected.handle, script, strings, &mut partial).await;
         }
 
-        ssh::pty_bridge::run_interactive(&mut connected.handle).await
+        ssh::pty_bridge::run_interactive(&connected.handle).await
     })
 }
 

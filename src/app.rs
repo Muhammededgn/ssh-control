@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -21,7 +22,7 @@ use crate::terminal::TerminalGuard;
 use crate::totp::{self, AuthMode};
 use crate::tui::chrome;
 use crate::tui::confirm::{ConfirmOutcome, ConfirmState};
-use crate::tui::main_menu::{MainMenuAction, MainMenuState};
+use crate::tui::main_menu::{ListStatus, MainMenuAction, MainMenuState};
 use crate::tui::script_form::{FormMode as ScriptFormMode, ScriptFormData, ScriptFormOutcome, ScriptFormState};
 use crate::tui::script_run::{ScriptRunOutcome, ScriptRunState};
 use crate::tui::script_targets::{ScriptTargetsOutcome, ScriptTargetsState};
@@ -202,6 +203,16 @@ pub struct App {
     /// across an await (see the `NextStep` pattern). As its own field it can be
     /// taken out, used across the await, and put back afterwards.
     pub(crate) remote: Option<RemoteSession>,
+    /// The server a flow is currently reaching, and when the attempt started.
+    /// The server list's row indicator and its spinner frame both read this.
+    ///
+    /// Flow-scoped, and on `App` for the same reason `remote` is. Keyed by
+    /// `Uuid` and never by row index: a filter or a re-sort moves rows out from
+    /// under an index, which is what `MainMenuState::selected` documents.
+    ///
+    /// Set by the flows, cleared centrally in `App::run` — no exit path can
+    /// leave the list stuck saying "connecting…".
+    pub(crate) connecting: Option<(Uuid, Instant)>,
 }
 
 /// One authenticated connection plus its sftp channel. The russh handle has to
@@ -240,6 +251,7 @@ impl App {
             should_quit: false,
             last_activity: Instant::now(),
             remote: None,
+            connecting: None,
         };
         app.state = app.resolve_initial_state();
         app
@@ -352,6 +364,11 @@ impl App {
             {
                 self.last_activity = Instant::now();
                 self.handle_key(key, terminal).await?;
+                // Whatever flow just ran has returned, so nothing is being
+                // connected to any more. Cleared here rather than on each of
+                // the flows' exit paths, where one of them would eventually be
+                // missed and leave a row spinning forever.
+                self.connecting = None;
                 // The flows reached from here can block for hours (a PTY
                 // session, a long script). Restamping after they return keeps
                 // that time from counting as idle and locking the instant the
@@ -413,6 +430,8 @@ impl App {
 
     fn draw(&mut self, terminal: &mut TerminalGuard) -> Result<()> {
         let strings = self.lang.strings();
+        // Copied out before `self.state` is borrowed, like `status` below.
+        let connecting = self.connecting;
         match &mut self.state {
             AppState::Locked(unlock) => {
                 terminal.terminal.draw(|frame| {
@@ -462,7 +481,7 @@ impl App {
                     let area = frame.area();
                     chrome::paint_background(frame, area);
                     match screen {
-                        Screen::MainMenu(state) => state.render(frame, area, &config.servers, config.server_sort, status.as_deref(), strings),
+                        Screen::MainMenu(state) => state.render(frame, area, &config.servers, config.server_sort, ListStatus { connecting, message: status.as_deref() }, strings),
                         Screen::ServerForm(state) => state.render(frame, area, strings),
                         Screen::ConfirmDelete { state, .. } => state.render(frame, area, strings),
                         Screen::Settings(state) => state.render(frame, area, strings),
@@ -489,6 +508,56 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Awaits `future` with the app still on screen: redraws on every
+    /// `KEY_POLL_INTERVAL` tick so a resize lands and a spinner turns, and
+    /// drains the keyboard so `Esc` can abandon the attempt. `None` is a
+    /// cancel.
+    ///
+    /// Before this, a connect was a frozen frame — `App::run` is blocked inside
+    /// the flow, so nothing repainted and the keys typed during it sat in the
+    /// terminal buffer and replayed afterwards. Same shape as
+    /// `run_script_flow`'s `select!` and `transfer_flow`'s
+    /// `redraw_and_poll_cancel`, without the screen-specific half.
+    ///
+    /// **`future` must not borrow `self`**: the redraw arm needs `&mut self`.
+    /// That is not an obstacle to work around, it is the constraint
+    /// `transfer_flow` already lives under, and the reason `list_remote_flow`
+    /// takes `self.remote` out before awaiting.
+    ///
+    /// Bind the result on its own statement rather than matching the call
+    /// directly — the future temporary otherwise lives to the end of the
+    /// `match`, and no arm can move what it borrowed.
+    async fn await_redrawing<T>(&mut self, terminal: &mut TerminalGuard, cancel: Cancel, future: impl Future<Output = T>) -> Option<T> {
+        let mut future = std::pin::pin!(future);
+        let _ = self.draw(terminal);
+        loop {
+            tokio::select! {
+                // A future that resolved in the same wakeup as a due tick is
+                // not a cancel — the same reason `run_script_flow` is biased.
+                biased;
+                out = &mut future => return Some(out),
+                _ = tokio::time::sleep(KEY_POLL_INTERVAL) => {
+                    // Drained either way. Keys left unread would replay against
+                    // whatever screen the flow returns to.
+                    if cancel_requested() && cancel == Cancel::Allowed {
+                        return None;
+                    }
+                    let _ = self.draw(terminal);
+                }
+            }
+        }
+    }
+
+    /// `await_redrawing` where Esc abandons the wait.
+    async fn await_on_screen<T>(&mut self, terminal: &mut TerminalGuard, future: impl Future<Output = T>) -> Option<T> {
+        self.await_redrawing(terminal, Cancel::Allowed, future).await
+    }
+
+    /// `await_redrawing` where it does not — see `Cancel`.
+    async fn redraw_while<T>(&mut self, terminal: &mut TerminalGuard, future: impl Future<Output = T>) -> T {
+        self.await_redrawing(terminal, Cancel::Refused, future).await.expect("a refused cancel never returns None")
     }
 
     async fn handle_key(&mut self, key: KeyEvent, terminal: &mut TerminalGuard) -> Result<()> {
@@ -1613,55 +1682,92 @@ impl App {
             return Ok(());
         };
 
-        terminal.suspend()?;
-        let connect_result = ssh::connect(&target).await;
-
-        let status_msg = match connect_result {
-            Ok(mut connected) => {
-                // What a connect teaches the vault is decided in one place, so
-                // `cli::connect` records exactly the same things (see
-                // `crate::session`). `observe` borrows only the connection, so
-                // the `&mut self.state` below is taken *after* the await
-                // rather than held across it.
-                let record = session::observe(&mut connected).await;
-                if let AppState::Unlocked(u) = &mut self.state {
-                    if let Some(e) = u.config.servers.iter_mut().find(|s| s.id == id) {
-                        record.apply_to(e);
-                    }
-                    let _ = self.store.save(&u.config, &u.master_key, &u.slots);
-                }
-
-                // Auto-run scripts flagged `run_on_connect`, printed plain to
-                // the (still-suspended) primary screen buffer — same spirit
-                // as the sysinfo probe: best-effort, never blocks the
-                // interactive shell that follows.
-                for script in &on_connect_scripts {
-                    let mut partial = String::new();
-                    script_runner::run_script(&mut connected.handle, script, |event| {
-                        session::print_script_event_plain(event, strings, &mut partial);
-                    })
-                    .await;
-                }
-
-                match ssh::pty_bridge::run_interactive(&mut connected.handle).await {
-                    Ok(()) => None,
-                    Err(e) => Some(format!("{}{e}", strings.disconnected_prefix)),
-                }
-            }
-            Err(AppError::HostKeyChanged { fingerprint }) => Some(format!(
-                "{}{fingerprint}{}",
-                strings.host_key_changed_prefix, strings.host_key_changed_suffix
-            )),
-            Err(e) => Some(format!("{}{e}", strings.connect_error_prefix)),
+        // The list stays on screen through the handshake — a blank terminal
+        // with nothing on it for up to twenty seconds was the whole of #51 —
+        // and the row says which server is being reached.
+        self.connecting = Some((id, Instant::now()));
+        let attempt = self.await_on_screen(terminal, ssh::connect(&target)).await;
+        // Esc. Nothing was suspended and nothing was written, so there is
+        // nothing to undo; `App::run` clears the indicator.
+        let Some(connect_result) = attempt else {
+            return Ok(());
         };
+
+        // A connect that failed never suspends. Handing the primary buffer over
+        // to show an error the status bar can show is the bug.
+        let mut connected = match connect_result {
+            Ok(connected) => connected,
+            Err(AppError::HostKeyChanged { fingerprint }) => {
+                self.set_status(format!("{}{fingerprint}{}", strings.host_key_changed_prefix, strings.host_key_changed_suffix));
+                return Ok(());
+            }
+            Err(e) => {
+                self.set_status(format!("{}{e}", strings.connect_error_prefix));
+                return Ok(());
+            }
+        };
+
+        // What a connect teaches the vault is decided in one place, so
+        // `cli::connect` records exactly the same things (see
+        // `crate::session`). The handshake half is known now and is written
+        // now: a fingerprint persisted only once the session ended would
+        // re-run TOFU if the process were killed during it.
+        let mut record = session::observe_handshake(&connected);
+        self.record_session(id, &record);
+
+        // The late suspend. The primary buffer is handed over here and not a
+        // line earlier, with a shell about to land on it.
+        self.connecting = None;
+        terminal.suspend()?;
+
+        // Auto-run scripts flagged `run_on_connect`, printed plain to the
+        // (now-suspended) primary screen buffer.
+        for script in &on_connect_scripts {
+            let mut partial = String::new();
+            script_runner::run_script(&mut connected.handle, script, |event| {
+                session::print_script_event_plain(event, strings, &mut partial);
+            })
+            .await;
+        }
+
+        // The probe rides *alongside* the shell rather than in front of it.
+        // It is one exec channel that writes nothing to the terminal, and
+        // holding an interactive session behind `EXEC_TIMEOUT` to learn a CPU
+        // count is the wrong trade — the probe's values are for the detail
+        // pane, and nothing needs them before the user gets their prompt.
+        let (shell, info) = tokio::join!(
+            ssh::pty_bridge::run_interactive(&connected.handle),
+            ssh::sysinfo::fetch(&connected.handle),
+        );
 
         terminal.resume()?;
 
+        record.system_info = info.ok();
+        // Only when the probe actually produced something: `apply_to` keeps the
+        // last good snapshot, so a second save would rewrite the whole vault to
+        // store nothing.
+        if record.system_info.is_some() {
+            self.record_session(id, &record);
+        }
+
         if let AppState::Unlocked(u) = &mut self.state {
-            u.status = status_msg.map(StatusMessage::new);
+            u.status = shell.err().map(|e| StatusMessage::new(format!("{}{e}", strings.disconnected_prefix)));
         }
 
         Ok(())
+    }
+
+    /// Folds one session's record into its entry and persists it.
+    ///
+    /// Best-effort, like every save `connect_flow` makes: a read-only config
+    /// directory must not stand between the user and the shell they asked for.
+    fn record_session(&mut self, id: Uuid, record: &session::SessionRecord) {
+        if let AppState::Unlocked(u) = &mut self.state {
+            if let Some(e) = u.config.servers.iter_mut().find(|s| s.id == id) {
+                record.apply_to(e);
+            }
+            let _ = self.store.save(&u.config, &u.master_key, &u.slots);
+        }
     }
 
     /// Manual "run this script now" flow, triggered from the Scripts list.
@@ -1877,22 +1983,30 @@ impl App {
             return Ok(());
         };
 
-        // Connecting takes a moment on a slow link, and a frozen server list
-        // reads as a hang.
-        self.set_status(strings.file_browser_connecting.to_string());
-        self.draw(terminal)?;
+        // The same indicator `Enter` shows, on the same row, because `f` and
+        // `Enter` differ in what they do *after* connecting and not in how
+        // connecting looks. It used to be a sentence in the footer, drawn once,
+        // over a flow that then read no keys at all.
+        self.connecting = Some((id, Instant::now()));
 
         if !self.remote.as_ref().is_some_and(|r| r.server_id == id) {
             self.drop_remote();
-            match ssh::connect(&target).await {
-                Ok(connected) => {
-                    let mut handle = connected.handle;
-                    match sftp::open_session(&mut handle).await {
-                        Ok(sftp) => self.remote = Some(RemoteSession { server_id: id, handle, sftp }),
-                        Err(e) => return self.fail_to_open_files(e),
-                    }
-                }
-                Err(e) => return self.fail_to_open_files(e),
+            // Bound on its own statement rather than matched inline: the future
+            // temporary would otherwise hold its borrow to the end of the
+            // `match`, and no arm could move `handle` out.
+            let attempt = self.await_on_screen(terminal, ssh::connect(&target)).await;
+            let connected = match attempt {
+                Some(Ok(connected)) => connected,
+                Some(Err(e)) => return self.fail_to_open_files(e),
+                // Esc, with nothing yet built to tear down.
+                None => return Ok(()),
+            };
+            let mut handle = connected.handle;
+            let opened = self.await_on_screen(terminal, sftp::open_session(&mut handle)).await;
+            match opened {
+                Some(Ok(sftp)) => self.remote = Some(RemoteSession { server_id: id, handle, sftp }),
+                Some(Err(e)) => return self.fail_to_open_files(e),
+                None => return Ok(()),
             }
         }
 
@@ -1902,14 +2016,22 @@ impl App {
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("/"));
 
-        let session = self.remote.as_mut().expect("just connected");
-        let remote_cwd = match session.sftp.realpath(last_remote.as_deref().unwrap_or(".")).await {
+        // Taken out so the futures below borrow a local and the redraw can have
+        // `&mut self`; put back once they are done. The same move
+        // `transfer_flow` makes, for the same borrow.
+        let mut session = self.remote.take().expect("just connected");
+        let resolved = self.redraw_while(terminal, session.sftp.realpath(last_remote.as_deref().unwrap_or("."))).await;
+        let remote_cwd = match resolved {
             Ok(path) => path,
             // The remembered directory is gone. Fall back rather than open on
             // an error — it was a convenience, not a promise.
-            Err(_) => session.sftp.realpath(".").await.unwrap_or_else(|_| "/".to_string()),
+            Err(_) => {
+                let fallback = self.redraw_while(terminal, session.sftp.realpath(".")).await;
+                fallback.unwrap_or_else(|_| "/".to_string())
+            }
         };
-        let listing = session.sftp.list_dir(&remote_cwd).await;
+        let listing = self.redraw_while(terminal, session.sftp.list_dir(&remote_cwd)).await;
+        self.remote = Some(session);
 
         let mut browser = FileBrowserState::new(id, server_name, local_cwd, remote_cwd.clone());
         match listing {
@@ -1920,10 +2042,7 @@ impl App {
             }
         }
 
-        self.with_unlocked(|u| {
-            u.status = None;
-            u.screen = Screen::FileBrowser(browser);
-        });
+        self.with_unlocked(|u| u.screen = Screen::FileBrowser(browser));
         Ok(())
     }
 
@@ -1954,9 +2073,12 @@ impl App {
             return Ok(());
         }
 
-        self.draw(terminal)?;
-        let session = self.remote.as_mut().expect("checked above");
-        let listing = session.sftp.list_dir(&path).await;
+        // Redrawn through the await for the reason the connect is: `App::run` is
+        // blocked in here, so a resize during a slow listing would otherwise
+        // repaint nothing. Not cancellable — see `Cancel`.
+        let mut session = self.remote.take().expect("checked above");
+        let listing = self.redraw_while(terminal, session.sftp.list_dir(&path)).await;
+        self.remote = Some(session);
 
         match listing {
             Ok(entries) => {
@@ -2364,11 +2486,27 @@ fn remote_entries(entries: Vec<sftp::RemoteEntry>, show_hidden: bool) -> Vec<Bro
         .collect()
 }
 
+/// Whether `Esc` may drop the future being awaited.
+///
+/// `Allowed` is right for a handshake: dropping `ssh::connect` mid-flight
+/// leaves nothing behind but a closed socket. `Refused` is for sftp — the
+/// client keeps exactly one request in flight and has no reader task to drain
+/// a reply nobody read (see `ssh::sftp`), so abandoning one desyncs every
+/// request after it, and the next reply arrives bearing the wrong id.
+#[derive(Clone, Copy, PartialEq)]
+enum Cancel {
+    Allowed,
+    Refused,
+}
+
 /// How often the run loop looks for a keypress while a step is running.
 ///
 /// The events a script emits are not a heartbeat — `sleep 300` produces none
 /// at all — so a callback-driven cancel like `transfer_flow`'s cannot work
 /// here. This tick is what makes Esc reachable during a step that says nothing.
+///
+/// `App::await_redrawing` runs on it too, for the same reason: a handshake
+/// produces no events either.
 const KEY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 fn apply_run_event(event: OwnedRunEvent, run_state: &mut ScriptRunState, strings: &'static Strings) {

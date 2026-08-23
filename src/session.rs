@@ -32,22 +32,32 @@ pub struct SessionRecord {
     pub system_info: Option<SystemInfo>,
 }
 
-/// The post-handshake probe.
+/// What the handshake alone teaches the vault: the fingerprint to remember on
+/// a first connect, and the moment it happened.
+///
+/// No await — all of it is already known when `ssh::connect` returns. That is
+/// what lets `App::connect_flow` write this half *before* the interactive
+/// shell starts and run the probe alongside the shell rather than in front of
+/// it.
+pub fn observe_handshake(connected: &ssh::Connected) -> SessionRecord {
+    let fingerprint = match &connected.host_key_outcome {
+        HostKeyOutcome::FirstConnect { fingerprint } => Some(fingerprint.clone()),
+        HostKeyOutcome::Trusted | HostKeyOutcome::Mismatch { .. } => None,
+    };
+    SessionRecord { fingerprint, connected_at: device::now_unix(), system_info: None }
+}
+
+/// The handshake plus the probe, for a caller with nothing else to do while it
+/// runs — which is the CLI, where the probe sits in front of nothing.
 ///
 /// Awaits, and borrows nothing but the connection — deliberately. Both callers
 /// need to write the result into a `Config` they only borrow *between* awaits
 /// (the `NextStep` rule in `app.rs`), so this returns a plain owned value and
 /// leaves the storing to them.
-pub async fn observe(connected: &mut ssh::Connected) -> SessionRecord {
-    let fingerprint = match &connected.host_key_outcome {
-        HostKeyOutcome::FirstConnect { fingerprint } => Some(fingerprint.clone()),
-        HostKeyOutcome::Trusted | HostKeyOutcome::Mismatch { .. } => None,
-    };
-    SessionRecord {
-        fingerprint,
-        connected_at: device::now_unix(),
-        system_info: ssh::sysinfo::fetch(&mut connected.handle).await.ok(),
-    }
+pub async fn observe(connected: &ssh::Connected) -> SessionRecord {
+    let mut record = observe_handshake(connected);
+    record.system_info = ssh::sysinfo::fetch(&connected.handle).await.ok();
+    record
 }
 
 impl SessionRecord {

@@ -389,7 +389,7 @@ fn render_progress(frame: &mut Frame, area: Rect, progress: &TransferProgress, s
             format_size(progress.total_bytes)
         )));
     }
-    lines.push(Line::from(Span::styled(strings.transfer_hint, Style::default().fg(theme::hint()))));
+    lines.push(Line::from(Span::styled(strings.esc_cancel_hint, Style::default().fg(theme::hint()))));
 
     let box_area = super::widgets::centered_rect(60, lines.len() as u16 + 2, area);
     widgets::clear_surface(frame, box_area);
