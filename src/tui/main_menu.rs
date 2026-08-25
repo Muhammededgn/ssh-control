@@ -213,6 +213,9 @@ pub enum MainMenuAction {
     Delete(Uuid),
     Scripts(Uuid),
     Files(Uuid),
+    /// Open the `~/.ssh/config` importer. Takes no `Uuid` — it is about the
+    /// vault as a whole, not the selected row, and works on an empty list.
+    SshImport,
     Lock,
     Settings,
     /// Advance to the next `ServerSort`. `app.rs` owns the change: the order
@@ -313,6 +316,7 @@ impl MainMenuState {
                 .selected_entry(servers, sort)
                 .map(|s| MainMenuAction::Files(s.id))
                 .unwrap_or(MainMenuAction::None),
+            KeyCode::Char('i') => MainMenuAction::SshImport,
             KeyCode::Char('o') => MainMenuAction::CycleSort,
             KeyCode::Char('l') => MainMenuAction::Lock,
             KeyCode::F(1) => MainMenuAction::Settings,

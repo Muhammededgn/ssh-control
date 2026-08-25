@@ -116,6 +116,17 @@ pub struct Strings {
     /// Shown by both forms when the frame is too small to draw them honestly.
     pub terminal_too_small: &'static str,
 
+    // Import from ~/.ssh/config
+    pub ssh_import_title: &'static str,
+    pub ssh_import_hint: &'static str,
+    pub ssh_import_empty: &'static str,
+    /// Marks a row whose host is already in the vault, so the reason it cannot
+    /// be picked is on the row rather than left to be guessed at.
+    pub ssh_import_already: &'static str,
+    pub ssh_import_error_prefix: &'static str,
+    pub status_imported_prefix: &'static str,
+    pub status_imported_suffix: &'static str,
+
     // File browser
     pub file_browser_title: &'static str,
     pub file_browser_local_label: &'static str,
@@ -313,7 +324,7 @@ pub static EN: Strings = Strings {
 
     main_menu_title: " Servers ",
     main_menu_empty: "(no servers — press 'a' to add one)",
-    main_menu_hint: "Enter: connect  /: search  a: add  e: edit  d: delete  s: scripts  f: files  o: sort  l: lock  F1: settings  q: quit  ?: help",
+    main_menu_hint: "Enter: connect  /: search  a: add  e: edit  d: delete  s: scripts  f: files  i: import  o: sort  l: lock  F1: settings  q: quit  ?: help",
     main_menu_filter_hint: "type to filter  Enter: connect  Esc: clear",
     main_menu_filter_label: "Filter: ",
     main_menu_no_match: "(no server matches the filter)",
@@ -351,6 +362,14 @@ pub static EN: Strings = Strings {
     err_form_password_empty: "Password cannot be empty",
     err_key_path_empty: "Key path cannot be empty",
     terminal_too_small: "Terminal too small — make the window taller or wider",
+
+    ssh_import_title: " Import from ~/.ssh/config ",
+    ssh_import_hint: "Space: pick  a: all/none  Enter: import  Esc: cancel  ?: help",
+    ssh_import_empty: "nothing to import from ~/.ssh/config",
+    ssh_import_already: "already added",
+    ssh_import_error_prefix: "could not read ~/.ssh/config: ",
+    status_imported_prefix: "imported ",
+    status_imported_suffix: " servers",
 
     file_browser_title: " Files ",
     file_browser_local_label: "Local",
@@ -534,7 +553,7 @@ pub static TR: Strings = Strings {
 
     main_menu_title: " Sunucular ",
     main_menu_empty: "(sunucu yok — 'a' ile ekle)",
-    main_menu_hint: "Enter: bağlan  /: ara  a: ekle  e: düzenle  d: sil  s: scriptler  f: dosyalar  o: sırala  l: kilitle  F1: ayarlar  q: çık  ?: yardım",
+    main_menu_hint: "Enter: bağlan  /: ara  a: ekle  e: düzenle  d: sil  s: scriptler  f: dosyalar  i: içe aktar  o: sırala  l: kilitle  F1: ayarlar  q: çık  ?: yardım",
     main_menu_filter_hint: "yazarak filtrele  Enter: bağlan  Esc: temizle",
     main_menu_filter_label: "Filtre: ",
     main_menu_no_match: "(filtreye uyan sunucu yok)",
@@ -572,6 +591,14 @@ pub static TR: Strings = Strings {
     err_form_password_empty: "Şifre boş olamaz",
     err_key_path_empty: "Key path boş olamaz",
     terminal_too_small: "Terminal çok küçük — pencereyi büyüt",
+
+    ssh_import_title: " ~/.ssh/config'tan içe aktar ",
+    ssh_import_hint: "Boşluk: seç  a: hepsi/hiçbiri  Enter: aktar  Esc: iptal  ?: yardım",
+    ssh_import_empty: "~/.ssh/config içinde aktarılacak bir şey yok",
+    ssh_import_already: "zaten ekli",
+    ssh_import_error_prefix: "~/.ssh/config okunamadı: ",
+    status_imported_prefix: "",
+    status_imported_suffix: " sunucu aktarıldı",
 
     file_browser_title: " Dosyalar ",
     file_browser_local_label: "Yerel",
@@ -755,7 +782,7 @@ pub static ES: Strings = Strings {
 
     main_menu_title: " Servidores ",
     main_menu_empty: "(sin servidores — pulsa 'a' para añadir uno)",
-    main_menu_hint: "Enter: conectar  /: buscar  a: añadir  e: editar  d: eliminar  s: scripts  f: archivos  o: ordenar  l: bloquear  F1: ajustes  q: salir  ?: ayuda",
+    main_menu_hint: "Enter: conectar  /: buscar  a: añadir  e: editar  d: eliminar  s: scripts  f: archivos  i: importar  o: ordenar  l: bloquear  F1: ajustes  q: salir  ?: ayuda",
     main_menu_filter_hint: "escribe para filtrar  Enter: conectar  Esc: limpiar",
     main_menu_filter_label: "Filtro: ",
     main_menu_no_match: "(ningún servidor coincide con el filtro)",
@@ -793,6 +820,14 @@ pub static ES: Strings = Strings {
     err_form_password_empty: "La contraseña no puede estar vacía",
     err_key_path_empty: "La ruta de clave no puede estar vacía",
     terminal_too_small: "Terminal demasiado pequeña — agranda la ventana",
+
+    ssh_import_title: " Importar de ~/.ssh/config ",
+    ssh_import_hint: "Espacio: elegir  a: todos/ninguno  Enter: importar  Esc: cancelar  ?: ayuda",
+    ssh_import_empty: "no hay nada que importar de ~/.ssh/config",
+    ssh_import_already: "ya añadido",
+    ssh_import_error_prefix: "no se pudo leer ~/.ssh/config: ",
+    status_imported_prefix: "importados ",
+    status_imported_suffix: " servidores",
 
     file_browser_title: " Archivos ",
     file_browser_local_label: "Local",
@@ -976,7 +1011,7 @@ pub static RU: Strings = Strings {
 
     main_menu_title: " Серверы ",
     main_menu_empty: "(нет серверов — нажмите 'a' чтобы добавить)",
-    main_menu_hint: "Enter: подключиться  /: поиск  a: добавить  e: изменить  d: удалить  s: скрипты  f: файлы  o: сортировка  l: заблокировать  F1: настройки  q: выход  ?: справка",
+    main_menu_hint: "Enter: подключиться  /: поиск  a: добавить  e: изменить  d: удалить  s: скрипты  f: файлы  i: импорт  o: сортировка  l: заблокировать  F1: настройки  q: выход  ?: справка",
     main_menu_filter_hint: "введите текст для фильтра  Enter: подключиться  Esc: сбросить",
     main_menu_filter_label: "Фильтр: ",
     main_menu_no_match: "(нет серверов, подходящих под фильтр)",
@@ -1014,6 +1049,14 @@ pub static RU: Strings = Strings {
     err_form_password_empty: "Пароль не может быть пустым",
     err_key_path_empty: "Путь к ключу не может быть пустым",
     terminal_too_small: "Терминал слишком мал — увеличьте окно",
+
+    ssh_import_title: " Импорт из ~/.ssh/config ",
+    ssh_import_hint: "Пробел: выбрать  a: все/ничего  Enter: импорт  Esc: отмена  ?: справка",
+    ssh_import_empty: "в ~/.ssh/config нечего импортировать",
+    ssh_import_already: "уже добавлен",
+    ssh_import_error_prefix: "не удалось прочитать ~/.ssh/config: ",
+    status_imported_prefix: "импортировано серверов: ",
+    status_imported_suffix: "",
 
     file_browser_title: " Файлы ",
     file_browser_local_label: "Локально",

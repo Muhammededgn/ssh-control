@@ -26,6 +26,9 @@ use crate::tui::main_menu::{ListStatus, MainMenuAction, MainMenuState};
 use crate::tui::script_form::{FormMode as ScriptFormMode, ScriptFormData, ScriptFormOutcome, ScriptFormState};
 use crate::tui::script_run::{ScriptRunOutcome, ScriptRunState};
 use crate::tui::script_targets::{ScriptTargetsOutcome, ScriptTargetsState};
+use crate::tui::ssh_import::{SshImportOutcome, SshImportState};
+use crate::ssh_config::SshConfigHost;
+use crate::config::AuthMethod;
 use crate::tui::scripts_list::{ScriptsListAction, ScriptsListState};
 use crate::tui::server_form::{FormMode, FormOutcome, ServerFormData, ServerFormState};
 use crate::tui::settings::{SettingsOutcome, SettingsState};
@@ -51,6 +54,10 @@ pub(crate) enum Screen {
     /// Which servers a script is about to run on. Ephemeral: nothing it holds
     /// is persisted (see `tui::script_targets`).
     ScriptTargets(ScriptTargetsState),
+    /// Which of `~/.ssh/config`'s hosts to bring into the vault. Ephemeral:
+    /// it owns its parsed rows and nothing it holds is persisted until the
+    /// user confirms (see `tui::ssh_import`).
+    SshImport(SshImportState),
     ScriptForm(ScriptFormState),
     ConfirmDeleteScript { server_id: Uuid, script_id: Uuid, state: ConfirmState },
     ScriptRun(ScriptRunState),
@@ -66,6 +73,7 @@ pub(crate) fn help_topic(screen: &Screen) -> HelpTopic {
     match screen {
         Screen::MainMenu(_) => HelpTopic::ServerList,
         Screen::ServerForm(_) => HelpTopic::ServerForm,
+        Screen::SshImport(_) => HelpTopic::SshImport,
         Screen::ConfirmDelete { .. } | Screen::ConfirmDeleteScript { .. } => HelpTopic::Confirm,
         Screen::Settings(_) => HelpTopic::Settings,
         Screen::TotpPrompt(_) => HelpTopic::TotpPrompt,
@@ -173,6 +181,13 @@ pub(crate) enum NextStep {
     CycleSort,
     GoScriptTargets(Uuid),
     ScriptTargetsCancel,
+    GoSshImport,
+    SshImportCancel,
+    /// The hosts the user ticked. Carried by value rather than re-read from
+    /// disk on confirm: the file could have changed since the screen opened,
+    /// and importing something the user never saw is the one outcome a picker
+    /// must not have.
+    SshImportConfirm(Vec<SshConfigHost>),
     /// The script's own server, the script, and every server to run it on. A
     /// plain `Enter` on the script list is this with a one-element list, so
     /// there is one flow rather than two.
@@ -496,6 +511,7 @@ impl App {
                             state.render(frame, area, scripts, status.as_deref(), strings);
                         }
                         Screen::ScriptTargets(state) => state.render(frame, area, &config.servers, strings),
+                        Screen::SshImport(state) => state.render(frame, area, strings),
                         Screen::ScriptForm(state) => state.render(frame, area, strings),
                         Screen::ConfirmDeleteScript { state, .. } => state.render(frame, area, strings),
                         Screen::ScriptRun(state) => state.render(frame, area, strings),
@@ -980,6 +996,7 @@ impl App {
                     MainMenuAction::Delete(id) => NextStep::GoDelete(id),
                     MainMenuAction::Scripts(id) => NextStep::GoScripts(id),
                     MainMenuAction::Files(id) => NextStep::GoFiles(id),
+                    MainMenuAction::SshImport => NextStep::GoSshImport,
                     MainMenuAction::Lock => NextStep::Lock,
                     MainMenuAction::Settings => NextStep::GoSettings,
                     MainMenuAction::CycleSort => NextStep::CycleSort,
@@ -1045,6 +1062,12 @@ impl App {
                         ScriptTargetsOutcome::Run(targets) => NextStep::RunScript { origin_server_id, script_id, targets },
                     }
                 }
+                Screen::SshImport(state) => match state.handle_key(key) {
+                    SshImportOutcome::None => NextStep::None,
+                    SshImportOutcome::Cancel => NextStep::SshImportCancel,
+                    SshImportOutcome::Help => NextStep::Help,
+                    SshImportOutcome::Import(hosts) => NextStep::SshImportConfirm(hosts),
+                },
                 Screen::ScriptForm(state) => match state.handle_key(key, strings) {
                     ScriptFormOutcome::None => NextStep::None,
                     ScriptFormOutcome::Cancel => NextStep::ScriptFormCancel,
@@ -1255,6 +1278,13 @@ impl App {
                     u.screen = Screen::ScriptTargets(ScriptTargetsState::new(server_id, script_id, script_name));
                 }
             }),
+            NextStep::GoSshImport => self.open_ssh_import(),
+            NextStep::SshImportCancel => self.with_unlocked(|u| {
+                let mut menu = MainMenuState::new();
+                menu.clamp_selection(&u.config.servers, u.config.server_sort);
+                u.screen = Screen::MainMenu(menu);
+            }),
+            NextStep::SshImportConfirm(hosts) => self.import_ssh_hosts(hosts),
             NextStep::ScriptTargetsCancel => self.with_unlocked(|u| {
                 let ctx = match &u.screen {
                     Screen::ScriptTargets(state) => Some(state.origin_server_id),
@@ -1326,6 +1356,78 @@ impl App {
             (true, false) => AuthMode::None,
             (false, true) => AuthMode::PasswordTotp,
             (false, false) => AuthMode::Password,
+        }
+    }
+
+    /// Opens the `~/.ssh/config` picker.
+    ///
+    /// The file is read here rather than inside the screen so the screen has
+    /// no I/O in it at all and stays testable from a `&str`. A file that
+    /// cannot be read still opens the screen, carrying the reason: an empty
+    /// list with an explanation beats a key that appears to do nothing.
+    fn open_ssh_import(&mut self) {
+        let strings = self.lang.strings();
+        let read = match crate::ssh_config::default_path() {
+            Some(path) => std::fs::read_to_string(&path).map_err(|e| format!("{}{e}", strings.ssh_import_error_prefix)),
+            None => Err(strings.ssh_import_error_prefix.to_string()),
+        };
+        let (hosts, error) = match read {
+            Ok(text) => (crate::ssh_config::parse(&text), None),
+            Err(message) => (Vec::new(), Some(message)),
+        };
+        self.with_unlocked(|u| {
+            let state = SshImportState::new(hosts, &u.config.servers, error);
+            u.screen = Screen::SshImport(state);
+        });
+    }
+
+    /// Turns picked hosts into vault entries and saves once.
+    ///
+    /// **A host with no `IdentityFile` becomes agent auth.** That is the honest
+    /// reading of an OpenSSH block naming no key, and the only reading that
+    /// stores nothing: falling back to a password would prompt for a credential
+    /// the user never had, and inventing a key path would point at a file that
+    /// may not exist.
+    ///
+    /// A failed save rolls the entries back out of memory. Leaving them would
+    /// show the user a list of servers the vault does not have, which the next
+    /// launch would silently contradict.
+    fn import_ssh_hosts(&mut self, hosts: Vec<SshConfigHost>) {
+        let strings = self.lang.strings();
+        let AppState::Unlocked(u) = &mut self.state else {
+            return;
+        };
+
+        let before = u.config.servers.len();
+        for host in hosts {
+            let username = host.username();
+            let auth = match host.identity_file {
+                Some(key_path) => AuthMethod::SshKey { key_path, passphrase: None },
+                None => AuthMethod::Agent,
+            };
+            u.config.servers.push(ServerEntry::new(
+                host.alias,
+                host.hostname,
+                host.port.unwrap_or(crate::config::model::DEFAULT_PORT),
+                username,
+                auth,
+            ));
+        }
+        let imported = u.config.servers.len() - before;
+
+        match self.store.save(&u.config, &u.master_key, &u.slots) {
+            Ok(()) => {
+                let mut menu = MainMenuState::new();
+                menu.clamp_selection(&u.config.servers, u.config.server_sort);
+                u.status = Some(StatusMessage::new(format!("{}{imported}{}", strings.status_imported_prefix, strings.status_imported_suffix)));
+                u.screen = Screen::MainMenu(menu);
+            }
+            Err(e) => {
+                u.config.servers.truncate(before);
+                if let Screen::SshImport(state) = &mut u.screen {
+                    state.error = Some(format!("{}{e}", strings.save_error_prefix));
+                }
+            }
         }
     }
 

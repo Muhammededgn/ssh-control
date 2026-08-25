@@ -11,6 +11,7 @@ pub mod scripts_list;
 pub mod server_form;
 pub mod setup;
 pub mod settings;
+pub mod ssh_import;
 pub mod theme;
 pub mod totp_prompt;
 pub mod totp_unlock;

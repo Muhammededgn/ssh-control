@@ -81,6 +81,7 @@ fn screen_name(app: &App) -> &'static str {
             Screen::TotpPrompt(_) => "TotpPrompt",
             Screen::Scripts(_) => "Scripts",
             Screen::ScriptTargets(_) => "ScriptTargets",
+            Screen::SshImport(_) => "SshImport",
             Screen::ScriptForm(_) => "ScriptForm",
             Screen::ConfirmDeleteScript { .. } => "ConfirmDeleteScript",
             Screen::ScriptRun(_) => "ScriptRun",
@@ -183,6 +184,72 @@ fn a_totp_only_vault_is_offered_the_conversion_first() {
 // ---------------------------------------------------------------------------
 // Screen transitions
 // ---------------------------------------------------------------------------
+
+/// `i` reaches the importer, and a confirm writes through to disk.
+///
+/// The step is driven directly rather than through the screen because the
+/// screen's own picking is tested in `tui::ssh_import`; what this pins is the
+/// half `app.rs` owns — that the entries are built, saved and the list comes
+/// back.
+#[test]
+fn importing_from_ssh_config_persists_the_picked_hosts() {
+    let (dir, mut app) = password_vault(|_| {});
+    type_password(&mut app, PASSWORD);
+
+    press(&mut app, char_key('i'));
+    assert_eq!(screen_name(&app), "SshImport");
+
+    let hosts = crate::ssh_config::parse("Host web-1
+    HostName web1.example.com
+    User deploy
+    Port 2222
+");
+    app.apply_local_step(NextStep::SshImportConfirm(hosts)).expect("import");
+
+    assert_eq!(screen_name(&app), "MainMenu");
+    let entry = &unlocked(&app).config.servers[0];
+    assert_eq!(entry.name, "web-1");
+    assert_eq!(entry.host, "web1.example.com");
+    assert_eq!(entry.username, "deploy");
+    assert_eq!(entry.port, 2222);
+
+    drop(app);
+    let store = ConfigStore::new(dir.path().join("config.enc"));
+    assert_eq!(store.load(PASSWORD).expect("reopen").config.servers[0].host, "web1.example.com");
+}
+
+/// A block naming no key becomes agent auth, so the import stores no
+/// credential at all — which is the acceptance criterion the issue states.
+#[test]
+fn a_host_with_no_identity_file_is_imported_as_agent_auth() {
+    let (_dir, mut app) = password_vault(|_| {});
+    type_password(&mut app, PASSWORD);
+
+    let hosts = crate::ssh_config::parse("Host plain
+    HostName plain.example.com
+");
+    app.apply_local_step(NextStep::SshImportConfirm(hosts)).expect("import");
+
+    assert!(matches!(unlocked(&app).config.servers[0].auth, AuthMethod::Agent));
+}
+
+/// A save that fails must not leave the list showing servers the vault does
+/// not have — the next launch would silently contradict it.
+#[test]
+fn a_failed_import_rolls_the_entries_back_out_of_memory() {
+    let (dir, mut app) = password_vault(|_| {});
+    type_password(&mut app, PASSWORD);
+    press(&mut app, char_key('i'));
+    block_saves(&dir);
+
+    let hosts = crate::ssh_config::parse("Host web-1
+    HostName web1.example.com
+");
+    app.apply_local_step(NextStep::SshImportConfirm(hosts)).expect("import");
+
+    assert_eq!(screen_name(&app), "SshImport", "a failed save keeps the user where they were");
+    assert!(unlocked(&app).config.servers.is_empty(), "nothing may be left behind in memory");
+}
 
 #[test]
 fn adding_a_server_persists_it_and_returns_to_the_list() {
