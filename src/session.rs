@@ -10,6 +10,13 @@
 //! It sits above `ssh/`, not inside it: `ssh::connect` takes a `Target` and
 //! knows nothing about `ServerEntry` or the vault, and that separation is
 //! deliberate (see `ssh::Target`'s own note).
+//!
+//! A jump host is the one thing recorded through a second path, `observe_jumps`
+//! / `JumpRecord`, and it is not an oversight that it does not go through
+//! `SessionRecord`: **a bastion records a fingerprint and never a timestamp.**
+//! Passing through a machine is not connecting to it, and stamping
+//! `last_connected_unix` there would reorder the server list under
+//! `ServerSort::LastConnected` for a host nobody logged into.
 
 use std::io::Write;
 
@@ -18,6 +25,7 @@ use crate::config::device;
 use crate::config::SystemInfo;
 use crate::i18n::Strings;
 use crate::ssh::{self, HostKeyOutcome};
+use uuid::Uuid;
 use crate::ssh::script_runner::RunEvent;
 
 /// Everything one connection teaches the vault about a server.
@@ -58,6 +66,50 @@ pub async fn observe(connected: &ssh::Connected) -> SessionRecord {
     let mut record = observe_handshake(connected);
     record.system_info = ssh::sysinfo::fetch(&connected.handle).await.ok();
     record
+}
+
+/// What a bastion on the way taught the vault: a first-connect fingerprint,
+/// and nothing else.
+///
+/// Deliberately not a `SessionRecord`. That one also stamps
+/// `last_connected_unix`, and a host merely tunnelled through is not a
+/// connection the user made — stamping it would reorder the list under
+/// `ServerSort::LastConnected` and show "last connected: 2 minutes ago" on a
+/// machine nobody logged into. There is no sysinfo probe on a hop either, for
+/// the same reason: nothing asked about it.
+pub struct JumpRecord {
+    pub server_id: Uuid,
+    pub fingerprint: String,
+}
+
+/// Pairs the outcomes `connect` recorded for the chain with the entries they
+/// came from.
+///
+/// `jump_ids` is built in the same borrow that built the `Target`, in the same
+/// order, so index `i` is `Target::jumps[i]`. That correlation lives here
+/// rather than in `ssh/` because it is the one step that needs to know about
+/// `ServerEntry` and `Uuid`, which `ssh::connect` deliberately does not.
+///
+/// Only first connects produce a record. A hop already trusted has nothing to
+/// write, and a mismatch never gets this far — `connect` fails.
+pub fn observe_jumps(connected: &ssh::Connected, jump_ids: &[Uuid]) -> Vec<JumpRecord> {
+    connected
+        .jump_outcomes
+        .iter()
+        .zip(jump_ids)
+        .filter_map(|(outcome, &server_id)| match outcome {
+            HostKeyOutcome::FirstConnect { fingerprint } => Some(JumpRecord { server_id, fingerprint: fingerprint.clone() }),
+            HostKeyOutcome::Trusted | HostKeyOutcome::Mismatch { .. } => None,
+        })
+        .collect()
+}
+
+impl JumpRecord {
+    /// Writes the fingerprint and nothing else. See the type's own note for
+    /// why that is the whole of it.
+    pub fn apply_to(&self, entry: &mut ServerEntry) {
+        entry.host_key_fingerprint = Some(self.fingerprint.clone());
+    }
 }
 
 impl SessionRecord {

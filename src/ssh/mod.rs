@@ -7,4 +7,4 @@ pub mod sysinfo;
 pub mod transfer;
 
 pub use client::HostKeyOutcome;
-pub use session::{Connected, Target, connect};
+pub use session::{Connected, Endpoint, Target, connect};

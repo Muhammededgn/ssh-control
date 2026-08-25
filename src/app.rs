@@ -235,8 +235,8 @@ pub struct App {
 /// under the client.
 pub(crate) struct RemoteSession {
     server_id: Uuid,
-    #[allow(dead_code, reason = "owned to keep the channel alive for the lifetime of the sftp stream")]
-    handle: russh::client::Handle<crate::ssh::client::Handler>,
+    #[allow(dead_code, reason = "owned to keep the channel — and any bastion tunnel under it — alive for the lifetime of the sftp stream")]
+    connected: crate::ssh::Connected,
     sftp: crate::ssh::sftp::SftpClient<russh::ChannelStream<russh::client::Msg>>,
 }
 
@@ -1121,11 +1121,20 @@ impl App {
                 self.state = self.locked_state();
             }
             NextStep::GoAdd => self.with_unlocked(|u| {
-                u.screen = Screen::ServerForm(ServerFormState::new_add());
+                // Bound on its own statement: assigning inline keeps the borrow
+                // of `u.config.servers` alive across the write to `u.screen`.
+                let form = ServerFormState::new_add(&u.config.servers);
+                u.screen = Screen::ServerForm(form);
             }),
             NextStep::GoEdit(id) => self.with_unlocked(|u| {
-                if let Some(entry) = u.config.servers.iter().find(|s| s.id == id) {
-                    u.screen = Screen::ServerForm(ServerFormState::new_edit(entry));
+                let form = u
+                    .config
+                    .servers
+                    .iter()
+                    .find(|s| s.id == id)
+                    .map(|entry| ServerFormState::new_edit(entry, &u.config.servers));
+                if let Some(form) = form {
+                    u.screen = Screen::ServerForm(form);
                 }
             }),
             NextStep::GoDelete(id) => self.with_unlocked(|u| {
@@ -1445,6 +1454,7 @@ impl App {
             FormMode::Add => {
                 let mut entry = ServerEntry::new(data.name, data.host, data.port, data.username, data.auth);
                 entry.tags = data.tags;
+                entry.jump_host = data.jump_host;
                 u.config.servers.push(entry);
             }
             FormMode::Edit(id) => {
@@ -1455,6 +1465,7 @@ impl App {
                     entry.username = data.username;
                     entry.tags = data.tags;
                     entry.auth = data.auth;
+                    entry.jump_host = data.jump_host;
                 }
             }
         }
@@ -1485,6 +1496,15 @@ impl App {
         };
         let target = *target;
         u.config.servers.retain(|s| s.id != target);
+        // Anything that connected through it now connects direct. A `Uuid` left
+        // pointing at a deleted entry is a dangling reference that nothing
+        // would ever clean up, and it fails at connect time rather than here —
+        // long after the user could tell what caused it.
+        for entry in &mut u.config.servers {
+            if entry.jump_host == Some(target) {
+                entry.jump_host = None;
+            }
+        }
 
         let save_result = self.store.save(&u.config, &u.master_key, &u.slots);
         let mut menu = MainMenuState::new();
@@ -1776,12 +1796,24 @@ impl App {
                 // Placeholders are resolved here, where the entry is still
                 // borrowed — the expanded copies are what crosses the await.
                 let vars = ScriptVars::from_entry(e);
-                (ssh::Target::from_entry(e), e.scripts.iter().filter(|s| s.run_on_connect).map(|s| vars.expand_script(s)).collect::<Vec<_>>())
+                // So is the bastion chain, and it has to be: a `Uuid` means
+                // nothing once `config` is out of scope.
+                let target = ssh::Target::from_entry(e, &u.config.servers);
+                (target, e.scripts.iter().filter(|s| s.run_on_connect).map(|s| vars.expand_script(s)).collect::<Vec<_>>())
             }),
             AppState::Setup(_) | AppState::Unopenable | AppState::CannotOpen { .. } | AppState::Locked(_) | AppState::LockedTotpDaily(_) => None,
         };
         let Some((target, on_connect_scripts)) = target else {
             return Ok(());
+        };
+        // A chain that loops or names a deleted server fails before anything is
+        // opened, and reads as a connect error like any other.
+        let target = match target {
+            Ok(target) => target,
+            Err(e) => {
+                self.set_status(format!("{}{e}", strings.connect_error_prefix));
+                return Ok(());
+            }
         };
 
         // The list stays on screen through the handshake — a blank terminal
@@ -1815,7 +1847,8 @@ impl App {
         // now: a fingerprint persisted only once the session ended would
         // re-run TOFU if the process were killed during it.
         let mut record = session::observe_handshake(&connected);
-        self.record_session(id, &record);
+        let jump_records = session::observe_jumps(&connected, &target.jump_ids);
+        self.record_session(id, &record, &jump_records);
 
         // The late suspend. The primary buffer is handed over here and not a
         // line earlier, with a shell about to land on it.
@@ -1849,7 +1882,9 @@ impl App {
         // last good snapshot, so a second save would rewrite the whole vault to
         // store nothing.
         if record.system_info.is_some() {
-            self.record_session(id, &record);
+            // The hops were written above; there is nothing new to say about
+            // them, and re-applying would be a second pass over the same value.
+            self.record_session(id, &record, &[]);
         }
 
         if let AppState::Unlocked(u) = &mut self.state {
@@ -1863,10 +1898,17 @@ impl App {
     ///
     /// Best-effort, like every save `connect_flow` makes: a read-only config
     /// directory must not stand between the user and the shell they asked for.
-    fn record_session(&mut self, id: Uuid, record: &session::SessionRecord) {
+    fn record_session(&mut self, id: Uuid, record: &session::SessionRecord, jumps: &[session::JumpRecord]) {
         if let AppState::Unlocked(u) = &mut self.state {
             if let Some(e) = u.config.servers.iter_mut().find(|s| s.id == id) {
                 record.apply_to(e);
+            }
+            // Folded into the same save. A save per hop would rewrite the whole
+            // vault once per bastion for one field each.
+            for jump in jumps {
+                if let Some(e) = u.config.servers.iter_mut().find(|s| s.id == jump.server_id) {
+                    jump.apply_to(e);
+                }
             }
             let _ = self.store.save(&u.config, &u.master_key, &u.slots);
         }
@@ -1908,10 +1950,16 @@ impl App {
                 let origin = u.config.servers.iter().find(|s| s.id == origin_server_id);
                 origin.and_then(|origin| {
                     let definition = origin.scripts.iter().find(|s| s.id == script_id)?;
-                    let runs: Vec<(String, ssh::Target, Script)> = targets
+                    // The `Result` rides into the loop rather than ending the
+                    // whole run here: a bad jump chain on one host is exactly
+                    // the same kind of problem as a host that will not answer,
+                    // and that already does not stop a fleet run.
+                    let runs: Vec<(String, Result<ssh::Target>, Script)> = targets
                         .iter()
                         .filter_map(|id| u.config.servers.iter().find(|s| s.id == *id))
-                        .map(|e| (e.name.clone(), ssh::Target::from_entry(e), ScriptVars::from_entry(e).expand_script(definition)))
+                        .map(|e| {
+                            (e.name.clone(), ssh::Target::from_entry(e, &u.config.servers), ScriptVars::from_entry(e).expand_script(definition))
+                        })
                         .collect();
                     Some((origin.name.clone(), definition.name.clone(), runs))
                 })
@@ -1927,6 +1975,14 @@ impl App {
 
         for (server_name, target, script) in runs {
             run_state.server_started(&server_name);
+            let target = match target {
+                Ok(target) => target,
+                Err(e) => {
+                    run_state.server_connect_error(&format!("{e}"), strings);
+                    draw_run(terminal, &mut run_state, strings);
+                    continue;
+                }
+            };
             // Drawn before the connect, not after: a DNS lookup or a TCP
             // timeout can take seconds, and without this the screen would sit
             // on the previous host's output with no sign of which one it had
@@ -2077,12 +2133,16 @@ impl App {
 
         let context = match &self.state {
             AppState::Unlocked(u) => u.config.servers.iter().find(|e| e.id == id).map(|e| {
-                (ssh::Target::from_entry(e), e.name.clone(), e.last_remote_dir.clone(), e.last_local_dir.clone())
+                (ssh::Target::from_entry(e, &u.config.servers), e.name.clone(), e.last_remote_dir.clone(), e.last_local_dir.clone())
             }),
             _ => None,
         };
         let Some((target, server_name, last_remote, last_local)) = context else {
             return Ok(());
+        };
+        let target = match target {
+            Ok(target) => target,
+            Err(e) => return self.fail_to_open_files(e),
         };
 
         // The same indicator `Enter` shows, on the same row, because `f` and
@@ -2103,10 +2163,13 @@ impl App {
                 // Esc, with nothing yet built to tear down.
                 None => return Ok(()),
             };
-            let mut handle = connected.handle;
-            let opened = self.await_on_screen(terminal, sftp::open_session(&mut handle)).await;
+            // The whole `Connected` is kept, not just its handle: it owns the
+            // bastion sessions this one is tunnelled through, and dropping it
+            // here would close them out from under the sftp stream.
+            let mut connected = connected;
+            let opened = self.await_on_screen(terminal, sftp::open_session(&mut connected.handle)).await;
             match opened {
-                Some(Ok(sftp)) => self.remote = Some(RemoteSession { server_id: id, handle, sftp }),
+                Some(Ok(sftp)) => self.remote = Some(RemoteSession { server_id: id, connected, sftp }),
                 Some(Err(e)) => return self.fail_to_open_files(e),
                 None => return Ok(()),
             }

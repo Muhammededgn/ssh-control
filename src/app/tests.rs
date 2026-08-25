@@ -251,6 +251,28 @@ fn a_failed_import_rolls_the_entries_back_out_of_memory() {
     assert!(unlocked(&app).config.servers.is_empty(), "nothing may be left behind in memory");
 }
 
+/// Deleting a bastion must not leave the hosts behind it pointing at nothing.
+/// A dangling `Uuid` is a reference nothing would ever clean up, and it fails
+/// at connect time — long after the user could tell what caused it.
+#[test]
+fn deleting_a_bastion_puts_the_hosts_behind_it_back_on_a_direct_connect() {
+    let (_dir, mut app) = password_vault(|config| {
+        let bastion = entry("bastion");
+        let mut behind = entry("behind");
+        behind.jump_host = Some(bastion.id);
+        config.servers = vec![bastion, behind];
+    });
+    type_password(&mut app, PASSWORD);
+
+    let bastion_id = unlocked(&app).config.servers[0].id;
+    app.apply_local_step(NextStep::GoDelete(bastion_id)).expect("confirm");
+    app.apply_local_step(NextStep::ConfirmYes).expect("delete");
+
+    let servers = &unlocked(&app).config.servers;
+    assert_eq!(servers.len(), 1);
+    assert_eq!(servers[0].jump_host, None, "the reference must go with the entry");
+}
+
 #[test]
 fn adding_a_server_persists_it_and_returns_to_the_list() {
     let (dir, mut app) = password_vault(|_| {});
@@ -266,6 +288,7 @@ fn adding_a_server_persists_it_and_returns_to_the_list() {
         username: "root".into(),
         tags: vec!["prod".into()],
         auth: AuthMethod::password("hunter2"),
+        jump_host: None,
     };
     app.apply_local_step(NextStep::FormSubmit(data)).expect("submit");
 
@@ -488,7 +511,7 @@ fn a_handshake_record_lands_on_the_entry_and_is_saved() {
     type_password(&mut app, PASSWORD);
     let id = unlocked(&app).config.servers[0].id;
 
-    app.record_session(id, &session::SessionRecord { fingerprint: Some("SHA256:abc".into()), connected_at: 100, system_info: None });
+    app.record_session(id, &session::SessionRecord { fingerprint: Some("SHA256:abc".into()), connected_at: 100, system_info: None }, &[]);
 
     let e = &unlocked(&app).config.servers[0];
     assert_eq!(e.host_key_fingerprint.as_deref(), Some("SHA256:abc"));
@@ -512,9 +535,9 @@ fn the_probe_s_record_adds_system_info_without_moving_the_timestamp() {
     let id = unlocked(&app).config.servers[0].id;
 
     let mut record = session::SessionRecord { fingerprint: Some("SHA256:abc".into()), connected_at: 100, system_info: None };
-    app.record_session(id, &record);
+    app.record_session(id, &record, &[]);
     record.system_info = Some(SystemInfo { cpu_cores: Some(8), ..SystemInfo::default() });
-    app.record_session(id, &record);
+    app.record_session(id, &record, &[]);
 
     let e = &unlocked(&app).config.servers[0];
     assert_eq!(e.last_connected_unix, Some(100), "the connection time is stamped once");

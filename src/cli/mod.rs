@@ -162,7 +162,7 @@ fn run_connect(path: PathBuf, name: &str) -> Result<()> {
     };
     let entry = resolve(&u.config.servers, name)?;
     let id = entry.id;
-    let target = ssh::Target::from_entry(entry);
+    let target = ssh::Target::from_entry(entry, &u.config.servers)?;
     let vars = ScriptVars::from_entry(entry);
     let on_connect: Vec<_> = entry.scripts.iter().filter(|s| s.run_on_connect).map(|s| vars.expand_script(s)).collect();
 
@@ -179,9 +179,18 @@ fn run_connect(path: PathBuf, name: &str) -> Result<()> {
         // (`crate::session`), so a CLI connect records what a TUI one would:
         // the host key on a first connect, the timestamp, the sysinfo probe.
         let record = session::observe(&connected).await;
+        let jumps = session::observe_jumps(&connected, &target.jump_ids);
         if let AppState::Unlocked(u) = &mut app.state {
             if let Some(e) = u.config.servers.iter_mut().find(|s| s.id == id) {
                 record.apply_to(e);
+            }
+            // A bastion's first-connect fingerprint lands on the bastion's own
+            // entry, in the same save. See `session::JumpRecord` for why it
+            // gets a fingerprint and not a timestamp.
+            for jump in &jumps {
+                if let Some(e) = u.config.servers.iter_mut().find(|s| s.id == jump.server_id) {
+                    jump.apply_to(e);
+                }
             }
             // Best-effort, like the TUI's: a read-only config directory must
             // not stand between the user and the shell they asked for.

@@ -504,7 +504,7 @@ impl MainMenuState {
 
         if let Some(detail_area) = detail_area {
             let entry = self.selected_entry(servers, sort);
-            self.render_detail(frame, detail_area, entry, now, strings);
+            self.render_detail(frame, detail_area, entry, servers, now, strings);
         }
     }
 
@@ -513,7 +513,7 @@ impl MainMenuState {
     ///
     /// Nothing here is new information and nothing here is a new string — it is
     /// the same fields, given room to be read.
-    fn render_detail(&self, frame: &mut Frame, area: Rect, entry: Option<&ServerEntry>, now: u64, strings: &Strings) {
+    fn render_detail(&self, frame: &mut Frame, area: Rect, entry: Option<&ServerEntry>, servers: &[ServerEntry], now: u64, strings: &Strings) {
         let Some(entry) = entry else {
             frame.render_widget(widgets::panel(strings.main_menu_title), area);
             return;
@@ -547,6 +547,13 @@ impl MainMenuState {
                 label(strings.last_connected_label),
                 Span::raw(format_relative_time(ts, now, strings)),
             ]));
+        }
+        // Pane-only, deliberately: this does not go through `detail_parts`
+        // and so never falls back onto the row below 92 columns. A bastion is
+        // worth knowing about and is not worth a second name on a row that is
+        // already short of width — same call the scripts count above makes.
+        if let Some(via) = entry.jump_host.and_then(|id| servers.iter().find(|s| s.id == id)) {
+            lines.push(Line::from(vec![label(strings.detail_via_label), Span::raw(via.name.clone())]));
         }
         if !entry.scripts.is_empty() {
             lines.push(Line::from(vec![
@@ -633,6 +640,7 @@ mod tests {
                 last_remote_dir: None,
                 last_local_dir: None,
                 tags: Vec::new(),
+                jump_host: None,
             })
             .collect()
     }

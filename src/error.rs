@@ -50,6 +50,16 @@ pub enum AppError {
     #[error("host key changed for this server: new fingerprint {fingerprint}")]
     HostKeyChanged { fingerprint: String },
 
+    /// A failure that happened on the way, not at the destination.
+    ///
+    /// Carries the bastion's host because every error underneath it is worded
+    /// for the machine the user asked to reach. "host key changed for this
+    /// server" is alarming and wrong when the key that changed was the
+    /// bastion's, and "authentication failed" sends the user to check the
+    /// wrong `authorized_keys`.
+    #[error("via {host}: {source}")]
+    JumpFailed { host: String, #[source] source: Box<AppError> },
+
     #[error("key derivation error: {0}")]
     Kdf(String),
 

@@ -35,6 +35,7 @@ enum Field {
     Username,
     Tags,
     AuthType,
+    JumpHost,
     Password,
     KeyPath,
     KeyPassphrase,
@@ -47,6 +48,17 @@ pub struct ServerFormState {
     port: String,
     username: String,
     tags: String,
+    /// The bastion this host connects through, as an index into `jump_choices`
+    /// — `None` is a direct connect.
+    jump_host: Option<usize>,
+    /// Every entry this one may point at, captured when the form opened.
+    ///
+    /// Held rather than threaded per call (the way `ServerSort` is) because the
+    /// form needs a *name* to draw for an id, and because the set cannot change
+    /// while the form is on screen. Already filtered: the entry being edited
+    /// and anything that would close a loop are not in here, since offering a
+    /// choice that submit would then refuse is the worse design.
+    jump_choices: Vec<(Uuid, String)>,
     auth_kind: AuthKind,
     password: Zeroizing<String>,
     key_path: String,
@@ -62,6 +74,7 @@ pub struct ServerFormData {
     pub username: String,
     pub tags: Vec<String>,
     pub auth: AuthMethod,
+    pub jump_host: Option<Uuid>,
 }
 
 /// Splits the comma-separated tag field.
@@ -86,8 +99,41 @@ pub enum FormOutcome {
     Submit(ServerFormData),
 }
 
+/// Every server `subject` may be pointed at, excluding itself and anything
+/// that would close a loop.
+///
+/// Filtering here rather than validating on submit is the point: a choice the
+/// form would then refuse is a choice it should never have offered. The walk
+/// is the same one `ssh::Target::from_entry` does — a candidate is unusable
+/// exactly when following *its* chain arrives back at `subject`.
+fn jump_candidates(subject: Uuid, servers: &[ServerEntry]) -> Vec<(Uuid, String)> {
+    servers
+        .iter()
+        .filter(|c| c.id != subject && !reaches(c, subject, servers))
+        .map(|c| (c.id, c.name.clone()))
+        .collect()
+}
+
+/// Whether `from`'s own jump chain passes through `target`.
+///
+/// Bounded by the number of servers rather than by a chain length: a chain
+/// already containing a cycle would otherwise spin here, and this runs on a
+/// vault that may already hold one from an older build.
+fn reaches(from: &ServerEntry, target: Uuid, servers: &[ServerEntry]) -> bool {
+    let mut at = from;
+    for _ in 0..servers.len() {
+        let Some(next_id) = at.jump_host else { return false };
+        if next_id == target {
+            return true;
+        }
+        let Some(next) = servers.iter().find(|s| s.id == next_id) else { return false };
+        at = next;
+    }
+    false
+}
+
 impl ServerFormState {
-    pub fn new_add() -> Self {
+    pub fn new_add(servers: &[ServerEntry]) -> Self {
         Self {
             mode: FormMode::Add,
             name: String::new(),
@@ -95,6 +141,10 @@ impl ServerFormState {
             port: "22".to_string(),
             username: String::new(),
             tags: String::new(),
+            jump_host: None,
+            // A new entry has no id yet, so nothing can point back at it and
+            // every existing server is a candidate.
+            jump_choices: servers.iter().map(|s| (s.id, s.name.clone())).collect(),
             auth_kind: AuthKind::Password,
             password: Zeroizing::new(String::new()),
             key_path: String::new(),
@@ -104,7 +154,7 @@ impl ServerFormState {
         }
     }
 
-    pub fn new_edit(entry: &ServerEntry) -> Self {
+    pub fn new_edit(entry: &ServerEntry, servers: &[ServerEntry]) -> Self {
         let (auth_kind, password, key_path, key_passphrase) = match &entry.auth {
             AuthMethod::Password { password } => (
                 AuthKind::Password,
@@ -126,6 +176,7 @@ impl ServerFormState {
             ),
         };
 
+        let jump_choices = jump_candidates(entry.id, servers);
         Self {
             mode: FormMode::Edit(entry.id),
             name: entry.name.clone(),
@@ -133,6 +184,8 @@ impl ServerFormState {
             port: entry.port.to_string(),
             username: entry.username.clone(),
             tags: entry.tags.join(", "),
+            jump_host: entry.jump_host.and_then(|id| jump_choices.iter().position(|(c, _)| *c == id)),
+            jump_choices,
             auth_kind,
             password,
             key_path,
@@ -144,6 +197,11 @@ impl ServerFormState {
 
     fn fields(&self) -> Vec<Field> {
         let mut f = vec![Field::Name, Field::Host, Field::Port, Field::Username, Field::Tags, Field::AuthType];
+        // Only when there is somewhere to go: a one-server vault has no
+        // bastion to offer, and an unusable row is worse than no row.
+        if !self.jump_choices.is_empty() {
+            f.push(Field::JumpHost);
+        }
         match self.auth_kind {
             AuthKind::Password => f.push(Field::Password),
             AuthKind::SshKey => {
@@ -166,6 +224,8 @@ impl ServerFormState {
             KeyCode::BackTab => self.move_focus(-1),
             KeyCode::Left if self.focus == Field::AuthType => self.cycle_auth_kind(false),
             KeyCode::Right if self.focus == Field::AuthType => self.cycle_auth_kind(true),
+            KeyCode::Left if self.focus == Field::JumpHost => self.cycle_jump_host(false),
+            KeyCode::Right if self.focus == Field::JumpHost => self.cycle_jump_host(true),
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => return self.submit(strings),
             KeyCode::Enter => {
                 let fields = self.fields();
@@ -179,7 +239,7 @@ impl ServerFormState {
                     buf.pop();
                 }
             }
-            KeyCode::Char(c) if self.focus != Field::AuthType => {
+            KeyCode::Char(c) if !matches!(self.focus, Field::AuthType | Field::JumpHost) => {
                 if let Some(buf) = self.active_buffer_mut() {
                     buf.push(c);
                 }
@@ -214,6 +274,20 @@ impl ServerFormState {
         };
     }
 
+    /// Steps through `(direct) -> each candidate -> (direct)`. The empty end
+    /// is a real stop on the cycle rather than a separate key, so clearing a
+    /// bastion needs no binding of its own.
+    fn cycle_jump_host(&mut self, forward: bool) {
+        let len = self.jump_choices.len();
+        if len == 0 {
+            return;
+        }
+        // One longer than the list: index `len` is "(direct)".
+        let at = self.jump_host.map_or(len, |i| i);
+        let next = if forward { (at + 1) % (len + 1) } else { (at + len) % (len + 1) };
+        self.jump_host = (next < len).then_some(next);
+    }
+
     fn active_buffer_mut(&mut self) -> Option<&mut String> {
         match self.focus {
             Field::Name => Some(&mut self.name),
@@ -224,7 +298,7 @@ impl ServerFormState {
             Field::Password => Some(&mut self.password),
             Field::KeyPath => Some(&mut self.key_path),
             Field::KeyPassphrase => Some(&mut self.key_passphrase),
-            Field::AuthType => None,
+            Field::AuthType | Field::JumpHost => None,
         }
     }
 
@@ -280,6 +354,7 @@ impl ServerFormState {
             username: self.username.trim().to_string(),
             tags: parse_tags(&self.tags),
             auth,
+            jump_host: self.jump_host.map(|i| self.jump_choices[i].0),
         })
     }
 
@@ -319,6 +394,17 @@ impl ServerFormState {
                 self,
             ),
         ];
+
+        // `fields()` puts this straight after the auth type when there is
+        // anywhere to go, so the `lines` vec has to as well — the two orders
+        // are what `focus_row` below relies on.
+        if !self.jump_choices.is_empty() {
+            let via = match self.jump_host {
+                Some(i) => self.jump_choices[i].1.clone(),
+                None => strings.jump_host_none.to_string(),
+            };
+            lines.push(field_line(strings.field_jump_host, via, Field::JumpHost, self));
+        }
 
         match self.auth_kind {
             AuthKind::Password => {
@@ -370,7 +456,7 @@ mod tests {
     /// enum alone.
     #[test]
     fn the_agent_kind_asks_for_nothing_and_submits_from_the_auth_row() {
-        let mut state = ServerFormState::new_add();
+        let mut state = ServerFormState::new_add(&[]);
         state.name = "box".into();
         state.host = "example.com".into();
         state.username = "root".into();
@@ -393,7 +479,7 @@ mod tests {
     /// presses away whichever way you turn.
     #[test]
     fn the_auth_kind_cycles_both_ways() {
-        let mut state = ServerFormState::new_add();
+        let mut state = ServerFormState::new_add(&[]);
         tab_to(&mut state, Field::AuthType);
         assert_eq!(state.auth_kind, AuthKind::Password);
 
@@ -401,6 +487,66 @@ mod tests {
         assert_eq!(state.auth_kind, AuthKind::Agent, "Left from the first kind wraps to the last");
         state.handle_key(KeyEvent::from(KeyCode::Right), &EN);
         assert_eq!(state.auth_kind, AuthKind::Password);
+    }
+
+    fn server(name: &str) -> ServerEntry {
+        ServerEntry::new(name.into(), format!("{name}.example.com"), 22, "root".into(), AuthMethod::Agent)
+    }
+
+    /// Offering a choice that submit would then refuse is the worse design, so
+    /// the loop-formers are gone from the list rather than caught later.
+    #[test]
+    fn the_jump_candidates_exclude_self_and_anything_that_would_close_a_loop() {
+        // behind -> bastion, so bastion must not be offered `behind`.
+        let mut servers = vec![server("bastion"), server("behind"), server("unrelated")];
+        let bastion_id = servers[0].id;
+        servers[1].jump_host = Some(bastion_id);
+
+        let state = ServerFormState::new_edit(&servers[0], &servers);
+        let names: Vec<_> = state.jump_choices.iter().map(|(_, n)| n.as_str()).collect();
+        assert_eq!(names, ["unrelated"], "self and the host behind it are both out");
+    }
+
+    /// A vault holding a cycle from an older build must not hang the form.
+    #[test]
+    fn a_cycle_already_in_the_vault_does_not_spin_the_candidate_walk() {
+        let mut servers = vec![server("a"), server("b")];
+        let (a, b) = (servers[0].id, servers[1].id);
+        servers[0].jump_host = Some(b);
+        servers[1].jump_host = Some(a);
+        assert!(ServerFormState::new_edit(&servers[0], &servers).jump_choices.is_empty());
+    }
+
+    /// `(direct)` is a stop on the cycle rather than a key of its own, so
+    /// clearing a bastion needs no extra binding — and the row only exists
+    /// when there is somewhere to go.
+    #[test]
+    fn the_jump_row_cycles_through_direct_and_is_absent_with_no_candidates() {
+        assert!(!ServerFormState::new_add(&[]).fields().contains(&Field::JumpHost));
+
+        let servers = vec![server("bastion")];
+        let mut state = ServerFormState::new_add(&servers);
+        tab_to(&mut state, Field::JumpHost);
+        assert_eq!(state.jump_host, None);
+
+        state.handle_key(KeyEvent::from(KeyCode::Right), &EN);
+        assert_eq!(state.jump_host, Some(0));
+        state.handle_key(KeyEvent::from(KeyCode::Right), &EN);
+        assert_eq!(state.jump_host, None, "one candidate means two stops, and it wraps");
+        state.handle_key(KeyEvent::from(KeyCode::Left), &EN);
+        assert_eq!(state.jump_host, Some(0));
+    }
+
+    /// The row has to appear in `fields()` and in `lines` at the same index,
+    /// or `render_form` scrolls to a different row than the one with focus.
+    #[test]
+    fn the_jump_row_is_drawn_where_the_focus_order_puts_it() {
+        let servers = vec![server("bastion")];
+        let mut state = ServerFormState::new_add(&servers);
+        tab_to(&mut state, Field::JumpHost);
+        let screen = render(&state, 80, 24);
+        assert!(screen.contains(EN.jump_host_none), "the direct end of the cycle is drawn");
+        assert_eq!(state.fields().iter().position(|f| *f == Field::JumpHost), Some(6));
     }
 
     fn tab_to(state: &mut ServerFormState, field: Field) {
@@ -418,7 +564,7 @@ mod tests {
     /// were silently cut off, so focus could sit on a field nobody could see.
     #[test]
     fn the_focused_field_stays_on_screen_when_the_form_does_not_fit() {
-        let mut state = ServerFormState::new_add();
+        let mut state = ServerFormState::new_add(&[]);
         tab_to(&mut state, Field::Password);
 
         // Seven rows: two for the border, five for eight lines of form.
@@ -430,11 +576,11 @@ mod tests {
     /// Scrolled content is only honest if the frame says there is more.
     #[test]
     fn a_clamped_form_says_there_is_more_above() {
-        let mut state = ServerFormState::new_add();
+        let mut state = ServerFormState::new_add(&[]);
         tab_to(&mut state, Field::Password);
         assert!(render(&state, 60, 7).contains('↑'));
 
-        let fits = ServerFormState::new_add();
+        let fits = ServerFormState::new_add(&[]);
         let full = render(&fits, 60, 20);
         assert!(!full.contains('↑') && !full.contains('↓'), "a form that fits gets no arrows");
     }
@@ -443,7 +589,7 @@ mod tests {
     /// rather than rendering a frame with nothing in it.
     #[test]
     fn a_frame_too_small_for_the_form_says_so() {
-        let state = ServerFormState::new_add();
+        let state = ServerFormState::new_add(&[]);
         let rendered = render(&state, 60, 4);
         assert!(rendered.contains("too small"));
         assert!(!rendered.contains(EN.field_name));
@@ -469,7 +615,7 @@ mod tests {
     fn editing_an_entry_shows_its_tags_back() {
         let mut entry = ServerEntry::new("box".into(), "h".into(), 22, "root".into(), AuthMethod::password("x"));
         entry.tags = vec!["prod".into(), "eu".into()];
-        let state = ServerFormState::new_edit(&entry);
+        let state = ServerFormState::new_edit(&entry, &[]);
         assert!(render(&state, 60, 20).contains("prod, eu"));
     }
 }

@@ -145,6 +145,18 @@ pub struct ServerEntry {
     /// is what shows in the list. Matching and sorting fold case themselves.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// The bastion to reach this host through, or `None` for a direct connect.
+    ///
+    /// By `Uuid` rather than by name, so renaming the bastion does not silently
+    /// break every host behind it. Additive and `serde(default)` — an existing
+    /// vault reads back with none and nothing stored changes meaning, so no
+    /// schema bump, same reasoning as `tags` and `ScriptStep::timeout_secs`.
+    ///
+    /// The chain it starts is resolved and cycle-checked in
+    /// `ssh::Target::from_entry`, not here: a `Uuid` is only meaningful against
+    /// the whole server list, and this type holds one entry.
+    #[serde(default)]
+    pub jump_host: Option<Uuid>,
 }
 
 impl ServerEntry {
@@ -163,6 +175,7 @@ impl ServerEntry {
             last_remote_dir: None,
             last_local_dir: None,
             tags: Vec::new(),
+            jump_host: None,
         }
     }
 }
@@ -272,6 +285,7 @@ impl std::fmt::Debug for ServerEntry {
             .field("last_remote_dir", &self.last_remote_dir)
             .field("last_local_dir", &self.last_local_dir)
             .field("tags", &self.tags)
+            .field("jump_host", &self.jump_host)
             .finish()
     }
 }
@@ -303,6 +317,7 @@ mod tests {
         assert_eq!(config.servers[0].last_remote_dir, None, "the browser's remembered directories are additive");
         assert_eq!(config.servers[0].last_local_dir, None);
         assert!(config.servers[0].tags.is_empty(), "tags are additive; an existing vault has none");
+        assert_eq!(config.servers[0].jump_host, None, "a bastion is additive too; an existing vault connects direct");
         assert_eq!(config.server_sort, ServerSort::Name, "an existing vault sorts by name");
         let AuthMethod::Password { password } = &config.servers[0].auth else {
             panic!("expected password auth");
