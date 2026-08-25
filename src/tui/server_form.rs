@@ -283,7 +283,7 @@ impl ServerFormState {
             return;
         }
         // One longer than the list: index `len` is "(direct)".
-        let at = self.jump_host.map_or(len, |i| i);
+        let at = self.jump_host.unwrap_or(len);
         let next = if forward { (at + 1) % (len + 1) } else { (at + len) % (len + 1) };
         self.jump_host = (next < len).then_some(next);
     }
