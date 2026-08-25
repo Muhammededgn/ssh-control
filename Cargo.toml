@@ -1,6 +1,6 @@
 [package]
 name = "ssh-control"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 description = "Local, encrypted SSH connection manager with an interactive TUI (unix only)"
 authors = ["R.M. Emin \"Toyar\" Doğan"]
