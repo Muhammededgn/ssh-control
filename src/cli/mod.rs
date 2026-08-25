@@ -173,7 +173,7 @@ fn run_connect(path: PathBuf, name: &str) -> Result<()> {
         // path has to enable it, and restore it however the scope is left.
         let _raw = unlock::RawMode::enable()?;
 
-        let mut connected = ssh::connect(&target).await?;
+        let connected = ssh::connect(&target).await?;
 
         // The same three beats as the TUI's connect, through the same policy
         // (`crate::session`), so a CLI connect records what a TUI one would:
@@ -199,7 +199,7 @@ fn run_connect(path: PathBuf, name: &str) -> Result<()> {
 
         for script in &on_connect {
             let mut partial = String::new();
-            script_runner_run(&mut connected.handle, script, strings, &mut partial).await;
+            script_runner_run(&connected.handle, script, strings, &mut partial).await;
         }
 
         ssh::pty_bridge::run_interactive(&connected.handle).await
@@ -207,7 +207,7 @@ fn run_connect(path: PathBuf, name: &str) -> Result<()> {
 }
 
 async fn script_runner_run(
-    handle: &mut russh::client::Handle<ssh::client::Handler>,
+    handle: &russh::client::Handle<ssh::client::Handler>,
     script: &crate::config::Script,
     strings: &'static crate::i18n::Strings,
     partial: &mut String,

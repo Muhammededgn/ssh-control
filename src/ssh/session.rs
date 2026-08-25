@@ -23,7 +23,13 @@ const MAX_JUMPS: usize = 8;
 pub struct Connected {
     /// The destination session. Declared **first** so it drops before the
     /// bastions it is tunnelled through — see the note on `jumps`.
-    pub handle: client::Handle<Handler>,
+    ///
+    /// `Arc` because a port forward's accept loop has to keep opening channels
+    /// on it while `App::run` is blocked inside the PTY await, and
+    /// `client::Handle` is not `Clone` — it owns an `UnboundedReceiver`. Every
+    /// channel-opening method takes `&self`, so one shared handle serves the
+    /// session, the probe and every forward at once.
+    pub handle: Arc<client::Handle<Handler>>,
     pub host_key_outcome: HostKeyOutcome,
     /// One per `Target::jumps`, in the same order, so the caller can pair them
     /// back up with the entries it resolved the chain from. Empty for a direct
@@ -165,7 +171,7 @@ pub async fn connect(server: &Target) -> Result<Connected> {
     }
 
     let (handle, host_key_outcome) = open_hop(jumps.last(), &server.endpoint).await?;
-    Ok(Connected { handle, host_key_outcome, jump_outcomes, jumps })
+    Ok(Connected { handle: Arc::new(handle), host_key_outcome, jump_outcomes, jumps })
 }
 
 /// Opens and authenticates one hop, over `carrier` if there is one and over a

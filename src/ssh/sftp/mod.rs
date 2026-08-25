@@ -23,7 +23,7 @@ use crate::error::{AppError, Result};
 /// unexplained EOF half way through the handshake, which is why the reply is
 /// consumed here, before the channel becomes a stream.
 pub async fn open_session(
-    handle: &mut russh_client::Handle<Handler>,
+    handle: &russh_client::Handle<Handler>,
 ) -> Result<SftpClient<russh::ChannelStream<russh_client::Msg>>> {
     let mut channel: Channel<russh_client::Msg> = handle.channel_open_session().await?;
     channel.request_subsystem(true, "sftp").await?;

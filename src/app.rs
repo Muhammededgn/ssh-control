@@ -1829,7 +1829,7 @@ impl App {
 
         // A connect that failed never suspends. Handing the primary buffer over
         // to show an error the status bar can show is the bug.
-        let mut connected = match connect_result {
+        let connected = match connect_result {
             Ok(connected) => connected,
             Err(AppError::HostKeyChanged { fingerprint }) => {
                 self.set_status(format!("{}{fingerprint}{}", strings.host_key_changed_prefix, strings.host_key_changed_suffix));
@@ -1859,7 +1859,7 @@ impl App {
         // (now-suspended) primary screen buffer.
         for script in &on_connect_scripts {
             let mut partial = String::new();
-            script_runner::run_script(&mut connected.handle, script, |event| {
+            script_runner::run_script(&connected.handle, script, |event| {
                 session::print_script_event_plain(event, strings, &mut partial);
             })
             .await;
@@ -1990,7 +1990,7 @@ impl App {
             draw_run(terminal, &mut run_state, strings);
 
             match ssh::connect(&target).await {
-                Ok(mut connected) => {
+                Ok(connected) => {
                     // The events travel through a channel rather than straight
                     // into `run_state`, and that is what makes the whole thing
                     // work: the run future must not borrow the screen, or the
@@ -1998,7 +1998,7 @@ impl App {
                     // it either.
                     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
                     {
-                        let mut run = std::pin::pin!(script_runner::run_script(&mut connected.handle, &script, move |event| {
+                        let mut run = std::pin::pin!(script_runner::run_script(&connected.handle, &script, move |event| {
                             let _ = tx.send(event.into_owned());
                         }));
                         loop {
@@ -2166,8 +2166,7 @@ impl App {
             // The whole `Connected` is kept, not just its handle: it owns the
             // bastion sessions this one is tunnelled through, and dropping it
             // here would close them out from under the sftp stream.
-            let mut connected = connected;
-            let opened = self.await_on_screen(terminal, sftp::open_session(&mut connected.handle)).await;
+            let opened = self.await_on_screen(terminal, sftp::open_session(&connected.handle)).await;
             match opened {
                 Some(Ok(sftp)) => self.remote = Some(RemoteSession { server_id: id, connected, sftp }),
                 Some(Err(e)) => return self.fail_to_open_files(e),

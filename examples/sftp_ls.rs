@@ -37,8 +37,8 @@ async fn main() {
         jump_ids: Vec::new(),
     };
 
-    let mut connected = ssh::connect(&target).await.expect("connect");
-    let mut client = sftp::open_session(&mut connected.handle).await.expect("sftp subsystem");
+    let connected = ssh::connect(&target).await.expect("connect");
+    let mut client = sftp::open_session(&connected.handle).await.expect("sftp subsystem");
 
     let dir = match args.get(5) {
         Some(dir) => dir.clone(),

@@ -194,7 +194,7 @@ fn should_run(condition: &StepCondition, prev: Option<&StepStatus>) -> bool {
 /// finishes. Mirrors `ssh::sysinfo::fetch`'s exec-channel-per-command pattern,
 /// generalized to a whole ordered chain with per-step conditions.
 pub async fn run_script(
-    handle: &mut client::Handle<Handler>,
+    handle: &client::Handle<Handler>,
     script: &Script,
     mut on_event: impl FnMut(RunEvent),
 ) -> Vec<StepStatus> {
@@ -231,7 +231,7 @@ pub async fn run_script(
 }
 
 async fn run_step(
-    handle: &mut client::Handle<Handler>,
+    handle: &client::Handle<Handler>,
     command: &str,
     timeout: Duration,
     mut on_output: impl FnMut(&[u8]),
