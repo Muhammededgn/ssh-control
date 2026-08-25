@@ -137,6 +137,26 @@ impl SessionRecord {
 /// entered one, so in both cases this is writing to the user's own terminal.
 /// `\r\n` rather than `\n` because raw mode is on and a bare newline would
 /// stair-step.
+/// Prints what the forwards did, plainly, to the primary buffer.
+///
+/// Called from both connect paths after `suspend()` and before the on-connect
+/// scripts, so it lands in scrollback alongside them — which CLAUDE.md notes
+/// is often the reason someone connected. It cannot be a status message: the
+/// terminal is suspended and the status bar is not on screen.
+///
+/// The labels are `ssh`'s own flag spellings and are not translated; only the
+/// error prefix is, and it is one that already exists.
+pub fn print_forward_report(forwards: &ssh::forward::Forwards, strings: &Strings) {
+    let mut out = std::io::stdout();
+    for started in &forwards.started {
+        let _ = write!(out, "{}\r\n", started.label);
+    }
+    for failed in &forwards.failed {
+        let _ = write!(out, "{}{}: {}\r\n", strings.log_error_prefix, failed.label, failed.error);
+    }
+    let _ = out.flush();
+}
+
 pub fn print_script_event_plain(event: RunEvent, strings: &Strings, partial: &mut String) {
     let mut out = std::io::stdout();
 

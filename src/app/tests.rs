@@ -82,6 +82,9 @@ fn screen_name(app: &App) -> &'static str {
             Screen::Scripts(_) => "Scripts",
             Screen::ScriptTargets(_) => "ScriptTargets",
             Screen::SshImport(_) => "SshImport",
+            Screen::Forwards(_) => "Forwards",
+            Screen::ForwardForm(_) => "ForwardForm",
+            Screen::ConfirmDeleteForward { .. } => "ConfirmDeleteForward",
             Screen::ScriptForm(_) => "ScriptForm",
             Screen::ConfirmDeleteScript { .. } => "ConfirmDeleteScript",
             Screen::ScriptRun(_) => "ScriptRun",
@@ -271,6 +274,96 @@ fn deleting_a_bastion_puts_the_hosts_behind_it_back_on_a_direct_connect() {
     let servers = &unlocked(&app).config.servers;
     assert_eq!(servers.len(), 1);
     assert_eq!(servers[0].jump_host, None, "the reference must go with the entry");
+}
+
+/// `p` reaches the forwards list, and add / toggle / delete each write
+/// through. The rules are the one thing here that a *session* acts on, so a
+/// rule that is in memory and not on disk is one that quietly does not run
+/// next launch.
+#[test]
+fn port_forwards_are_added_toggled_and_deleted_through_the_list() {
+    let (dir, mut app) = password_vault(|config| config.servers = vec![entry("web-1")]);
+    type_password(&mut app, PASSWORD);
+
+    let server_id = unlocked(&app).config.servers[0].id;
+    press(&mut app, char_key('p'));
+    assert_eq!(screen_name(&app), "Forwards");
+
+    press(&mut app, char_key('a'));
+    assert_eq!(screen_name(&app), "ForwardForm");
+    let kind = crate::config::ForwardKind::Local {
+        bind_addr: "127.0.0.1".into(),
+        bind_port: 8080,
+        dest_host: "db.internal".into(),
+        dest_port: 5432,
+    };
+    app.apply_local_step(NextStep::ForwardFormSave(crate::tui::forward_form::ForwardFormData { id: None, kind }))
+        .expect("save");
+
+    assert_eq!(screen_name(&app), "Forwards");
+    let rule_id = unlocked(&app).config.servers[0].forwards[0].id;
+    assert!(unlocked(&app).config.servers[0].forwards[0].enabled);
+
+    // Off, but kept — that is what the flag is for.
+    app.apply_local_step(NextStep::ForwardToggle(rule_id)).expect("toggle");
+    assert!(!unlocked(&app).config.servers[0].forwards[0].enabled);
+    assert_eq!(unlocked(&app).config.servers[0].forwards.len(), 1);
+
+    app.apply_local_step(NextStep::GoForwardDeleteConfirm(rule_id)).expect("confirm");
+    assert_eq!(screen_name(&app), "ConfirmDeleteForward");
+    app.apply_local_step(NextStep::ConfirmDeleteForwardNo).expect("keep it");
+    assert_eq!(screen_name(&app), "Forwards");
+    assert_eq!(unlocked(&app).config.servers[0].forwards.len(), 1, "\"no\" keeps the rule");
+
+    app.apply_local_step(NextStep::GoForwardDeleteConfirm(rule_id)).expect("confirm");
+    app.apply_local_step(NextStep::ConfirmDeleteForwardYes).expect("delete");
+    assert_eq!(screen_name(&app), "Forwards");
+    assert!(unlocked(&app).config.servers[0].forwards.is_empty());
+
+    // Every step above saved, so the vault agrees. Checked after the app is
+    // dropped: `VaultLock` holds the flock in this process, and a second store
+    // on the same file would contend with it.
+    drop(app);
+    let store = ConfigStore::new(dir.path().join("config.enc"));
+    assert!(store.load(PASSWORD).expect("reopen").config.servers[0].forwards.is_empty());
+    let _ = server_id;
+}
+
+/// A rule turned off is a rule that is still there next launch. The flag is
+/// the whole reason `d` is not the only way to stop a forward.
+#[test]
+fn a_disabled_forward_survives_a_restart_still_disabled() {
+    let (dir, mut app) = password_vault(|config| config.servers = vec![entry("web-1")]);
+    type_password(&mut app, PASSWORD);
+    let server_id = unlocked(&app).config.servers[0].id;
+
+    app.apply_local_step(NextStep::GoForwards(server_id)).expect("open");
+    let kind = crate::config::ForwardKind::Dynamic { bind_addr: "127.0.0.1".into(), bind_port: 1080 };
+    app.apply_local_step(NextStep::GoForwardAdd).expect("add");
+    app.apply_local_step(NextStep::ForwardFormSave(crate::tui::forward_form::ForwardFormData { id: None, kind }))
+        .expect("save");
+    let rule_id = unlocked(&app).config.servers[0].forwards[0].id;
+    app.apply_local_step(NextStep::ForwardToggle(rule_id)).expect("toggle");
+
+    drop(app);
+    let store = ConfigStore::new(dir.path().join("config.enc"));
+    let reopened = store.load(PASSWORD).expect("reopen");
+    assert_eq!(reopened.config.servers[0].forwards.len(), 1);
+    assert!(!reopened.config.servers[0].forwards[0].enabled);
+}
+
+/// None of the forward steps suspends the terminal, holds a connection or
+/// redraws from inside an await, so none of them belongs in
+/// `handle_unlocked_key`'s six-arm match — putting one there would quietly
+/// make it untestable.
+#[test]
+fn the_forward_steps_need_no_terminal() {
+    let (_dir, mut app) = password_vault(|config| config.servers = vec![entry("web-1")]);
+    type_password(&mut app, PASSWORD);
+
+    for step in [NextStep::GoForwards(unlocked(&app).config.servers[0].id), NextStep::GoForwardAdd, NextStep::ForwardFormCancel, NextStep::ForwardsBack] {
+        assert!(app.apply_local_step(step).expect("step").is_none(), "a forward step must not need a terminal");
+    }
 }
 
 #[test]

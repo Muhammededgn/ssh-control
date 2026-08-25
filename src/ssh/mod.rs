@@ -1,4 +1,5 @@
 pub mod client;
+pub mod forward;
 pub mod pty_bridge;
 pub mod script_runner;
 pub mod session;

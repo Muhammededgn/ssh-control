@@ -157,6 +157,86 @@ pub struct ServerEntry {
     /// the whole server list, and this type holds one entry.
     #[serde(default)]
     pub jump_host: Option<Uuid>,
+    /// Port forwards started with this server's session and torn down with it.
+    ///
+    /// Additive and `serde(default)`, so an existing vault reads back with
+    /// none — no schema bump, same reasoning as `tags` and `jump_host`.
+    #[serde(default)]
+    pub forwards: Vec<ForwardRule>,
+}
+
+/// One `-L`, `-R` or `-D` rule.
+///
+/// No credential ever lands in here, so nothing needs `Secret`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForwardRule {
+    /// Addressable from the UI, like `Script`.
+    pub id: Uuid,
+    /// Whether it is started with the session. A rule can be kept and turned
+    /// off — deleting one to stop it for an afternoon means retyping four
+    /// fields to get it back.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub kind: ForwardKind,
+}
+
+/// The three forms, shaped per variant rather than one flat struct with two
+/// fields that mean nothing for a third of the rules: a SOCKS proxy's
+/// destination is whatever each client asks for, so `Dynamic` genuinely has
+/// none.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ForwardKind {
+    /// `ssh -L`: listen here, connect from the far end.
+    Local { bind_addr: String, bind_port: u16, dest_host: String, dest_port: u16 },
+    /// `ssh -R`: the server listens, and connections come back to us.
+    Remote { bind_addr: String, bind_port: u16, dest_host: String, dest_port: u16 },
+    /// `ssh -D`: a local SOCKS5 proxy, with the far end doing the connecting.
+    Dynamic { bind_addr: String, bind_port: u16 },
+}
+
+/// What a forward binds to when the user does not say otherwise.
+///
+/// **Loopback, never `0.0.0.0`.** A rule lives in the vault and starts itself
+/// on every connect, so a default of "every interface" would turn "I saved a
+/// rule" into "I published my database to the LAN" — silently, and on whatever
+/// network the laptop happened to be on. Binding wider is the user's to type.
+pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1";
+
+impl ForwardKind {
+    /// Where this rule listens. For `Remote` that is the *server's* address,
+    /// which is what makes the label worth reading.
+    pub fn bind(&self) -> (&str, u16) {
+        match self {
+            ForwardKind::Local { bind_addr, bind_port, .. }
+            | ForwardKind::Remote { bind_addr, bind_port, .. }
+            | ForwardKind::Dynamic { bind_addr, bind_port } => (bind_addr, *bind_port),
+        }
+    }
+}
+
+impl ForwardRule {
+    pub fn new(kind: ForwardKind) -> Self {
+        Self { id: Uuid::new_v4(), enabled: true, kind }
+    }
+
+    /// `-L 127.0.0.1:8080 -> db.internal:5432`, for the pre-shell report and
+    /// the list. Not translated: these are `ssh`'s own flag names, and someone
+    /// reading this line is reading it against `ssh -L`.
+    pub fn label(&self) -> String {
+        match &self.kind {
+            ForwardKind::Local { bind_addr, bind_port, dest_host, dest_port } => {
+                format!("-L {bind_addr}:{bind_port} -> {dest_host}:{dest_port}")
+            }
+            ForwardKind::Remote { bind_addr, bind_port, dest_host, dest_port } => {
+                format!("-R {bind_addr}:{bind_port} -> {dest_host}:{dest_port}")
+            }
+            ForwardKind::Dynamic { bind_addr, bind_port } => format!("-D {bind_addr}:{bind_port}"),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl ServerEntry {
@@ -176,6 +256,7 @@ impl ServerEntry {
             last_local_dir: None,
             tags: Vec::new(),
             jump_host: None,
+            forwards: Vec::new(),
         }
     }
 }
@@ -286,6 +367,7 @@ impl std::fmt::Debug for ServerEntry {
             .field("last_local_dir", &self.last_local_dir)
             .field("tags", &self.tags)
             .field("jump_host", &self.jump_host)
+            .field("forwards", &self.forwards)
             .finish()
     }
 }
@@ -318,6 +400,7 @@ mod tests {
         assert_eq!(config.servers[0].last_local_dir, None);
         assert!(config.servers[0].tags.is_empty(), "tags are additive; an existing vault has none");
         assert_eq!(config.servers[0].jump_host, None, "a bastion is additive too; an existing vault connects direct");
+        assert!(config.servers[0].forwards.is_empty(), "and so are port forwards");
         assert_eq!(config.server_sort, ServerSort::Name, "an existing vault sorts by name");
         let AuthMethod::Password { password } = &config.servers[0].auth else {
             panic!("expected password auth");

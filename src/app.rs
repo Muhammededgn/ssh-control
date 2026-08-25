@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -27,8 +28,10 @@ use crate::tui::script_form::{FormMode as ScriptFormMode, ScriptFormData, Script
 use crate::tui::script_run::{ScriptRunOutcome, ScriptRunState};
 use crate::tui::script_targets::{ScriptTargetsOutcome, ScriptTargetsState};
 use crate::tui::ssh_import::{SshImportOutcome, SshImportState};
+use crate::tui::forward_form::{ForwardFormData, ForwardFormOutcome, ForwardFormState};
+use crate::tui::forwards_list::{ForwardsListAction, ForwardsListState};
 use crate::ssh_config::SshConfigHost;
-use crate::config::AuthMethod;
+use crate::config::{AuthMethod, ForwardRule};
 use crate::tui::scripts_list::{ScriptsListAction, ScriptsListState};
 use crate::tui::server_form::{FormMode, FormOutcome, ServerFormData, ServerFormState};
 use crate::tui::settings::{SettingsOutcome, SettingsState};
@@ -62,6 +65,9 @@ pub(crate) enum Screen {
     ConfirmDeleteScript { server_id: Uuid, script_id: Uuid, state: ConfirmState },
     ScriptRun(ScriptRunState),
     FileBrowser(FileBrowserState),
+    Forwards(ForwardsListState),
+    ForwardForm(ForwardFormState),
+    ConfirmDeleteForward { server_id: Uuid, forward_id: Uuid, state: ConfirmState },
 }
 
 /// Which set of keys the help overlay lists, for the screen currently on top.
@@ -74,7 +80,9 @@ pub(crate) fn help_topic(screen: &Screen) -> HelpTopic {
         Screen::MainMenu(_) => HelpTopic::ServerList,
         Screen::ServerForm(_) => HelpTopic::ServerForm,
         Screen::SshImport(_) => HelpTopic::SshImport,
-        Screen::ConfirmDelete { .. } | Screen::ConfirmDeleteScript { .. } => HelpTopic::Confirm,
+        Screen::Forwards(_) => HelpTopic::Forwards,
+        Screen::ForwardForm(_) => HelpTopic::ForwardForm,
+        Screen::ConfirmDelete { .. } | Screen::ConfirmDeleteScript { .. } | Screen::ConfirmDeleteForward { .. } => HelpTopic::Confirm,
         Screen::Settings(_) => HelpTopic::Settings,
         Screen::TotpPrompt(_) => HelpTopic::TotpPrompt,
         Screen::Scripts(_) => HelpTopic::ScriptList,
@@ -199,6 +207,16 @@ pub(crate) enum NextStep {
     FilesTransfer,
     FilesOpenRemote(String),
     FilesRefresh,
+    GoForwards(Uuid),
+    ForwardsBack,
+    GoForwardAdd,
+    GoForwardEdit(Uuid),
+    GoForwardDeleteConfirm(Uuid),
+    ForwardToggle(Uuid),
+    ForwardFormCancel,
+    ForwardFormSave(ForwardFormData),
+    ConfirmDeleteForwardYes,
+    ConfirmDeleteForwardNo,
 }
 
 pub struct App {
@@ -516,6 +534,17 @@ impl App {
                         Screen::ConfirmDeleteScript { state, .. } => state.render(frame, area, strings),
                         Screen::ScriptRun(state) => state.render(frame, area, strings),
                         Screen::FileBrowser(state) => state.render(frame, area, strings),
+                        Screen::Forwards(state) => {
+                            let forwards = config
+                                .servers
+                                .iter()
+                                .find(|s| s.id == state.server_id)
+                                .map(|s| s.forwards.as_slice())
+                                .unwrap_or(&[]);
+                            state.render(frame, area, forwards, status.as_deref(), strings);
+                        }
+                        Screen::ForwardForm(state) => state.render(frame, area, strings),
+                        Screen::ConfirmDeleteForward { state, .. } => state.render(frame, area, strings),
                     }
                     if help_open {
                         help::render(frame, area, topic, strings);
@@ -997,6 +1026,7 @@ impl App {
                     MainMenuAction::Scripts(id) => NextStep::GoScripts(id),
                     MainMenuAction::Files(id) => NextStep::GoFiles(id),
                     MainMenuAction::SshImport => NextStep::GoSshImport,
+                    MainMenuAction::Forwards(id) => NextStep::GoForwards(id),
                     MainMenuAction::Lock => NextStep::Lock,
                     MainMenuAction::Settings => NextStep::GoSettings,
                     MainMenuAction::CycleSort => NextStep::CycleSort,
@@ -1067,6 +1097,34 @@ impl App {
                     SshImportOutcome::Cancel => NextStep::SshImportCancel,
                     SshImportOutcome::Help => NextStep::Help,
                     SshImportOutcome::Import(hosts) => NextStep::SshImportConfirm(hosts),
+                },
+                Screen::Forwards(state) => {
+                    let forwards = u
+                        .config
+                        .servers
+                        .iter()
+                        .find(|s| s.id == state.server_id)
+                        .map(|s| s.forwards.clone())
+                        .unwrap_or_default();
+                    match state.handle_key(key, &forwards) {
+                        ForwardsListAction::None => NextStep::None,
+                        ForwardsListAction::Add => NextStep::GoForwardAdd,
+                        ForwardsListAction::Edit(id) => NextStep::GoForwardEdit(id),
+                        ForwardsListAction::Delete(id) => NextStep::GoForwardDeleteConfirm(id),
+                        ForwardsListAction::Toggle(id) => NextStep::ForwardToggle(id),
+                        ForwardsListAction::Back => NextStep::ForwardsBack,
+                        ForwardsListAction::Help => NextStep::Help,
+                    }
+                }
+                Screen::ForwardForm(state) => match state.handle_key(key, strings) {
+                    ForwardFormOutcome::None => NextStep::None,
+                    ForwardFormOutcome::Cancel => NextStep::ForwardFormCancel,
+                    ForwardFormOutcome::Submit(data) => NextStep::ForwardFormSave(data),
+                },
+                Screen::ConfirmDeleteForward { state, .. } => match state.handle_key(key) {
+                    ConfirmOutcome::None => NextStep::None,
+                    ConfirmOutcome::Yes => NextStep::ConfirmDeleteForwardYes,
+                    ConfirmOutcome::No => NextStep::ConfirmDeleteForwardNo,
                 },
                 Screen::ScriptForm(state) => match state.handle_key(key, strings) {
                     ScriptFormOutcome::None => NextStep::None,
@@ -1287,6 +1345,58 @@ impl App {
                     u.screen = Screen::ScriptTargets(ScriptTargetsState::new(server_id, script_id, script_name));
                 }
             }),
+            NextStep::GoForwards(id) => self.with_unlocked(|u| {
+                let name = u.config.servers.iter().find(|s| s.id == id).map(|e| e.name.clone());
+                if let Some(name) = name {
+                    u.screen = Screen::Forwards(ForwardsListState::new(id, name));
+                }
+            }),
+            NextStep::ForwardsBack => self.with_unlocked(|u| {
+                let mut menu = MainMenuState::new();
+                menu.clamp_selection(&u.config.servers, u.config.server_sort);
+                u.screen = Screen::MainMenu(menu);
+            }),
+            NextStep::GoForwardAdd => self.with_unlocked(|u| {
+                if let Screen::Forwards(list) = &u.screen {
+                    u.screen = Screen::ForwardForm(ForwardFormState::new_add(list.server_id));
+                }
+            }),
+            NextStep::GoForwardEdit(forward_id) => self.with_unlocked(|u| {
+                let form = match &u.screen {
+                    Screen::Forwards(list) => u
+                        .config
+                        .servers
+                        .iter()
+                        .find(|s| s.id == list.server_id)
+                        .and_then(|e| e.forwards.iter().find(|f| f.id == forward_id))
+                        .map(|rule| ForwardFormState::new_edit(list.server_id, rule)),
+                    _ => None,
+                };
+                if let Some(form) = form {
+                    u.screen = Screen::ForwardForm(form);
+                }
+            }),
+            NextStep::GoForwardDeleteConfirm(forward_id) => self.with_unlocked(|u| {
+                let ctx = match &u.screen {
+                    Screen::Forwards(list) => u
+                        .config
+                        .servers
+                        .iter()
+                        .find(|s| s.id == list.server_id)
+                        .and_then(|e| e.forwards.iter().find(|f| f.id == forward_id))
+                        .map(|rule| (list.server_id, rule.label())),
+                    _ => None,
+                };
+                if let Some((server_id, label)) = ctx {
+                    let msg = format!("{}{label}{}", strings.delete_forward_confirm_prefix, strings.delete_forward_confirm_suffix);
+                    u.screen = Screen::ConfirmDeleteForward { server_id, forward_id, state: ConfirmState::new(msg) };
+                }
+            }),
+            NextStep::ForwardToggle(forward_id) => self.toggle_forward(forward_id),
+            NextStep::ForwardFormCancel => self.back_to_forwards(),
+            NextStep::ForwardFormSave(data) => self.submit_forward_form(data),
+            NextStep::ConfirmDeleteForwardYes => self.confirm_delete_forward(),
+            NextStep::ConfirmDeleteForwardNo => self.back_to_forwards(),
             NextStep::GoSshImport => self.open_ssh_import(),
             NextStep::SshImportCancel => self.with_unlocked(|u| {
                 let mut menu = MainMenuState::new();
@@ -1438,6 +1548,106 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Back to the forwards list, whichever screen asked.
+    ///
+    /// The `server_id` is read off whichever forward screen is on top rather
+    /// than passed around, so a cancel from the form and a "no" from the
+    /// confirm land in the same place without either one carrying it.
+    fn back_to_forwards(&mut self) {
+        self.with_unlocked(|u| {
+            let server_id = match &u.screen {
+                Screen::ForwardForm(form) => Some(form.server_id),
+                Screen::ConfirmDeleteForward { server_id, .. } => Some(*server_id),
+                _ => None,
+            };
+            if let Some(server_id) = server_id {
+                let name = u.config.servers.iter().find(|s| s.id == server_id).map(|e| e.name.clone()).unwrap_or_default();
+                // A fresh state, so the selection starts at the top rather
+                // than at a row a delete may have taken away. `clamp_selection`
+                // is for the screen that stays put — see `toggle_forward`.
+                u.screen = Screen::Forwards(ForwardsListState::new(server_id, name));
+            }
+        });
+    }
+
+    /// Turns one rule on or off and saves. A rule kept but disabled is the
+    /// point of the flag — deleting one to stop it for an afternoon means
+    /// retyping four fields to get it back.
+    fn toggle_forward(&mut self, forward_id: Uuid) {
+        self.edit_forwards(|forwards| {
+            if let Some(rule) = forwards.iter_mut().find(|f| f.id == forward_id) {
+                rule.enabled = !rule.enabled;
+            }
+        });
+    }
+
+    fn submit_forward_form(&mut self, data: ForwardFormData) {
+        let server_id = match &self.state {
+            AppState::Unlocked(u) => match &u.screen {
+                Screen::ForwardForm(form) => Some(form.server_id),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(server_id) = server_id else { return };
+
+        self.mutate_forwards(server_id, |forwards| match data.id {
+            Some(id) => {
+                if let Some(rule) = forwards.iter_mut().find(|f| f.id == id) {
+                    rule.kind = data.kind.clone();
+                }
+            }
+            None => forwards.push(ForwardRule::new(data.kind.clone())),
+        });
+        self.back_to_forwards();
+    }
+
+    fn confirm_delete_forward(&mut self) {
+        let target = match &self.state {
+            AppState::Unlocked(u) => match &u.screen {
+                Screen::ConfirmDeleteForward { server_id, forward_id, .. } => Some((*server_id, *forward_id)),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some((server_id, forward_id)) = target else { return };
+        self.mutate_forwards(server_id, |forwards| forwards.retain(|f| f.id != forward_id));
+        self.back_to_forwards();
+    }
+
+    /// Applies a change to the forwards of whichever server the current
+    /// forwards screen belongs to.
+    fn edit_forwards(&mut self, change: impl FnOnce(&mut Vec<ForwardRule>)) {
+        let server_id = match &self.state {
+            AppState::Unlocked(u) => match &u.screen {
+                Screen::Forwards(list) => Some(list.server_id),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(server_id) = server_id {
+            self.mutate_forwards(server_id, change);
+        }
+    }
+
+    /// One place that edits a server's forwards and saves, so every path
+    /// through this screen reports a failed write the same way.
+    fn mutate_forwards(&mut self, server_id: Uuid, change: impl FnOnce(&mut Vec<ForwardRule>)) {
+        let strings = self.lang.strings();
+        let AppState::Unlocked(u) = &mut self.state else {
+            return;
+        };
+        let Some(entry) = u.config.servers.iter_mut().find(|s| s.id == server_id) else {
+            return;
+        };
+        change(&mut entry.forwards);
+
+        u.status = Some(StatusMessage::new(match self.store.save(&u.config, &u.master_key, &u.slots) {
+            Ok(()) => strings.status_saved.to_string(),
+            Err(e) => format!("{}{e}", strings.save_error_prefix),
+        }));
     }
 
     fn submit_form(&mut self, data: ServerFormData) -> Result<()> {
@@ -1799,11 +2009,15 @@ impl App {
                 // So is the bastion chain, and it has to be: a `Uuid` means
                 // nothing once `config` is out of scope.
                 let target = ssh::Target::from_entry(e, &u.config.servers);
-                (target, e.scripts.iter().filter(|s| s.run_on_connect).map(|s| vars.expand_script(s)).collect::<Vec<_>>())
+                // `ForwardRule` holds no credential, so cloning it here costs
+                // nothing worth protecting — but it has to be here all the
+                // same, because `e` is gone by the time the session is up.
+                let forwards = e.forwards.clone();
+                (target, forwards, e.scripts.iter().filter(|s| s.run_on_connect).map(|s| vars.expand_script(s)).collect::<Vec<_>>())
             }),
             AppState::Setup(_) | AppState::Unopenable | AppState::CannotOpen { .. } | AppState::Locked(_) | AppState::LockedTotpDaily(_) => None,
         };
-        let Some((target, on_connect_scripts)) = target else {
+        let Some((target, forward_rules, on_connect_scripts)) = target else {
             return Ok(());
         };
         // A chain that loops or names a deleted server fails before anything is
@@ -1854,6 +2068,17 @@ impl App {
         // line earlier, with a shell about to land on it.
         self.connecting = None;
         terminal.suspend()?;
+
+        // Brought up after the suspend so the report lands on the primary
+        // buffer with the script output, and bound to this scope: `Forwards`
+        // aborts every listener when it drops, which is the whole of the
+        // teardown story. It borrows nothing from `self`, so it sits inside
+        // `await_redrawing`'s rule as well as the `NextStep` one.
+        let _forwards = {
+            let forwards = ssh::forward::start(Arc::clone(&connected.handle), &forward_rules).await;
+            session::print_forward_report(&forwards, strings);
+            forwards
+        };
 
         // Auto-run scripts flagged `run_on_connect`, printed plain to the
         // (now-suspended) primary screen buffer.

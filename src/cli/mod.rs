@@ -163,6 +163,7 @@ fn run_connect(path: PathBuf, name: &str) -> Result<()> {
     let entry = resolve(&u.config.servers, name)?;
     let id = entry.id;
     let target = ssh::Target::from_entry(entry, &u.config.servers)?;
+    let forward_rules = entry.forwards.clone();
     let vars = ScriptVars::from_entry(entry);
     let on_connect: Vec<_> = entry.scripts.iter().filter(|s| s.run_on_connect).map(|s| vars.expand_script(s)).collect();
 
@@ -196,6 +197,14 @@ fn run_connect(path: PathBuf, name: &str) -> Result<()> {
             // not stand between the user and the shell they asked for.
             let _ = app.store.save(&u.config, &u.master_key, &u.slots);
         }
+
+        // Same lifetime as the TUI's: up with the session, gone when this
+        // scope ends. `Forwards`'s `Drop` is the whole teardown.
+        let _forwards = {
+            let forwards = ssh::forward::start(std::sync::Arc::clone(&connected.handle), &forward_rules).await;
+            session::print_forward_report(&forwards, strings);
+            forwards
+        };
 
         for script in &on_connect {
             let mut partial = String::new();

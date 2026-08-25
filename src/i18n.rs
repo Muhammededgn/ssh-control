@@ -317,6 +317,26 @@ pub struct Strings {
     pub log_error_prefix: &'static str,
     pub status_script_saved: &'static str,
     pub status_script_deleted: &'static str,
+
+    // Port forwarding
+    pub forwards_title: &'static str,
+    pub forwards_hint: &'static str,
+    pub forwards_empty: &'static str,
+    pub forward_form_title_add: &'static str,
+    pub forward_form_title_edit: &'static str,
+    pub forward_form_hint: &'static str,
+    pub field_forward_kind: &'static str,
+    pub field_bind_addr: &'static str,
+    pub field_bind_port: &'static str,
+    pub field_dest_host: &'static str,
+    pub field_dest_port: &'static str,
+    /// Shown on a rule that is kept but not started.
+    pub forward_disabled_label: &'static str,
+    pub err_forward_port_invalid: &'static str,
+    pub err_forward_dest_empty: &'static str,
+    pub delete_forward_confirm_prefix: &'static str,
+    pub delete_forward_confirm_suffix: &'static str,
+    pub detail_forwards_label: &'static str,
 }
 
 pub static EN: Strings = Strings {
@@ -333,7 +353,7 @@ pub static EN: Strings = Strings {
 
     main_menu_title: " Servers ",
     main_menu_empty: "(no servers — press 'a' to add one)",
-    main_menu_hint: "Enter: connect  /: search  a: add  e: edit  d: delete  s: scripts  f: files  i: import  o: sort  l: lock  F1: settings  q: quit  ?: help",
+    main_menu_hint: "Enter: connect  /: search  a: add  e: edit  d: delete  s: scripts  f: files  p: forwards  i: import  o: sort  l: lock  F1: settings  q: quit  ?: help",
     main_menu_filter_hint: "type to filter  Enter: connect  Esc: clear",
     main_menu_filter_label: "Filter: ",
     main_menu_no_match: "(no server matches the filter)",
@@ -549,6 +569,24 @@ pub static EN: Strings = Strings {
     log_error_prefix: "error: ",
     status_script_saved: "Script saved.",
     status_script_deleted: "Script deleted.",
+
+    forwards_title: " Port forwards ",
+    forwards_hint: "a: add  e: edit  space: on/off  d: delete  Esc: back  ?: help",
+    forwards_empty: "no port forwards for this server",
+    forward_form_title_add: " New forward ",
+    forward_form_title_edit: " Edit forward ",
+    forward_form_hint: "Tab: next field  Ctrl+Enter: save  Esc: cancel  F2: help",
+    field_forward_kind: "Kind (←/→)",
+    field_bind_addr: "Listen on",
+    field_bind_port: "Listen port",
+    field_dest_host: "To host",
+    field_dest_port: "To port",
+    forward_disabled_label: "off",
+    err_forward_port_invalid: "Port must be a number between 1 and 65535",
+    err_forward_dest_empty: "Destination host cannot be empty",
+    delete_forward_confirm_prefix: "Delete forward ",
+    delete_forward_confirm_suffix: "?",
+    detail_forwards_label: "forwards",
 };
 
 pub static TR: Strings = Strings {
@@ -565,7 +603,7 @@ pub static TR: Strings = Strings {
 
     main_menu_title: " Sunucular ",
     main_menu_empty: "(sunucu yok — 'a' ile ekle)",
-    main_menu_hint: "Enter: bağlan  /: ara  a: ekle  e: düzenle  d: sil  s: scriptler  f: dosyalar  i: içe aktar  o: sırala  l: kilitle  F1: ayarlar  q: çık  ?: yardım",
+    main_menu_hint: "Enter: bağlan  /: ara  a: ekle  e: düzenle  d: sil  s: scriptler  f: dosyalar  p: yönlendirme  i: içe aktar  o: sırala  l: kilitle  F1: ayarlar  q: çık  ?: yardım",
     main_menu_filter_hint: "yazarak filtrele  Enter: bağlan  Esc: temizle",
     main_menu_filter_label: "Filtre: ",
     main_menu_no_match: "(filtreye uyan sunucu yok)",
@@ -781,6 +819,24 @@ pub static TR: Strings = Strings {
     log_error_prefix: "hata: ",
     status_script_saved: "Script kaydedildi.",
     status_script_deleted: "Script silindi.",
+
+    forwards_title: " Port yönlendirme ",
+    forwards_hint: "a: ekle  e: düzenle  boşluk: aç/kapa  d: sil  Esc: geri  ?: yardım",
+    forwards_empty: "bu sunucu için port yönlendirme yok",
+    forward_form_title_add: " Yeni yönlendirme ",
+    forward_form_title_edit: " Yönlendirmeyi düzenle ",
+    forward_form_hint: "Tab: sonraki alan  Ctrl+Enter: kaydet  Esc: iptal  F2: yardım",
+    field_forward_kind: "Tür (←/→)",
+    field_bind_addr: "Dinlenecek adres",
+    field_bind_port: "Dinlenecek port",
+    field_dest_host: "Hedef sunucu",
+    field_dest_port: "Hedef port",
+    forward_disabled_label: "kapalı",
+    err_forward_port_invalid: "Port 1 ile 65535 arasında bir sayı olmalı",
+    err_forward_dest_empty: "Hedef sunucu boş olamaz",
+    delete_forward_confirm_prefix: "Yönlendirme silinsin mi: ",
+    delete_forward_confirm_suffix: "?",
+    detail_forwards_label: "yönlendirme",
 };
 
 pub static ES: Strings = Strings {
@@ -797,7 +853,7 @@ pub static ES: Strings = Strings {
 
     main_menu_title: " Servidores ",
     main_menu_empty: "(sin servidores — pulsa 'a' para añadir uno)",
-    main_menu_hint: "Enter: conectar  /: buscar  a: añadir  e: editar  d: eliminar  s: scripts  f: archivos  i: importar  o: ordenar  l: bloquear  F1: ajustes  q: salir  ?: ayuda",
+    main_menu_hint: "Enter: conectar  /: buscar  a: añadir  e: editar  d: eliminar  s: scripts  f: archivos  p: reenvíos  i: importar  o: ordenar  l: bloquear  F1: ajustes  q: salir  ?: ayuda",
     main_menu_filter_hint: "escribe para filtrar  Enter: conectar  Esc: limpiar",
     main_menu_filter_label: "Filtro: ",
     main_menu_no_match: "(ningún servidor coincide con el filtro)",
@@ -1013,6 +1069,24 @@ pub static ES: Strings = Strings {
     log_error_prefix: "error: ",
     status_script_saved: "Script guardado.",
     status_script_deleted: "Script eliminado.",
+
+    forwards_title: " Reenvío de puertos ",
+    forwards_hint: "a: añadir  e: editar  espacio: on/off  d: eliminar  Esc: volver  ?: ayuda",
+    forwards_empty: "sin reenvíos de puertos para este servidor",
+    forward_form_title_add: " Nuevo reenvío ",
+    forward_form_title_edit: " Editar reenvío ",
+    forward_form_hint: "Tab: siguiente campo  Ctrl+Enter: guardar  Esc: cancelar  F2: ayuda",
+    field_forward_kind: "Tipo (←/→)",
+    field_bind_addr: "Escuchar en",
+    field_bind_port: "Puerto local",
+    field_dest_host: "Host destino",
+    field_dest_port: "Puerto destino",
+    forward_disabled_label: "off",
+    err_forward_port_invalid: "El puerto debe ser un número entre 1 y 65535",
+    err_forward_dest_empty: "El host destino no puede estar vacío",
+    delete_forward_confirm_prefix: "¿Eliminar el reenvío ",
+    delete_forward_confirm_suffix: "?",
+    detail_forwards_label: "reenvíos",
 };
 
 pub static RU: Strings = Strings {
@@ -1029,7 +1103,7 @@ pub static RU: Strings = Strings {
 
     main_menu_title: " Серверы ",
     main_menu_empty: "(нет серверов — нажмите 'a' чтобы добавить)",
-    main_menu_hint: "Enter: подключиться  /: поиск  a: добавить  e: изменить  d: удалить  s: скрипты  f: файлы  i: импорт  o: сортировка  l: заблокировать  F1: настройки  q: выход  ?: справка",
+    main_menu_hint: "Enter: подключиться  /: поиск  a: добавить  e: изменить  d: удалить  s: скрипты  f: файлы  p: проброс  i: импорт  o: сортировка  l: заблокировать  F1: настройки  q: выход  ?: справка",
     main_menu_filter_hint: "введите текст для фильтра  Enter: подключиться  Esc: сбросить",
     main_menu_filter_label: "Фильтр: ",
     main_menu_no_match: "(нет серверов, подходящих под фильтр)",
@@ -1245,4 +1319,21 @@ pub static RU: Strings = Strings {
     log_error_prefix: "ошибка: ",
     status_script_saved: "Скрипт сохранён.",
     status_script_deleted: "Скрипт удалён.",
+    forwards_title: " Проброс портов ",
+    forwards_hint: "a: добавить  e: изменить  пробел: вкл/выкл  d: удалить  Esc: назад  ?: справка",
+    forwards_empty: "для этого сервера нет проброса портов",
+    forward_form_title_add: " Новый проброс ",
+    forward_form_title_edit: " Изменить проброс ",
+    forward_form_hint: "Tab: след. поле  Ctrl+Enter: сохранить  Esc: отмена  F2: справка",
+    field_forward_kind: "Тип (←/→)",
+    field_bind_addr: "Слушать на",
+    field_bind_port: "Локальный порт",
+    field_dest_host: "Хост назначения",
+    field_dest_port: "Порт назначения",
+    forward_disabled_label: "выкл",
+    err_forward_port_invalid: "Порт должен быть числом от 1 до 65535",
+    err_forward_dest_empty: "Хост назначения не может быть пустым",
+    delete_forward_confirm_prefix: "Удалить проброс ",
+    delete_forward_confirm_suffix: "?",
+    detail_forwards_label: "проброс",
 };

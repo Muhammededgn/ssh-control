@@ -216,6 +216,7 @@ pub enum MainMenuAction {
     /// Open the `~/.ssh/config` importer. Takes no `Uuid` — it is about the
     /// vault as a whole, not the selected row, and works on an empty list.
     SshImport,
+    Forwards(Uuid),
     Lock,
     Settings,
     /// Advance to the next `ServerSort`. `app.rs` owns the change: the order
@@ -317,6 +318,10 @@ impl MainMenuState {
                 .map(|s| MainMenuAction::Files(s.id))
                 .unwrap_or(MainMenuAction::None),
             KeyCode::Char('i') => MainMenuAction::SshImport,
+            KeyCode::Char('p') => self
+                .selected_entry(servers, sort)
+                .map(|s| MainMenuAction::Forwards(s.id))
+                .unwrap_or(MainMenuAction::None),
             KeyCode::Char('o') => MainMenuAction::CycleSort,
             KeyCode::Char('l') => MainMenuAction::Lock,
             KeyCode::F(1) => MainMenuAction::Settings,
@@ -561,6 +566,15 @@ impl MainMenuState {
                 Span::raw(entry.scripts.len().to_string()),
             ]));
         }
+        // Counted, not listed: a card is not the place to read four rules, and
+        // `p` is one key away. Pane-only for the same reason `via` is.
+        if !entry.forwards.is_empty() {
+            let enabled = entry.forwards.iter().filter(|f| f.enabled).count();
+            lines.push(Line::from(vec![
+                label(strings.detail_forwards_label),
+                Span::raw(format!("{enabled}/{}", entry.forwards.len())),
+            ]));
+        }
         if let Some(info) = &entry.system_info {
             lines.push(Line::from(""));
             for part in format_system_info(info, strings).split("  |  ") {
@@ -641,6 +655,7 @@ mod tests {
                 last_local_dir: None,
                 tags: Vec::new(),
                 jump_host: None,
+                forwards: Vec::new(),
             })
             .collect()
     }

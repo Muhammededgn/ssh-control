@@ -7,8 +7,8 @@ use russh::keys::agent::client::AgentClient;
 use russh::keys::{PrivateKeyWithHashAlg, load_secret_key};
 use uuid::Uuid;
 
-use super::client::{Handler, HostKeyOutcome};
-use crate::config::{AuthMethod, ServerEntry};
+use super::client::{Handler, HostKeyOutcome, RemoteRoute};
+use crate::config::{AuthMethod, ForwardKind, ServerEntry};
 use crate::error::{AppError, Result};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -83,6 +83,12 @@ pub struct Target {
     /// entry it belongs to. `Connected` stays free of them — it reports
     /// outcomes positionally and knows nothing about the vault.
     pub jump_ids: Vec<Uuid>,
+    /// The `-R` rules, in the shape the `Handler` needs them.
+    ///
+    /// On the target rather than reached for later because there is no later:
+    /// the handler is constructed before `connect_stream` moves it into russh,
+    /// and a remote forward's connections come back through it.
+    pub remote_routes: Vec<RemoteRoute>,
 }
 
 impl Endpoint {
@@ -136,7 +142,23 @@ impl Target {
         // one list in two halves.
         jumps.reverse();
         jump_ids.reverse();
-        Ok(Self { endpoint: Endpoint::from_entry(entry), jumps, jump_ids })
+
+        let remote_routes = entry
+            .forwards
+            .iter()
+            .filter(|f| f.enabled)
+            .filter_map(|f| match &f.kind {
+                ForwardKind::Remote { bind_addr, bind_port, dest_host, dest_port } => Some(RemoteRoute {
+                    bind_addr: bind_addr.clone(),
+                    bind_port: *bind_port,
+                    dest_host: dest_host.clone(),
+                    dest_port: *dest_port,
+                }),
+                ForwardKind::Local { .. } | ForwardKind::Dynamic { .. } => None,
+            })
+            .collect();
+
+        Ok(Self { endpoint: Endpoint::from_entry(entry), jumps, jump_ids, remote_routes })
     }
 }
 
@@ -160,7 +182,10 @@ pub async fn connect(server: &Target) -> Result<Connected> {
 
     for hop in &server.jumps {
         let carrier = jumps.last();
-        let (handle, outcome) = match open_hop(carrier, hop).await {
+        // A bastion gets no routes: a `-R` rule belongs to the destination,
+        // and a hop that could open sockets on this machine would be a hop
+        // doing something nobody asked it to.
+        let (handle, outcome) = match open_hop(carrier, hop, Vec::new()).await {
             Ok(opened) => opened,
             // Say which machine refused, so "authentication failed" does not
             // read as the destination rejecting the user's credentials.
@@ -170,7 +195,10 @@ pub async fn connect(server: &Target) -> Result<Connected> {
         jump_outcomes.push(outcome);
     }
 
-    let (handle, host_key_outcome) = open_hop(jumps.last(), &server.endpoint).await?;
+    // Handed over before the handshake, because that is the only chance: the
+    // handler is moved into russh and a `-R` connection arrives as a callback
+    // on it, never on the handle.
+    let (handle, host_key_outcome) = open_hop(jumps.last(), &server.endpoint, server.remote_routes.clone()).await?;
     Ok(Connected { handle: Arc::new(handle), host_key_outcome, jump_outcomes, jumps })
 }
 
@@ -179,9 +207,10 @@ pub async fn connect(server: &Target) -> Result<Connected> {
 async fn open_hop(
     carrier: Option<&client::Handle<Handler>>,
     endpoint: &Endpoint,
+    remote_routes: Vec<RemoteRoute>,
 ) -> Result<(client::Handle<Handler>, HostKeyOutcome)> {
     let config = Arc::new(client::Config::default());
-    let handler = Handler::new(endpoint.host_key_fingerprint.clone());
+    let handler = Handler::new(endpoint.host_key_fingerprint.clone(), remote_routes);
     let outcome_ref = handler.outcome.clone();
 
     // Per hop, not a budget shared across the chain: a two-hop connect

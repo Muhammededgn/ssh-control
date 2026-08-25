@@ -1,6 +1,8 @@
 pub mod chrome;
 pub mod confirm;
 pub mod file_browser;
+pub mod forward_form;
+pub mod forwards_list;
 pub mod help;
 pub mod main_menu;
 pub mod overwrite;

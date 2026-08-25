@@ -35,6 +35,7 @@ async fn main() {
         // this helper has none.
         jumps: Vec::new(),
         jump_ids: Vec::new(),
+        remote_routes: Vec::new(),
     };
 
     let connected = ssh::connect(&target).await.expect("connect");

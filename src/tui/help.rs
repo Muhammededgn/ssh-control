@@ -22,6 +22,8 @@ pub enum HelpTopic {
     ScriptTargets,
     ScriptForm,
     SshImport,
+    Forwards,
+    ForwardForm,
     ScriptRun,
     FileBrowser,
 }
@@ -46,6 +48,8 @@ impl HelpTopic {
             HelpTopic::ScriptList => vec![strings.scripts_list_hint],
             HelpTopic::ScriptTargets => vec![strings.script_targets_hint],
             HelpTopic::SshImport => vec![strings.ssh_import_hint],
+            HelpTopic::Forwards => vec![strings.forwards_hint],
+            HelpTopic::ForwardForm => vec![strings.forward_form_hint],
             HelpTopic::ScriptForm => vec![strings.steps_list_hint, strings.step_edit_hint],
             HelpTopic::ScriptRun => vec![strings.script_run_hint_done],
             HelpTopic::FileBrowser => vec![strings.file_browser_hint],
