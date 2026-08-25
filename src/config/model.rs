@@ -4,7 +4,15 @@ use uuid::Uuid;
 use super::secret::Secret;
 
 pub const DEFAULT_PORT: u16 = 22;
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+/// Bumped to 2 by `AuthMethod::Agent`.
+///
+/// The variant itself is the reason. `AuthMethod` is an externally-tagged
+/// serde enum, so a vault holding `"Agent"` cannot be deserialized at all by a
+/// build that predates it — and without a version to check, that surfaces as
+/// `CorruptFile`, which tells the user their vault is broken when it is fine.
+/// The bump turns it into `SchemaTooNew`, which is what `config::migrate`
+/// exists for.
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 /// Idle minutes before the vault re-locks itself. A file written before this
 /// field existed gets the protective default rather than "off" — an old vault
 /// should not stay unlocked forever just because it predates the feature.
@@ -218,6 +226,11 @@ pub struct SystemInfo {
 pub enum AuthMethod {
     Password { password: Secret },
     SshKey { key_path: String, passphrase: Option<Secret> },
+    /// Authentication delegated to the running ssh-agent: the key never leaves
+    /// it, so this variant holds no credential at all. That is the whole point
+    /// of it, and the reason it is a unit variant rather than one carrying a
+    /// key path — which key the agent offers is the agent's business.
+    Agent,
 }
 
 impl std::fmt::Debug for AuthMethod {
@@ -232,6 +245,8 @@ impl std::fmt::Debug for AuthMethod {
                 .field("key_path", key_path)
                 .field("passphrase", &"<redacted>")
                 .finish(),
+            // Nothing to redact — there is nothing here.
+            AuthMethod::Agent => f.write_str("Agent"),
         }
     }
 }
@@ -303,6 +318,17 @@ mod tests {
 
         let key_auth = AuthMethod::SshKey { key_path: "/k".into(), passphrase: Some(Secret::from("pp".to_string())) };
         assert_eq!(serde_json::to_string(&key_auth).unwrap(), r#"{"SshKey":{"key_path":"/k","passphrase":"pp"}}"#);
+    }
+
+    /// A unit variant serializes as a bare string, not an object. Pinned
+    /// because it is the shape an older build chokes on — which is the whole
+    /// reason `CURRENT_SCHEMA_VERSION` went to 2.
+    #[test]
+    fn agent_auth_serializes_as_a_bare_variant_name_and_carries_nothing() {
+        assert_eq!(serde_json::to_string(&AuthMethod::Agent).unwrap(), r#""Agent""#);
+        let back: AuthMethod = serde_json::from_str(r#""Agent""#).unwrap();
+        assert!(matches!(back, AuthMethod::Agent));
+        assert_eq!(format!("{:?}", AuthMethod::Agent), "Agent");
     }
 
     /// `timeout_secs` was added after scripts shipped, so every step already in

@@ -458,6 +458,7 @@ impl MainMenuState {
                 let auth_label = match &s.auth {
                     crate::config::AuthMethod::Password { .. } => strings.auth_label_password,
                     crate::config::AuthMethod::SshKey { .. } => strings.auth_label_key,
+                    crate::config::AuthMethod::Agent => strings.auth_label_agent,
                 };
                 let mut spans = vec![
                     Span::raw(format!("{:<name_width$}", s.name)),
@@ -518,6 +519,7 @@ impl MainMenuState {
         let auth_label = match &entry.auth {
             crate::config::AuthMethod::Password { .. } => strings.auth_label_password,
             crate::config::AuthMethod::SshKey { .. } => strings.auth_label_key,
+            crate::config::AuthMethod::Agent => strings.auth_label_agent,
         };
 
         let mut lines = vec![

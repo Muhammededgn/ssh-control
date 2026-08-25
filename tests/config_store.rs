@@ -466,8 +466,8 @@ fn a_vault_from_a_newer_build_is_refused_instead_of_being_quietly_stripped() {
     // knows nothing about, then re-encrypt under the same key and slots.
     let mut body: serde_json::Value =
         serde_json::from_str(&serde_json::to_string(&unlocked.config).unwrap()).unwrap();
-    body["schema_version"] = serde_json::json!(2);
-    body["tags_added_in_v2"] = serde_json::json!(["prod", "eu"]);
+    body["schema_version"] = serde_json::json!(3);
+    body["something_added_in_v3"] = serde_json::json!(["prod", "eu"]);
 
     let plaintext = serde_json::to_vec(&body).unwrap();
     let nonce = cipher::random_nonce().unwrap();
@@ -477,7 +477,7 @@ fn a_vault_from_a_newer_build_is_refused_instead_of_being_quietly_stripped() {
 
     match store.load("a strong password").err() {
         Some(AppError::SchemaTooNew { found, supported }) => {
-            assert_eq!(found, 2);
+            assert_eq!(found, 3);
             assert_eq!(supported, ssh_control::config::model::CURRENT_SCHEMA_VERSION);
         }
         Some(other) => panic!("expected a schema refusal, got {other:?}"),
@@ -499,6 +499,6 @@ fn a_vault_from_a_newer_build_is_refused_instead_of_being_quietly_stripped() {
     )
     .unwrap();
     let still: serde_json::Value = serde_json::from_slice(&recovered).unwrap();
-    assert_eq!(still["tags_added_in_v2"], serde_json::json!(["prod", "eu"]));
-    assert_eq!(still["schema_version"], 2);
+    assert_eq!(still["something_added_in_v3"], serde_json::json!(["prod", "eu"]));
+    assert_eq!(still["schema_version"], 3);
 }

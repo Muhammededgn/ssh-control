@@ -2,6 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use russh::client;
+use russh::keys::agent::AgentIdentity;
+use russh::keys::agent::client::AgentClient;
 use russh::keys::{PrivateKeyWithHashAlg, load_secret_key};
 
 use super::client::{Handler, HostKeyOutcome};
@@ -97,6 +99,7 @@ async fn authenticate(handle: &mut client::Handle<Handler>, server: &Target) -> 
                 .authenticate_publickey(server.username.clone(), key_with_hash)
                 .await?
         }
+        AuthMethod::Agent => return authenticate_via_agent(handle, &server.username).await,
     };
 
     match auth_result {
@@ -105,4 +108,61 @@ async fn authenticate(handle: &mut client::Handle<Handler>, server: &Target) -> 
             Err(AppError::SshAuthFailed("credentials rejected by server".into()))
         }
     }
+}
+
+/// Public-key authentication where the key never leaves the agent.
+///
+/// **Every identity is tried, not just the first.** An agent commonly holds
+/// several keys and only one of them is in this host's `authorized_keys`;
+/// offering one and giving up is the difference between "works" and a bare
+/// "credentials rejected by server", which would send the user to look at the
+/// wrong machine.
+///
+/// The three ways this can fail before a server ever sees a signature — no
+/// agent configured, a socket that is gone, an agent holding nothing — are all
+/// `AppError::SshAgent` rather than `SshAuthFailed`, because in none of them is
+/// there anything wrong with the user's account on the remote host.
+async fn authenticate_via_agent(handle: &mut client::Handle<Handler>, username: &str) -> Result<()> {
+    let mut agent = AgentClient::connect_env().await.map_err(|e| {
+        AppError::SshAgent(match e {
+            russh::keys::Error::EnvVar(_) => "SSH_AUTH_SOCK is not set — no agent is running".to_string(),
+            russh::keys::Error::BadAuthSock => "SSH_AUTH_SOCK points at a socket that is not there — the agent has gone away".to_string(),
+            other => format!("could not reach the agent: {other}"),
+        })
+    })?;
+
+    let identities = agent
+        .request_identities()
+        .await
+        .map_err(|e| AppError::SshAgent(format!("could not list the agent's keys: {e}")))?;
+
+    // Certificates need `authenticate_certificate_with` and a different reply
+    // shape; skipping them here loses nothing an agent-only user has today.
+    let keys: Vec<_> = identities
+        .into_iter()
+        .filter_map(|id| match id {
+            AgentIdentity::PublicKey { key, .. } => Some(key),
+            AgentIdentity::Certificate { .. } => None,
+        })
+        .collect();
+
+    if keys.is_empty() {
+        return Err(AppError::SshAgent("the agent is running but holds no usable keys — try `ssh-add`".into()));
+    }
+
+    let hash_alg = handle.best_supported_rsa_hash().await?.flatten();
+
+    for key in keys {
+        let attempt = handle
+            .authenticate_publickey_with(username.to_string(), key, hash_alg, &mut agent)
+            .await
+            // `S::Error` here is russh's `AgentAuthError`, not `russh::Error`,
+            // so there is no `From` to lean on.
+            .map_err(|e| AppError::SshAgent(format!("the agent refused to sign: {e}")))?;
+        if let client::AuthResult::Success = attempt {
+            return Ok(());
+        }
+    }
+
+    Err(AppError::SshAuthFailed("the server accepted none of the agent's keys".into()))
 }

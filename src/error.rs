@@ -35,6 +35,15 @@ pub enum AppError {
     #[error("authentication failed: {0}")]
     SshAuthFailed(String),
 
+    /// The agent could not be reached, or had nothing to offer.
+    ///
+    /// Separate from `SshAuthFailed` deliberately: "credentials rejected by
+    /// server" sends the user to check the remote `authorized_keys`, when the
+    /// actual fix is `ssh-add` or starting an agent at all. The distinction is
+    /// the reason the variant exists — do not fold it back in.
+    #[error("ssh-agent: {0}")]
+    SshAgent(String),
+
     #[error("ssh error: {0}")]
     Ssh(#[from] russh::Error),
 

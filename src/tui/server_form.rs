@@ -18,10 +18,13 @@ pub enum FormMode {
     Edit(Uuid),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AuthKind {
     Password,
     SshKey,
+    /// Nothing to type: the agent holds the key and decides which one to
+    /// offer, so this kind contributes no field to `fields()` at all.
+    Agent,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -115,6 +118,12 @@ impl ServerFormState {
                 key_path.clone(),
                 Zeroizing::new(passphrase.as_ref().map(|p| p.as_str().to_string()).unwrap_or_default()),
             ),
+            AuthMethod::Agent => (
+                AuthKind::Agent,
+                Zeroizing::new(String::new()),
+                String::new(),
+                Zeroizing::new(String::new()),
+            ),
         };
 
         Self {
@@ -141,6 +150,10 @@ impl ServerFormState {
                 f.push(Field::KeyPath);
                 f.push(Field::KeyPassphrase);
             }
+            // Deliberately nothing. `Enter` on the auth row therefore submits,
+            // because it is then the last field — the right behaviour for a
+            // form that has nothing left to ask.
+            AuthKind::Agent => {}
         }
         f
     }
@@ -151,8 +164,8 @@ impl ServerFormState {
             KeyCode::Esc => return FormOutcome::Cancel,
             KeyCode::Tab => self.move_focus(1),
             KeyCode::BackTab => self.move_focus(-1),
-            KeyCode::Left if self.focus == Field::AuthType => self.toggle_auth_kind(),
-            KeyCode::Right if self.focus == Field::AuthType => self.toggle_auth_kind(),
+            KeyCode::Left if self.focus == Field::AuthType => self.cycle_auth_kind(false),
+            KeyCode::Right if self.focus == Field::AuthType => self.cycle_auth_kind(true),
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => return self.submit(strings),
             KeyCode::Enter => {
                 let fields = self.fields();
@@ -187,10 +200,17 @@ impl ServerFormState {
         self.focus = fields[next];
     }
 
-    fn toggle_auth_kind(&mut self) {
-        self.auth_kind = match self.auth_kind {
-            AuthKind::Password => AuthKind::SshKey,
-            AuthKind::SshKey => AuthKind::Password,
+    /// Cycles rather than toggles, since there are three kinds now. Left and
+    /// Right go opposite ways, so no kind sits two presses away in both
+    /// directions.
+    fn cycle_auth_kind(&mut self, forward: bool) {
+        self.auth_kind = match (self.auth_kind, forward) {
+            (AuthKind::Password, true) => AuthKind::SshKey,
+            (AuthKind::SshKey, true) => AuthKind::Agent,
+            (AuthKind::Agent, true) => AuthKind::Password,
+            (AuthKind::Password, false) => AuthKind::Agent,
+            (AuthKind::SshKey, false) => AuthKind::Password,
+            (AuthKind::Agent, false) => AuthKind::SshKey,
         };
     }
 
@@ -249,6 +269,8 @@ impl ServerFormState {
                 };
                 AuthMethod::SshKey { key_path: self.key_path.clone(), passphrase }
             }
+            // No validation arm, because there is nothing here to be empty.
+            AuthKind::Agent => AuthMethod::Agent,
         };
 
         FormOutcome::Submit(ServerFormData {
@@ -289,8 +311,9 @@ impl ServerFormState {
             field_line(
                 strings.field_auth_type,
                 match self.auth_kind {
-                    AuthKind::Password => "password".to_string(),
-                    AuthKind::SshKey => "ssh-key".to_string(),
+                    AuthKind::Password => strings.auth_label_password.to_string(),
+                    AuthKind::SshKey => strings.auth_label_key.to_string(),
+                    AuthKind::Agent => strings.auth_label_agent.to_string(),
                 },
                 Field::AuthType,
                 self,
@@ -310,6 +333,7 @@ impl ServerFormState {
                     self,
                 ));
             }
+            AuthKind::Agent => {}
         }
 
         lines.push(Line::from(""));
@@ -338,6 +362,45 @@ mod tests {
             .draw(|frame| state.render(frame, frame.area(), &EN))
             .expect("render");
         terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    /// The agent kind contributes no field, which makes `Field::AuthType` the
+    /// last one — so `Enter` there submits rather than moving focus into
+    /// nothing. Both halves of that matter, and neither is visible from the
+    /// enum alone.
+    #[test]
+    fn the_agent_kind_asks_for_nothing_and_submits_from_the_auth_row() {
+        let mut state = ServerFormState::new_add();
+        state.name = "box".into();
+        state.host = "example.com".into();
+        state.username = "root".into();
+
+        tab_to(&mut state, Field::AuthType);
+        // password -> ssh-key -> agent
+        state.handle_key(KeyEvent::from(KeyCode::Right), &EN);
+        state.handle_key(KeyEvent::from(KeyCode::Right), &EN);
+
+        assert_eq!(state.fields().last(), Some(&Field::AuthType), "the agent kind adds no field of its own");
+        assert!(!render(&state, 80, 24).contains(EN.field_key_path), "no key path to fill in");
+
+        match state.handle_key(KeyEvent::from(KeyCode::Enter), &EN) {
+            FormOutcome::Submit(data) => assert!(matches!(data.auth, AuthMethod::Agent)),
+            _ => panic!("Enter on the last field must submit"),
+        }
+    }
+
+    /// Left and Right must not both be "next", or the third kind sits two
+    /// presses away whichever way you turn.
+    #[test]
+    fn the_auth_kind_cycles_both_ways() {
+        let mut state = ServerFormState::new_add();
+        tab_to(&mut state, Field::AuthType);
+        assert_eq!(state.auth_kind, AuthKind::Password);
+
+        state.handle_key(KeyEvent::from(KeyCode::Left), &EN);
+        assert_eq!(state.auth_kind, AuthKind::Agent, "Left from the first kind wraps to the last");
+        state.handle_key(KeyEvent::from(KeyCode::Right), &EN);
+        assert_eq!(state.auth_kind, AuthKind::Password);
     }
 
     fn tab_to(state: &mut ServerFormState, field: Field) {
