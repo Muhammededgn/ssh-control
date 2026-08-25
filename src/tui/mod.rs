@@ -1,6 +1,8 @@
 pub mod chrome;
 pub mod confirm;
 pub mod file_browser;
+pub mod forward_form;
+pub mod forwards_list;
 pub mod help;
 pub mod main_menu;
 pub mod overwrite;
@@ -11,6 +13,7 @@ pub mod scripts_list;
 pub mod server_form;
 pub mod setup;
 pub mod settings;
+pub mod ssh_import;
 pub mod theme;
 pub mod totp_prompt;
 pub mod totp_unlock;

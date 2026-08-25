@@ -162,7 +162,8 @@ fn run_connect(path: PathBuf, name: &str) -> Result<()> {
     };
     let entry = resolve(&u.config.servers, name)?;
     let id = entry.id;
-    let target = ssh::Target::from_entry(entry);
+    let target = ssh::Target::from_entry(entry, &u.config.servers)?;
+    let forward_rules = entry.forwards.clone();
     let vars = ScriptVars::from_entry(entry);
     let on_connect: Vec<_> = entry.scripts.iter().filter(|s| s.run_on_connect).map(|s| vars.expand_script(s)).collect();
 
@@ -173,24 +174,41 @@ fn run_connect(path: PathBuf, name: &str) -> Result<()> {
         // path has to enable it, and restore it however the scope is left.
         let _raw = unlock::RawMode::enable()?;
 
-        let mut connected = ssh::connect(&target).await?;
+        let connected = ssh::connect(&target).await?;
 
         // The same three beats as the TUI's connect, through the same policy
         // (`crate::session`), so a CLI connect records what a TUI one would:
         // the host key on a first connect, the timestamp, the sysinfo probe.
         let record = session::observe(&connected).await;
+        let jumps = session::observe_jumps(&connected, &target.jump_ids);
         if let AppState::Unlocked(u) = &mut app.state {
             if let Some(e) = u.config.servers.iter_mut().find(|s| s.id == id) {
                 record.apply_to(e);
+            }
+            // A bastion's first-connect fingerprint lands on the bastion's own
+            // entry, in the same save. See `session::JumpRecord` for why it
+            // gets a fingerprint and not a timestamp.
+            for jump in &jumps {
+                if let Some(e) = u.config.servers.iter_mut().find(|s| s.id == jump.server_id) {
+                    jump.apply_to(e);
+                }
             }
             // Best-effort, like the TUI's: a read-only config directory must
             // not stand between the user and the shell they asked for.
             let _ = app.store.save(&u.config, &u.master_key, &u.slots);
         }
 
+        // Same lifetime as the TUI's: up with the session, gone when this
+        // scope ends. `Forwards`'s `Drop` is the whole teardown.
+        let _forwards = {
+            let forwards = ssh::forward::start(std::sync::Arc::clone(&connected.handle), &forward_rules).await;
+            session::print_forward_report(&forwards, strings);
+            forwards
+        };
+
         for script in &on_connect {
             let mut partial = String::new();
-            script_runner_run(&mut connected.handle, script, strings, &mut partial).await;
+            script_runner_run(&connected.handle, script, strings, &mut partial).await;
         }
 
         ssh::pty_bridge::run_interactive(&connected.handle).await
@@ -198,7 +216,7 @@ fn run_connect(path: PathBuf, name: &str) -> Result<()> {
 }
 
 async fn script_runner_run(
-    handle: &mut russh::client::Handle<ssh::client::Handler>,
+    handle: &russh::client::Handle<ssh::client::Handler>,
     script: &crate::config::Script,
     strings: &'static crate::i18n::Strings,
     partial: &mut String,

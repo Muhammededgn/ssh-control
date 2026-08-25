@@ -213,6 +213,10 @@ pub enum MainMenuAction {
     Delete(Uuid),
     Scripts(Uuid),
     Files(Uuid),
+    /// Open the `~/.ssh/config` importer. Takes no `Uuid` — it is about the
+    /// vault as a whole, not the selected row, and works on an empty list.
+    SshImport,
+    Forwards(Uuid),
     Lock,
     Settings,
     /// Advance to the next `ServerSort`. `app.rs` owns the change: the order
@@ -312,6 +316,11 @@ impl MainMenuState {
             KeyCode::Char('f') => self
                 .selected_entry(servers, sort)
                 .map(|s| MainMenuAction::Files(s.id))
+                .unwrap_or(MainMenuAction::None),
+            KeyCode::Char('i') => MainMenuAction::SshImport,
+            KeyCode::Char('p') => self
+                .selected_entry(servers, sort)
+                .map(|s| MainMenuAction::Forwards(s.id))
                 .unwrap_or(MainMenuAction::None),
             KeyCode::Char('o') => MainMenuAction::CycleSort,
             KeyCode::Char('l') => MainMenuAction::Lock,
@@ -458,6 +467,7 @@ impl MainMenuState {
                 let auth_label = match &s.auth {
                     crate::config::AuthMethod::Password { .. } => strings.auth_label_password,
                     crate::config::AuthMethod::SshKey { .. } => strings.auth_label_key,
+                    crate::config::AuthMethod::Agent => strings.auth_label_agent,
                 };
                 let mut spans = vec![
                     Span::raw(format!("{:<name_width$}", s.name)),
@@ -499,7 +509,7 @@ impl MainMenuState {
 
         if let Some(detail_area) = detail_area {
             let entry = self.selected_entry(servers, sort);
-            self.render_detail(frame, detail_area, entry, now, strings);
+            self.render_detail(frame, detail_area, entry, servers, now, strings);
         }
     }
 
@@ -508,7 +518,7 @@ impl MainMenuState {
     ///
     /// Nothing here is new information and nothing here is a new string — it is
     /// the same fields, given room to be read.
-    fn render_detail(&self, frame: &mut Frame, area: Rect, entry: Option<&ServerEntry>, now: u64, strings: &Strings) {
+    fn render_detail(&self, frame: &mut Frame, area: Rect, entry: Option<&ServerEntry>, servers: &[ServerEntry], now: u64, strings: &Strings) {
         let Some(entry) = entry else {
             frame.render_widget(widgets::panel(strings.main_menu_title), area);
             return;
@@ -518,6 +528,7 @@ impl MainMenuState {
         let auth_label = match &entry.auth {
             crate::config::AuthMethod::Password { .. } => strings.auth_label_password,
             crate::config::AuthMethod::SshKey { .. } => strings.auth_label_key,
+            crate::config::AuthMethod::Agent => strings.auth_label_agent,
         };
 
         let mut lines = vec![
@@ -542,10 +553,26 @@ impl MainMenuState {
                 Span::raw(format_relative_time(ts, now, strings)),
             ]));
         }
+        // Pane-only, deliberately: this does not go through `detail_parts`
+        // and so never falls back onto the row below 92 columns. A bastion is
+        // worth knowing about and is not worth a second name on a row that is
+        // already short of width — same call the scripts count above makes.
+        if let Some(via) = entry.jump_host.and_then(|id| servers.iter().find(|s| s.id == id)) {
+            lines.push(Line::from(vec![label(strings.detail_via_label), Span::raw(via.name.clone())]));
+        }
         if !entry.scripts.is_empty() {
             lines.push(Line::from(vec![
                 label(strings.scripts_list_title.trim()),
                 Span::raw(entry.scripts.len().to_string()),
+            ]));
+        }
+        // Counted, not listed: a card is not the place to read four rules, and
+        // `p` is one key away. Pane-only for the same reason `via` is.
+        if !entry.forwards.is_empty() {
+            let enabled = entry.forwards.iter().filter(|f| f.enabled).count();
+            lines.push(Line::from(vec![
+                label(strings.detail_forwards_label),
+                Span::raw(format!("{enabled}/{}", entry.forwards.len())),
             ]));
         }
         if let Some(info) = &entry.system_info {
@@ -627,6 +654,8 @@ mod tests {
                 last_remote_dir: None,
                 last_local_dir: None,
                 tags: Vec::new(),
+                jump_host: None,
+                forwards: Vec::new(),
             })
             .collect()
     }

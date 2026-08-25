@@ -4,7 +4,15 @@ use uuid::Uuid;
 use super::secret::Secret;
 
 pub const DEFAULT_PORT: u16 = 22;
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+/// Bumped to 2 by `AuthMethod::Agent`.
+///
+/// The variant itself is the reason. `AuthMethod` is an externally-tagged
+/// serde enum, so a vault holding `"Agent"` cannot be deserialized at all by a
+/// build that predates it — and without a version to check, that surfaces as
+/// `CorruptFile`, which tells the user their vault is broken when it is fine.
+/// The bump turns it into `SchemaTooNew`, which is what `config::migrate`
+/// exists for.
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 /// Idle minutes before the vault re-locks itself. A file written before this
 /// field existed gets the protective default rather than "off" — an old vault
 /// should not stay unlocked forever just because it predates the feature.
@@ -137,6 +145,98 @@ pub struct ServerEntry {
     /// is what shows in the list. Matching and sorting fold case themselves.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// The bastion to reach this host through, or `None` for a direct connect.
+    ///
+    /// By `Uuid` rather than by name, so renaming the bastion does not silently
+    /// break every host behind it. Additive and `serde(default)` — an existing
+    /// vault reads back with none and nothing stored changes meaning, so no
+    /// schema bump, same reasoning as `tags` and `ScriptStep::timeout_secs`.
+    ///
+    /// The chain it starts is resolved and cycle-checked in
+    /// `ssh::Target::from_entry`, not here: a `Uuid` is only meaningful against
+    /// the whole server list, and this type holds one entry.
+    #[serde(default)]
+    pub jump_host: Option<Uuid>,
+    /// Port forwards started with this server's session and torn down with it.
+    ///
+    /// Additive and `serde(default)`, so an existing vault reads back with
+    /// none — no schema bump, same reasoning as `tags` and `jump_host`.
+    #[serde(default)]
+    pub forwards: Vec<ForwardRule>,
+}
+
+/// One `-L`, `-R` or `-D` rule.
+///
+/// No credential ever lands in here, so nothing needs `Secret`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForwardRule {
+    /// Addressable from the UI, like `Script`.
+    pub id: Uuid,
+    /// Whether it is started with the session. A rule can be kept and turned
+    /// off — deleting one to stop it for an afternoon means retyping four
+    /// fields to get it back.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub kind: ForwardKind,
+}
+
+/// The three forms, shaped per variant rather than one flat struct with two
+/// fields that mean nothing for a third of the rules: a SOCKS proxy's
+/// destination is whatever each client asks for, so `Dynamic` genuinely has
+/// none.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ForwardKind {
+    /// `ssh -L`: listen here, connect from the far end.
+    Local { bind_addr: String, bind_port: u16, dest_host: String, dest_port: u16 },
+    /// `ssh -R`: the server listens, and connections come back to us.
+    Remote { bind_addr: String, bind_port: u16, dest_host: String, dest_port: u16 },
+    /// `ssh -D`: a local SOCKS5 proxy, with the far end doing the connecting.
+    Dynamic { bind_addr: String, bind_port: u16 },
+}
+
+/// What a forward binds to when the user does not say otherwise.
+///
+/// **Loopback, never `0.0.0.0`.** A rule lives in the vault and starts itself
+/// on every connect, so a default of "every interface" would turn "I saved a
+/// rule" into "I published my database to the LAN" — silently, and on whatever
+/// network the laptop happened to be on. Binding wider is the user's to type.
+pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1";
+
+impl ForwardKind {
+    /// Where this rule listens. For `Remote` that is the *server's* address,
+    /// which is what makes the label worth reading.
+    pub fn bind(&self) -> (&str, u16) {
+        match self {
+            ForwardKind::Local { bind_addr, bind_port, .. }
+            | ForwardKind::Remote { bind_addr, bind_port, .. }
+            | ForwardKind::Dynamic { bind_addr, bind_port } => (bind_addr, *bind_port),
+        }
+    }
+}
+
+impl ForwardRule {
+    pub fn new(kind: ForwardKind) -> Self {
+        Self { id: Uuid::new_v4(), enabled: true, kind }
+    }
+
+    /// `-L 127.0.0.1:8080 -> db.internal:5432`, for the pre-shell report and
+    /// the list. Not translated: these are `ssh`'s own flag names, and someone
+    /// reading this line is reading it against `ssh -L`.
+    pub fn label(&self) -> String {
+        match &self.kind {
+            ForwardKind::Local { bind_addr, bind_port, dest_host, dest_port } => {
+                format!("-L {bind_addr}:{bind_port} -> {dest_host}:{dest_port}")
+            }
+            ForwardKind::Remote { bind_addr, bind_port, dest_host, dest_port } => {
+                format!("-R {bind_addr}:{bind_port} -> {dest_host}:{dest_port}")
+            }
+            ForwardKind::Dynamic { bind_addr, bind_port } => format!("-D {bind_addr}:{bind_port}"),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl ServerEntry {
@@ -155,6 +255,8 @@ impl ServerEntry {
             last_remote_dir: None,
             last_local_dir: None,
             tags: Vec::new(),
+            jump_host: None,
+            forwards: Vec::new(),
         }
     }
 }
@@ -218,6 +320,11 @@ pub struct SystemInfo {
 pub enum AuthMethod {
     Password { password: Secret },
     SshKey { key_path: String, passphrase: Option<Secret> },
+    /// Authentication delegated to the running ssh-agent: the key never leaves
+    /// it, so this variant holds no credential at all. That is the whole point
+    /// of it, and the reason it is a unit variant rather than one carrying a
+    /// key path — which key the agent offers is the agent's business.
+    Agent,
 }
 
 impl std::fmt::Debug for AuthMethod {
@@ -232,6 +339,8 @@ impl std::fmt::Debug for AuthMethod {
                 .field("key_path", key_path)
                 .field("passphrase", &"<redacted>")
                 .finish(),
+            // Nothing to redact — there is nothing here.
+            AuthMethod::Agent => f.write_str("Agent"),
         }
     }
 }
@@ -257,6 +366,8 @@ impl std::fmt::Debug for ServerEntry {
             .field("last_remote_dir", &self.last_remote_dir)
             .field("last_local_dir", &self.last_local_dir)
             .field("tags", &self.tags)
+            .field("jump_host", &self.jump_host)
+            .field("forwards", &self.forwards)
             .finish()
     }
 }
@@ -288,6 +399,8 @@ mod tests {
         assert_eq!(config.servers[0].last_remote_dir, None, "the browser's remembered directories are additive");
         assert_eq!(config.servers[0].last_local_dir, None);
         assert!(config.servers[0].tags.is_empty(), "tags are additive; an existing vault has none");
+        assert_eq!(config.servers[0].jump_host, None, "a bastion is additive too; an existing vault connects direct");
+        assert!(config.servers[0].forwards.is_empty(), "and so are port forwards");
         assert_eq!(config.server_sort, ServerSort::Name, "an existing vault sorts by name");
         let AuthMethod::Password { password } = &config.servers[0].auth else {
             panic!("expected password auth");
@@ -303,6 +416,17 @@ mod tests {
 
         let key_auth = AuthMethod::SshKey { key_path: "/k".into(), passphrase: Some(Secret::from("pp".to_string())) };
         assert_eq!(serde_json::to_string(&key_auth).unwrap(), r#"{"SshKey":{"key_path":"/k","passphrase":"pp"}}"#);
+    }
+
+    /// A unit variant serializes as a bare string, not an object. Pinned
+    /// because it is the shape an older build chokes on — which is the whole
+    /// reason `CURRENT_SCHEMA_VERSION` went to 2.
+    #[test]
+    fn agent_auth_serializes_as_a_bare_variant_name_and_carries_nothing() {
+        assert_eq!(serde_json::to_string(&AuthMethod::Agent).unwrap(), r#""Agent""#);
+        let back: AuthMethod = serde_json::from_str(r#""Agent""#).unwrap();
+        assert!(matches!(back, AuthMethod::Agent));
+        assert_eq!(format!("{:?}", AuthMethod::Agent), "Agent");
     }
 
     /// `timeout_secs` was added after scripts shipped, so every step already in

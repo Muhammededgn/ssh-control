@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -26,6 +27,11 @@ use crate::tui::main_menu::{ListStatus, MainMenuAction, MainMenuState};
 use crate::tui::script_form::{FormMode as ScriptFormMode, ScriptFormData, ScriptFormOutcome, ScriptFormState};
 use crate::tui::script_run::{ScriptRunOutcome, ScriptRunState};
 use crate::tui::script_targets::{ScriptTargetsOutcome, ScriptTargetsState};
+use crate::tui::ssh_import::{SshImportOutcome, SshImportState};
+use crate::tui::forward_form::{ForwardFormData, ForwardFormOutcome, ForwardFormState};
+use crate::tui::forwards_list::{ForwardsListAction, ForwardsListState};
+use crate::ssh_config::SshConfigHost;
+use crate::config::{AuthMethod, ForwardRule};
 use crate::tui::scripts_list::{ScriptsListAction, ScriptsListState};
 use crate::tui::server_form::{FormMode, FormOutcome, ServerFormData, ServerFormState};
 use crate::tui::settings::{SettingsOutcome, SettingsState};
@@ -51,10 +57,17 @@ pub(crate) enum Screen {
     /// Which servers a script is about to run on. Ephemeral: nothing it holds
     /// is persisted (see `tui::script_targets`).
     ScriptTargets(ScriptTargetsState),
+    /// Which of `~/.ssh/config`'s hosts to bring into the vault. Ephemeral:
+    /// it owns its parsed rows and nothing it holds is persisted until the
+    /// user confirms (see `tui::ssh_import`).
+    SshImport(SshImportState),
     ScriptForm(ScriptFormState),
     ConfirmDeleteScript { server_id: Uuid, script_id: Uuid, state: ConfirmState },
     ScriptRun(ScriptRunState),
     FileBrowser(FileBrowserState),
+    Forwards(ForwardsListState),
+    ForwardForm(ForwardFormState),
+    ConfirmDeleteForward { server_id: Uuid, forward_id: Uuid, state: ConfirmState },
 }
 
 /// Which set of keys the help overlay lists, for the screen currently on top.
@@ -66,7 +79,10 @@ pub(crate) fn help_topic(screen: &Screen) -> HelpTopic {
     match screen {
         Screen::MainMenu(_) => HelpTopic::ServerList,
         Screen::ServerForm(_) => HelpTopic::ServerForm,
-        Screen::ConfirmDelete { .. } | Screen::ConfirmDeleteScript { .. } => HelpTopic::Confirm,
+        Screen::SshImport(_) => HelpTopic::SshImport,
+        Screen::Forwards(_) => HelpTopic::Forwards,
+        Screen::ForwardForm(_) => HelpTopic::ForwardForm,
+        Screen::ConfirmDelete { .. } | Screen::ConfirmDeleteScript { .. } | Screen::ConfirmDeleteForward { .. } => HelpTopic::Confirm,
         Screen::Settings(_) => HelpTopic::Settings,
         Screen::TotpPrompt(_) => HelpTopic::TotpPrompt,
         Screen::Scripts(_) => HelpTopic::ScriptList,
@@ -173,6 +189,13 @@ pub(crate) enum NextStep {
     CycleSort,
     GoScriptTargets(Uuid),
     ScriptTargetsCancel,
+    GoSshImport,
+    SshImportCancel,
+    /// The hosts the user ticked. Carried by value rather than re-read from
+    /// disk on confirm: the file could have changed since the screen opened,
+    /// and importing something the user never saw is the one outcome a picker
+    /// must not have.
+    SshImportConfirm(Vec<SshConfigHost>),
     /// The script's own server, the script, and every server to run it on. A
     /// plain `Enter` on the script list is this with a one-element list, so
     /// there is one flow rather than two.
@@ -184,6 +207,16 @@ pub(crate) enum NextStep {
     FilesTransfer,
     FilesOpenRemote(String),
     FilesRefresh,
+    GoForwards(Uuid),
+    ForwardsBack,
+    GoForwardAdd,
+    GoForwardEdit(Uuid),
+    GoForwardDeleteConfirm(Uuid),
+    ForwardToggle(Uuid),
+    ForwardFormCancel,
+    ForwardFormSave(ForwardFormData),
+    ConfirmDeleteForwardYes,
+    ConfirmDeleteForwardNo,
 }
 
 pub struct App {
@@ -220,8 +253,8 @@ pub struct App {
 /// under the client.
 pub(crate) struct RemoteSession {
     server_id: Uuid,
-    #[allow(dead_code, reason = "owned to keep the channel alive for the lifetime of the sftp stream")]
-    handle: russh::client::Handle<crate::ssh::client::Handler>,
+    #[allow(dead_code, reason = "owned to keep the channel — and any bastion tunnel under it — alive for the lifetime of the sftp stream")]
+    connected: crate::ssh::Connected,
     sftp: crate::ssh::sftp::SftpClient<russh::ChannelStream<russh::client::Msg>>,
 }
 
@@ -496,10 +529,22 @@ impl App {
                             state.render(frame, area, scripts, status.as_deref(), strings);
                         }
                         Screen::ScriptTargets(state) => state.render(frame, area, &config.servers, strings),
+                        Screen::SshImport(state) => state.render(frame, area, strings),
                         Screen::ScriptForm(state) => state.render(frame, area, strings),
                         Screen::ConfirmDeleteScript { state, .. } => state.render(frame, area, strings),
                         Screen::ScriptRun(state) => state.render(frame, area, strings),
                         Screen::FileBrowser(state) => state.render(frame, area, strings),
+                        Screen::Forwards(state) => {
+                            let forwards = config
+                                .servers
+                                .iter()
+                                .find(|s| s.id == state.server_id)
+                                .map(|s| s.forwards.as_slice())
+                                .unwrap_or(&[]);
+                            state.render(frame, area, forwards, status.as_deref(), strings);
+                        }
+                        Screen::ForwardForm(state) => state.render(frame, area, strings),
+                        Screen::ConfirmDeleteForward { state, .. } => state.render(frame, area, strings),
                     }
                     if help_open {
                         help::render(frame, area, topic, strings);
@@ -980,6 +1025,8 @@ impl App {
                     MainMenuAction::Delete(id) => NextStep::GoDelete(id),
                     MainMenuAction::Scripts(id) => NextStep::GoScripts(id),
                     MainMenuAction::Files(id) => NextStep::GoFiles(id),
+                    MainMenuAction::SshImport => NextStep::GoSshImport,
+                    MainMenuAction::Forwards(id) => NextStep::GoForwards(id),
                     MainMenuAction::Lock => NextStep::Lock,
                     MainMenuAction::Settings => NextStep::GoSettings,
                     MainMenuAction::CycleSort => NextStep::CycleSort,
@@ -1045,6 +1092,40 @@ impl App {
                         ScriptTargetsOutcome::Run(targets) => NextStep::RunScript { origin_server_id, script_id, targets },
                     }
                 }
+                Screen::SshImport(state) => match state.handle_key(key) {
+                    SshImportOutcome::None => NextStep::None,
+                    SshImportOutcome::Cancel => NextStep::SshImportCancel,
+                    SshImportOutcome::Help => NextStep::Help,
+                    SshImportOutcome::Import(hosts) => NextStep::SshImportConfirm(hosts),
+                },
+                Screen::Forwards(state) => {
+                    let forwards = u
+                        .config
+                        .servers
+                        .iter()
+                        .find(|s| s.id == state.server_id)
+                        .map(|s| s.forwards.clone())
+                        .unwrap_or_default();
+                    match state.handle_key(key, &forwards) {
+                        ForwardsListAction::None => NextStep::None,
+                        ForwardsListAction::Add => NextStep::GoForwardAdd,
+                        ForwardsListAction::Edit(id) => NextStep::GoForwardEdit(id),
+                        ForwardsListAction::Delete(id) => NextStep::GoForwardDeleteConfirm(id),
+                        ForwardsListAction::Toggle(id) => NextStep::ForwardToggle(id),
+                        ForwardsListAction::Back => NextStep::ForwardsBack,
+                        ForwardsListAction::Help => NextStep::Help,
+                    }
+                }
+                Screen::ForwardForm(state) => match state.handle_key(key, strings) {
+                    ForwardFormOutcome::None => NextStep::None,
+                    ForwardFormOutcome::Cancel => NextStep::ForwardFormCancel,
+                    ForwardFormOutcome::Submit(data) => NextStep::ForwardFormSave(data),
+                },
+                Screen::ConfirmDeleteForward { state, .. } => match state.handle_key(key) {
+                    ConfirmOutcome::None => NextStep::None,
+                    ConfirmOutcome::Yes => NextStep::ConfirmDeleteForwardYes,
+                    ConfirmOutcome::No => NextStep::ConfirmDeleteForwardNo,
+                },
                 Screen::ScriptForm(state) => match state.handle_key(key, strings) {
                     ScriptFormOutcome::None => NextStep::None,
                     ScriptFormOutcome::Cancel => NextStep::ScriptFormCancel,
@@ -1098,11 +1179,20 @@ impl App {
                 self.state = self.locked_state();
             }
             NextStep::GoAdd => self.with_unlocked(|u| {
-                u.screen = Screen::ServerForm(ServerFormState::new_add());
+                // Bound on its own statement: assigning inline keeps the borrow
+                // of `u.config.servers` alive across the write to `u.screen`.
+                let form = ServerFormState::new_add(&u.config.servers);
+                u.screen = Screen::ServerForm(form);
             }),
             NextStep::GoEdit(id) => self.with_unlocked(|u| {
-                if let Some(entry) = u.config.servers.iter().find(|s| s.id == id) {
-                    u.screen = Screen::ServerForm(ServerFormState::new_edit(entry));
+                let form = u
+                    .config
+                    .servers
+                    .iter()
+                    .find(|s| s.id == id)
+                    .map(|entry| ServerFormState::new_edit(entry, &u.config.servers));
+                if let Some(form) = form {
+                    u.screen = Screen::ServerForm(form);
                 }
             }),
             NextStep::GoDelete(id) => self.with_unlocked(|u| {
@@ -1255,6 +1345,65 @@ impl App {
                     u.screen = Screen::ScriptTargets(ScriptTargetsState::new(server_id, script_id, script_name));
                 }
             }),
+            NextStep::GoForwards(id) => self.with_unlocked(|u| {
+                let name = u.config.servers.iter().find(|s| s.id == id).map(|e| e.name.clone());
+                if let Some(name) = name {
+                    u.screen = Screen::Forwards(ForwardsListState::new(id, name));
+                }
+            }),
+            NextStep::ForwardsBack => self.with_unlocked(|u| {
+                let mut menu = MainMenuState::new();
+                menu.clamp_selection(&u.config.servers, u.config.server_sort);
+                u.screen = Screen::MainMenu(menu);
+            }),
+            NextStep::GoForwardAdd => self.with_unlocked(|u| {
+                if let Screen::Forwards(list) = &u.screen {
+                    u.screen = Screen::ForwardForm(ForwardFormState::new_add(list.server_id));
+                }
+            }),
+            NextStep::GoForwardEdit(forward_id) => self.with_unlocked(|u| {
+                let form = match &u.screen {
+                    Screen::Forwards(list) => u
+                        .config
+                        .servers
+                        .iter()
+                        .find(|s| s.id == list.server_id)
+                        .and_then(|e| e.forwards.iter().find(|f| f.id == forward_id))
+                        .map(|rule| ForwardFormState::new_edit(list.server_id, rule)),
+                    _ => None,
+                };
+                if let Some(form) = form {
+                    u.screen = Screen::ForwardForm(form);
+                }
+            }),
+            NextStep::GoForwardDeleteConfirm(forward_id) => self.with_unlocked(|u| {
+                let ctx = match &u.screen {
+                    Screen::Forwards(list) => u
+                        .config
+                        .servers
+                        .iter()
+                        .find(|s| s.id == list.server_id)
+                        .and_then(|e| e.forwards.iter().find(|f| f.id == forward_id))
+                        .map(|rule| (list.server_id, rule.label())),
+                    _ => None,
+                };
+                if let Some((server_id, label)) = ctx {
+                    let msg = format!("{}{label}{}", strings.delete_forward_confirm_prefix, strings.delete_forward_confirm_suffix);
+                    u.screen = Screen::ConfirmDeleteForward { server_id, forward_id, state: ConfirmState::new(msg) };
+                }
+            }),
+            NextStep::ForwardToggle(forward_id) => self.toggle_forward(forward_id),
+            NextStep::ForwardFormCancel => self.back_to_forwards(),
+            NextStep::ForwardFormSave(data) => self.submit_forward_form(data),
+            NextStep::ConfirmDeleteForwardYes => self.confirm_delete_forward(),
+            NextStep::ConfirmDeleteForwardNo => self.back_to_forwards(),
+            NextStep::GoSshImport => self.open_ssh_import(),
+            NextStep::SshImportCancel => self.with_unlocked(|u| {
+                let mut menu = MainMenuState::new();
+                menu.clamp_selection(&u.config.servers, u.config.server_sort);
+                u.screen = Screen::MainMenu(menu);
+            }),
+            NextStep::SshImportConfirm(hosts) => self.import_ssh_hosts(hosts),
             NextStep::ScriptTargetsCancel => self.with_unlocked(|u| {
                 let ctx = match &u.screen {
                     Screen::ScriptTargets(state) => Some(state.origin_server_id),
@@ -1329,6 +1478,178 @@ impl App {
         }
     }
 
+    /// Opens the `~/.ssh/config` picker.
+    ///
+    /// The file is read here rather than inside the screen so the screen has
+    /// no I/O in it at all and stays testable from a `&str`. A file that
+    /// cannot be read still opens the screen, carrying the reason: an empty
+    /// list with an explanation beats a key that appears to do nothing.
+    fn open_ssh_import(&mut self) {
+        let strings = self.lang.strings();
+        let read = match crate::ssh_config::default_path() {
+            Some(path) => std::fs::read_to_string(&path).map_err(|e| format!("{}{e}", strings.ssh_import_error_prefix)),
+            None => Err(strings.ssh_import_error_prefix.to_string()),
+        };
+        let (hosts, error) = match read {
+            Ok(text) => (crate::ssh_config::parse(&text), None),
+            Err(message) => (Vec::new(), Some(message)),
+        };
+        self.with_unlocked(|u| {
+            let state = SshImportState::new(hosts, &u.config.servers, error);
+            u.screen = Screen::SshImport(state);
+        });
+    }
+
+    /// Turns picked hosts into vault entries and saves once.
+    ///
+    /// **A host with no `IdentityFile` becomes agent auth.** That is the honest
+    /// reading of an OpenSSH block naming no key, and the only reading that
+    /// stores nothing: falling back to a password would prompt for a credential
+    /// the user never had, and inventing a key path would point at a file that
+    /// may not exist.
+    ///
+    /// A failed save rolls the entries back out of memory. Leaving them would
+    /// show the user a list of servers the vault does not have, which the next
+    /// launch would silently contradict.
+    fn import_ssh_hosts(&mut self, hosts: Vec<SshConfigHost>) {
+        let strings = self.lang.strings();
+        let AppState::Unlocked(u) = &mut self.state else {
+            return;
+        };
+
+        let before = u.config.servers.len();
+        for host in hosts {
+            let username = host.username();
+            let auth = match host.identity_file {
+                Some(key_path) => AuthMethod::SshKey { key_path, passphrase: None },
+                None => AuthMethod::Agent,
+            };
+            u.config.servers.push(ServerEntry::new(
+                host.alias,
+                host.hostname,
+                host.port.unwrap_or(crate::config::model::DEFAULT_PORT),
+                username,
+                auth,
+            ));
+        }
+        let imported = u.config.servers.len() - before;
+
+        match self.store.save(&u.config, &u.master_key, &u.slots) {
+            Ok(()) => {
+                let mut menu = MainMenuState::new();
+                menu.clamp_selection(&u.config.servers, u.config.server_sort);
+                u.status = Some(StatusMessage::new(format!("{}{imported}{}", strings.status_imported_prefix, strings.status_imported_suffix)));
+                u.screen = Screen::MainMenu(menu);
+            }
+            Err(e) => {
+                u.config.servers.truncate(before);
+                if let Screen::SshImport(state) = &mut u.screen {
+                    state.error = Some(format!("{}{e}", strings.save_error_prefix));
+                }
+            }
+        }
+    }
+
+    /// Back to the forwards list, whichever screen asked.
+    ///
+    /// The `server_id` is read off whichever forward screen is on top rather
+    /// than passed around, so a cancel from the form and a "no" from the
+    /// confirm land in the same place without either one carrying it.
+    fn back_to_forwards(&mut self) {
+        self.with_unlocked(|u| {
+            let server_id = match &u.screen {
+                Screen::ForwardForm(form) => Some(form.server_id),
+                Screen::ConfirmDeleteForward { server_id, .. } => Some(*server_id),
+                _ => None,
+            };
+            if let Some(server_id) = server_id {
+                let name = u.config.servers.iter().find(|s| s.id == server_id).map(|e| e.name.clone()).unwrap_or_default();
+                // A fresh state, so the selection starts at the top rather
+                // than at a row a delete may have taken away. `clamp_selection`
+                // is for the screen that stays put — see `toggle_forward`.
+                u.screen = Screen::Forwards(ForwardsListState::new(server_id, name));
+            }
+        });
+    }
+
+    /// Turns one rule on or off and saves. A rule kept but disabled is the
+    /// point of the flag — deleting one to stop it for an afternoon means
+    /// retyping four fields to get it back.
+    fn toggle_forward(&mut self, forward_id: Uuid) {
+        self.edit_forwards(|forwards| {
+            if let Some(rule) = forwards.iter_mut().find(|f| f.id == forward_id) {
+                rule.enabled = !rule.enabled;
+            }
+        });
+    }
+
+    fn submit_forward_form(&mut self, data: ForwardFormData) {
+        let server_id = match &self.state {
+            AppState::Unlocked(u) => match &u.screen {
+                Screen::ForwardForm(form) => Some(form.server_id),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(server_id) = server_id else { return };
+
+        self.mutate_forwards(server_id, |forwards| match data.id {
+            Some(id) => {
+                if let Some(rule) = forwards.iter_mut().find(|f| f.id == id) {
+                    rule.kind = data.kind.clone();
+                }
+            }
+            None => forwards.push(ForwardRule::new(data.kind.clone())),
+        });
+        self.back_to_forwards();
+    }
+
+    fn confirm_delete_forward(&mut self) {
+        let target = match &self.state {
+            AppState::Unlocked(u) => match &u.screen {
+                Screen::ConfirmDeleteForward { server_id, forward_id, .. } => Some((*server_id, *forward_id)),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some((server_id, forward_id)) = target else { return };
+        self.mutate_forwards(server_id, |forwards| forwards.retain(|f| f.id != forward_id));
+        self.back_to_forwards();
+    }
+
+    /// Applies a change to the forwards of whichever server the current
+    /// forwards screen belongs to.
+    fn edit_forwards(&mut self, change: impl FnOnce(&mut Vec<ForwardRule>)) {
+        let server_id = match &self.state {
+            AppState::Unlocked(u) => match &u.screen {
+                Screen::Forwards(list) => Some(list.server_id),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(server_id) = server_id {
+            self.mutate_forwards(server_id, change);
+        }
+    }
+
+    /// One place that edits a server's forwards and saves, so every path
+    /// through this screen reports a failed write the same way.
+    fn mutate_forwards(&mut self, server_id: Uuid, change: impl FnOnce(&mut Vec<ForwardRule>)) {
+        let strings = self.lang.strings();
+        let AppState::Unlocked(u) = &mut self.state else {
+            return;
+        };
+        let Some(entry) = u.config.servers.iter_mut().find(|s| s.id == server_id) else {
+            return;
+        };
+        change(&mut entry.forwards);
+
+        u.status = Some(StatusMessage::new(match self.store.save(&u.config, &u.master_key, &u.slots) {
+            Ok(()) => strings.status_saved.to_string(),
+            Err(e) => format!("{}{e}", strings.save_error_prefix),
+        }));
+    }
+
     fn submit_form(&mut self, data: ServerFormData) -> Result<()> {
         let strings = self.lang.strings();
         let AppState::Unlocked(u) = &mut self.state else {
@@ -1343,6 +1664,7 @@ impl App {
             FormMode::Add => {
                 let mut entry = ServerEntry::new(data.name, data.host, data.port, data.username, data.auth);
                 entry.tags = data.tags;
+                entry.jump_host = data.jump_host;
                 u.config.servers.push(entry);
             }
             FormMode::Edit(id) => {
@@ -1353,6 +1675,7 @@ impl App {
                     entry.username = data.username;
                     entry.tags = data.tags;
                     entry.auth = data.auth;
+                    entry.jump_host = data.jump_host;
                 }
             }
         }
@@ -1383,6 +1706,15 @@ impl App {
         };
         let target = *target;
         u.config.servers.retain(|s| s.id != target);
+        // Anything that connected through it now connects direct. A `Uuid` left
+        // pointing at a deleted entry is a dangling reference that nothing
+        // would ever clean up, and it fails at connect time rather than here —
+        // long after the user could tell what caused it.
+        for entry in &mut u.config.servers {
+            if entry.jump_host == Some(target) {
+                entry.jump_host = None;
+            }
+        }
 
         let save_result = self.store.save(&u.config, &u.master_key, &u.slots);
         let mut menu = MainMenuState::new();
@@ -1674,12 +2006,28 @@ impl App {
                 // Placeholders are resolved here, where the entry is still
                 // borrowed — the expanded copies are what crosses the await.
                 let vars = ScriptVars::from_entry(e);
-                (ssh::Target::from_entry(e), e.scripts.iter().filter(|s| s.run_on_connect).map(|s| vars.expand_script(s)).collect::<Vec<_>>())
+                // So is the bastion chain, and it has to be: a `Uuid` means
+                // nothing once `config` is out of scope.
+                let target = ssh::Target::from_entry(e, &u.config.servers);
+                // `ForwardRule` holds no credential, so cloning it here costs
+                // nothing worth protecting — but it has to be here all the
+                // same, because `e` is gone by the time the session is up.
+                let forwards = e.forwards.clone();
+                (target, forwards, e.scripts.iter().filter(|s| s.run_on_connect).map(|s| vars.expand_script(s)).collect::<Vec<_>>())
             }),
             AppState::Setup(_) | AppState::Unopenable | AppState::CannotOpen { .. } | AppState::Locked(_) | AppState::LockedTotpDaily(_) => None,
         };
-        let Some((target, on_connect_scripts)) = target else {
+        let Some((target, forward_rules, on_connect_scripts)) = target else {
             return Ok(());
+        };
+        // A chain that loops or names a deleted server fails before anything is
+        // opened, and reads as a connect error like any other.
+        let target = match target {
+            Ok(target) => target,
+            Err(e) => {
+                self.set_status(format!("{}{e}", strings.connect_error_prefix));
+                return Ok(());
+            }
         };
 
         // The list stays on screen through the handshake — a blank terminal
@@ -1695,7 +2043,7 @@ impl App {
 
         // A connect that failed never suspends. Handing the primary buffer over
         // to show an error the status bar can show is the bug.
-        let mut connected = match connect_result {
+        let connected = match connect_result {
             Ok(connected) => connected,
             Err(AppError::HostKeyChanged { fingerprint }) => {
                 self.set_status(format!("{}{fingerprint}{}", strings.host_key_changed_prefix, strings.host_key_changed_suffix));
@@ -1713,18 +2061,30 @@ impl App {
         // now: a fingerprint persisted only once the session ended would
         // re-run TOFU if the process were killed during it.
         let mut record = session::observe_handshake(&connected);
-        self.record_session(id, &record);
+        let jump_records = session::observe_jumps(&connected, &target.jump_ids);
+        self.record_session(id, &record, &jump_records);
 
         // The late suspend. The primary buffer is handed over here and not a
         // line earlier, with a shell about to land on it.
         self.connecting = None;
         terminal.suspend()?;
 
+        // Brought up after the suspend so the report lands on the primary
+        // buffer with the script output, and bound to this scope: `Forwards`
+        // aborts every listener when it drops, which is the whole of the
+        // teardown story. It borrows nothing from `self`, so it sits inside
+        // `await_redrawing`'s rule as well as the `NextStep` one.
+        let _forwards = {
+            let forwards = ssh::forward::start(Arc::clone(&connected.handle), &forward_rules).await;
+            session::print_forward_report(&forwards, strings);
+            forwards
+        };
+
         // Auto-run scripts flagged `run_on_connect`, printed plain to the
         // (now-suspended) primary screen buffer.
         for script in &on_connect_scripts {
             let mut partial = String::new();
-            script_runner::run_script(&mut connected.handle, script, |event| {
+            script_runner::run_script(&connected.handle, script, |event| {
                 session::print_script_event_plain(event, strings, &mut partial);
             })
             .await;
@@ -1747,7 +2107,9 @@ impl App {
         // last good snapshot, so a second save would rewrite the whole vault to
         // store nothing.
         if record.system_info.is_some() {
-            self.record_session(id, &record);
+            // The hops were written above; there is nothing new to say about
+            // them, and re-applying would be a second pass over the same value.
+            self.record_session(id, &record, &[]);
         }
 
         if let AppState::Unlocked(u) = &mut self.state {
@@ -1761,10 +2123,17 @@ impl App {
     ///
     /// Best-effort, like every save `connect_flow` makes: a read-only config
     /// directory must not stand between the user and the shell they asked for.
-    fn record_session(&mut self, id: Uuid, record: &session::SessionRecord) {
+    fn record_session(&mut self, id: Uuid, record: &session::SessionRecord, jumps: &[session::JumpRecord]) {
         if let AppState::Unlocked(u) = &mut self.state {
             if let Some(e) = u.config.servers.iter_mut().find(|s| s.id == id) {
                 record.apply_to(e);
+            }
+            // Folded into the same save. A save per hop would rewrite the whole
+            // vault once per bastion for one field each.
+            for jump in jumps {
+                if let Some(e) = u.config.servers.iter_mut().find(|s| s.id == jump.server_id) {
+                    jump.apply_to(e);
+                }
             }
             let _ = self.store.save(&u.config, &u.master_key, &u.slots);
         }
@@ -1806,10 +2175,16 @@ impl App {
                 let origin = u.config.servers.iter().find(|s| s.id == origin_server_id);
                 origin.and_then(|origin| {
                     let definition = origin.scripts.iter().find(|s| s.id == script_id)?;
-                    let runs: Vec<(String, ssh::Target, Script)> = targets
+                    // The `Result` rides into the loop rather than ending the
+                    // whole run here: a bad jump chain on one host is exactly
+                    // the same kind of problem as a host that will not answer,
+                    // and that already does not stop a fleet run.
+                    let runs: Vec<(String, Result<ssh::Target>, Script)> = targets
                         .iter()
                         .filter_map(|id| u.config.servers.iter().find(|s| s.id == *id))
-                        .map(|e| (e.name.clone(), ssh::Target::from_entry(e), ScriptVars::from_entry(e).expand_script(definition)))
+                        .map(|e| {
+                            (e.name.clone(), ssh::Target::from_entry(e, &u.config.servers), ScriptVars::from_entry(e).expand_script(definition))
+                        })
                         .collect();
                     Some((origin.name.clone(), definition.name.clone(), runs))
                 })
@@ -1825,6 +2200,14 @@ impl App {
 
         for (server_name, target, script) in runs {
             run_state.server_started(&server_name);
+            let target = match target {
+                Ok(target) => target,
+                Err(e) => {
+                    run_state.server_connect_error(&format!("{e}"), strings);
+                    draw_run(terminal, &mut run_state, strings);
+                    continue;
+                }
+            };
             // Drawn before the connect, not after: a DNS lookup or a TCP
             // timeout can take seconds, and without this the screen would sit
             // on the previous host's output with no sign of which one it had
@@ -1832,7 +2215,7 @@ impl App {
             draw_run(terminal, &mut run_state, strings);
 
             match ssh::connect(&target).await {
-                Ok(mut connected) => {
+                Ok(connected) => {
                     // The events travel through a channel rather than straight
                     // into `run_state`, and that is what makes the whole thing
                     // work: the run future must not borrow the screen, or the
@@ -1840,7 +2223,7 @@ impl App {
                     // it either.
                     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
                     {
-                        let mut run = std::pin::pin!(script_runner::run_script(&mut connected.handle, &script, move |event| {
+                        let mut run = std::pin::pin!(script_runner::run_script(&connected.handle, &script, move |event| {
                             let _ = tx.send(event.into_owned());
                         }));
                         loop {
@@ -1975,12 +2358,16 @@ impl App {
 
         let context = match &self.state {
             AppState::Unlocked(u) => u.config.servers.iter().find(|e| e.id == id).map(|e| {
-                (ssh::Target::from_entry(e), e.name.clone(), e.last_remote_dir.clone(), e.last_local_dir.clone())
+                (ssh::Target::from_entry(e, &u.config.servers), e.name.clone(), e.last_remote_dir.clone(), e.last_local_dir.clone())
             }),
             _ => None,
         };
         let Some((target, server_name, last_remote, last_local)) = context else {
             return Ok(());
+        };
+        let target = match target {
+            Ok(target) => target,
+            Err(e) => return self.fail_to_open_files(e),
         };
 
         // The same indicator `Enter` shows, on the same row, because `f` and
@@ -2001,10 +2388,12 @@ impl App {
                 // Esc, with nothing yet built to tear down.
                 None => return Ok(()),
             };
-            let mut handle = connected.handle;
-            let opened = self.await_on_screen(terminal, sftp::open_session(&mut handle)).await;
+            // The whole `Connected` is kept, not just its handle: it owns the
+            // bastion sessions this one is tunnelled through, and dropping it
+            // here would close them out from under the sftp stream.
+            let opened = self.await_on_screen(terminal, sftp::open_session(&connected.handle)).await;
             match opened {
-                Some(Ok(sftp)) => self.remote = Some(RemoteSession { server_id: id, handle, sftp }),
+                Some(Ok(sftp)) => self.remote = Some(RemoteSession { server_id: id, connected, sftp }),
                 Some(Err(e)) => return self.fail_to_open_files(e),
                 None => return Ok(()),
             }

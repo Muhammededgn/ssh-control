@@ -31,12 +31,17 @@ use crate::error::{AppError, Result};
 type Step = fn(&mut Map<String, Value>);
 
 /// Every step, keyed by the version it upgrades *from*, in order.
+const STEPS: &[(u32, Step)] = &[(1, v1_to_v2)];
+
+/// 1 → 2. **Deliberately does nothing**, and that is not an oversight.
 ///
-/// Empty because there has only ever been one schema. When a second arrives,
-/// add the step here and bump `CURRENT_SCHEMA_VERSION` — the machinery below
-/// needs no other change, and the tests already exercise it through a synthetic
-/// step.
-const STEPS: &[(u32, Step)] = &[];
+/// Version 2 introduced `AuthMethod::Agent`. Nothing already written changes
+/// shape — a v1 config is a valid v2 config — so there is no field to move.
+/// The version exists only so a build that predates the variant refuses the
+/// file with `SchemaTooNew` instead of failing to deserialize an unknown enum
+/// variant and reporting `CorruptFile`. Every v1 vault therefore walks through
+/// here untouched and comes out stamped 2.
+fn v1_to_v2(_config: &mut Map<String, Value>) {}
 
 /// Just enough of the config to decide what to do with the rest of it.
 ///
@@ -46,14 +51,20 @@ const STEPS: &[(u32, Step)] = &[];
 /// materialized by this.
 #[derive(serde::Deserialize)]
 struct VersionProbe {
-    #[serde(default = "assume_current")]
+    #[serde(default = "assume_first_version")]
     schema_version: u32,
 }
 
 /// A config with no `schema_version` at all predates the field, which means it
 /// is version 1 — the version that introduced it.
-fn assume_current() -> u32 {
-    CURRENT_SCHEMA_VERSION
+///
+/// Not `CURRENT_SCHEMA_VERSION`. That read the same while 1 *was* current, and
+/// stopped being true the moment the constant moved: a genuinely v1 body would
+/// have gone straight to `Config` with every later step skipped. Nothing the
+/// app has written lacks the field, so this is defence in depth — but it is the
+/// kind that only pays out once, silently, years later.
+fn assume_first_version() -> u32 {
+    1
 }
 
 /// Parses the decrypted body, refusing anything newer than this binary
@@ -119,22 +130,46 @@ mod tests {
 
     #[test]
     fn a_config_at_the_current_version_loads_unchanged() {
-        let config = config_from_slice(&body(r#"{"schema_version":1,"servers":[]}"#)).unwrap();
+        let config = config_from_slice(&body(r#"{"schema_version":2,"servers":[]}"#)).unwrap();
         assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
         assert!(config.servers.is_empty());
+    }
+
+    /// The first real migration. A v1 vault is the shape every existing
+    /// installation has on disk, so what matters is that it opens at all and
+    /// arrives with its servers — and its credentials — intact.
+    #[test]
+    fn a_v1_vault_migrates_to_the_current_version_with_its_servers_intact() {
+        let v1 = body(
+            r#"{"schema_version":1,"servers":[{
+                "id":"6f1e7f3a-0000-4000-8000-00000000cafe",
+                "name":"box","host":"example.com","port":22,"username":"root",
+                "auth":{"Password":{"password":"hunter2"}}
+            }],"totp":null}"#,
+        );
+
+        let config = config_from_slice(&v1).expect("an existing vault must still open");
+
+        assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(config.servers.len(), 1);
+        assert_eq!(config.servers[0].name, "box");
+        let crate::config::AuthMethod::Password { password } = &config.servers[0].auth else {
+            panic!("the credential must survive the migration");
+        };
+        assert_eq!(password.as_str(), "hunter2");
     }
 
     /// The whole point. Without this the unknown fields are dropped and written
     /// back over the user's data on the next save.
     #[test]
     fn a_newer_config_is_refused_rather_than_silently_stripped() {
-        let newer = body(r#"{"schema_version":2,"servers":[],"something_new":[1,2]}"#);
+        let newer = body(r#"{"schema_version":3,"servers":[],"something_new":[1,2]}"#);
 
         // `Config` has no `Debug` on purpose — it holds credentials — so the
         // outcome is narrowed to the error before anything is printed.
         match config_from_slice(&newer).err() {
             Some(AppError::SchemaTooNew { found, supported }) => {
-                assert_eq!(found, 2);
+                assert_eq!(found, 3);
                 assert_eq!(supported, CURRENT_SCHEMA_VERSION);
             }
             Some(other) => panic!("expected a schema refusal, got {other:?}"),
@@ -142,9 +177,12 @@ mod tests {
         }
     }
 
-    /// A config predating the field is version 1, not "unknown".
+    /// A config predating the field is version 1, not "unknown" and — the part
+    /// that stopped being free the moment `CURRENT_SCHEMA_VERSION` moved — not
+    /// whatever the current version happens to be. It has to go *through* the
+    /// walk, not around it.
     #[test]
-    fn a_config_without_the_field_is_treated_as_the_current_version() {
+    fn a_config_without_the_field_is_treated_as_version_one_and_migrated() {
         let config = config_from_slice(&body(r#"{"servers":[]}"#)).unwrap();
         assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
     }
@@ -163,9 +201,10 @@ mod tests {
         }
     }
 
-    /// `STEPS` is empty today, so the walk is exercised against a synthetic
-    /// table instead — otherwise the machinery would ship untested and the
-    /// first real migration would be the one that discovers it is broken.
+    /// `STEPS` holds one entry today and it is a no-op, so a multi-step walk
+    /// is exercised against a synthetic table instead — otherwise the ordering
+    /// would ship untested and the first migration that actually moves a field
+    /// would be the one that discovers it is broken.
     mod the_migration_walk {
         use super::*;
 

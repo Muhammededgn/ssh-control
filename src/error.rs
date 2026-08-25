@@ -35,11 +35,30 @@ pub enum AppError {
     #[error("authentication failed: {0}")]
     SshAuthFailed(String),
 
+    /// The agent could not be reached, or had nothing to offer.
+    ///
+    /// Separate from `SshAuthFailed` deliberately: "credentials rejected by
+    /// server" sends the user to check the remote `authorized_keys`, when the
+    /// actual fix is `ssh-add` or starting an agent at all. The distinction is
+    /// the reason the variant exists — do not fold it back in.
+    #[error("ssh-agent: {0}")]
+    SshAgent(String),
+
     #[error("ssh error: {0}")]
     Ssh(#[from] russh::Error),
 
     #[error("host key changed for this server: new fingerprint {fingerprint}")]
     HostKeyChanged { fingerprint: String },
+
+    /// A failure that happened on the way, not at the destination.
+    ///
+    /// Carries the bastion's host because every error underneath it is worded
+    /// for the machine the user asked to reach. "host key changed for this
+    /// server" is alarming and wrong when the key that changed was the
+    /// bastion's, and "authentication failed" sends the user to check the
+    /// wrong `authorized_keys`.
+    #[error("via {host}: {source}")]
+    JumpFailed { host: String, #[source] source: Box<AppError> },
 
     #[error("key derivation error: {0}")]
     Kdf(String),

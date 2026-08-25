@@ -21,17 +21,25 @@ async fn main() {
     }
 
     let target = ssh::Target {
-        host: args[1].clone(),
-        port: args[2].parse().expect("port"),
-        username: args[3].clone(),
-        auth: AuthMethod::SshKey { key_path: args[4].clone(), passphrase: None },
-        // No pinned fingerprint: this helper trusts whatever answers, which is
-        // fine for a local test server and is why it is not the app's path.
-        host_key_fingerprint: None,
+        endpoint: ssh::Endpoint {
+            host: args[1].clone(),
+            port: args[2].parse().expect("port"),
+            username: args[3].clone(),
+            auth: AuthMethod::SshKey { key_path: args[4].clone(), passphrase: None },
+            // No pinned fingerprint: this helper trusts whatever answers, which
+            // is fine for a local test server and is why it is not the app's
+            // path.
+            host_key_fingerprint: None,
+        },
+        // A direct connect. Bastion chains are resolved out of the vault, and
+        // this helper has none.
+        jumps: Vec::new(),
+        jump_ids: Vec::new(),
+        remote_routes: Vec::new(),
     };
 
-    let mut connected = ssh::connect(&target).await.expect("connect");
-    let mut client = sftp::open_session(&mut connected.handle).await.expect("sftp subsystem");
+    let connected = ssh::connect(&target).await.expect("connect");
+    let mut client = sftp::open_session(&connected.handle).await.expect("sftp subsystem");
 
     let dir = match args.get(5) {
         Some(dir) => dir.clone(),

@@ -81,6 +81,10 @@ fn screen_name(app: &App) -> &'static str {
             Screen::TotpPrompt(_) => "TotpPrompt",
             Screen::Scripts(_) => "Scripts",
             Screen::ScriptTargets(_) => "ScriptTargets",
+            Screen::SshImport(_) => "SshImport",
+            Screen::Forwards(_) => "Forwards",
+            Screen::ForwardForm(_) => "ForwardForm",
+            Screen::ConfirmDeleteForward { .. } => "ConfirmDeleteForward",
             Screen::ScriptForm(_) => "ScriptForm",
             Screen::ConfirmDeleteScript { .. } => "ConfirmDeleteScript",
             Screen::ScriptRun(_) => "ScriptRun",
@@ -184,6 +188,184 @@ fn a_totp_only_vault_is_offered_the_conversion_first() {
 // Screen transitions
 // ---------------------------------------------------------------------------
 
+/// `i` reaches the importer, and a confirm writes through to disk.
+///
+/// The step is driven directly rather than through the screen because the
+/// screen's own picking is tested in `tui::ssh_import`; what this pins is the
+/// half `app.rs` owns — that the entries are built, saved and the list comes
+/// back.
+#[test]
+fn importing_from_ssh_config_persists_the_picked_hosts() {
+    let (dir, mut app) = password_vault(|_| {});
+    type_password(&mut app, PASSWORD);
+
+    press(&mut app, char_key('i'));
+    assert_eq!(screen_name(&app), "SshImport");
+
+    let hosts = crate::ssh_config::parse("Host web-1
+    HostName web1.example.com
+    User deploy
+    Port 2222
+");
+    app.apply_local_step(NextStep::SshImportConfirm(hosts)).expect("import");
+
+    assert_eq!(screen_name(&app), "MainMenu");
+    let entry = &unlocked(&app).config.servers[0];
+    assert_eq!(entry.name, "web-1");
+    assert_eq!(entry.host, "web1.example.com");
+    assert_eq!(entry.username, "deploy");
+    assert_eq!(entry.port, 2222);
+
+    drop(app);
+    let store = ConfigStore::new(dir.path().join("config.enc"));
+    assert_eq!(store.load(PASSWORD).expect("reopen").config.servers[0].host, "web1.example.com");
+}
+
+/// A block naming no key becomes agent auth, so the import stores no
+/// credential at all — which is the acceptance criterion the issue states.
+#[test]
+fn a_host_with_no_identity_file_is_imported_as_agent_auth() {
+    let (_dir, mut app) = password_vault(|_| {});
+    type_password(&mut app, PASSWORD);
+
+    let hosts = crate::ssh_config::parse("Host plain
+    HostName plain.example.com
+");
+    app.apply_local_step(NextStep::SshImportConfirm(hosts)).expect("import");
+
+    assert!(matches!(unlocked(&app).config.servers[0].auth, AuthMethod::Agent));
+}
+
+/// A save that fails must not leave the list showing servers the vault does
+/// not have — the next launch would silently contradict it.
+#[test]
+fn a_failed_import_rolls_the_entries_back_out_of_memory() {
+    let (dir, mut app) = password_vault(|_| {});
+    type_password(&mut app, PASSWORD);
+    press(&mut app, char_key('i'));
+    block_saves(&dir);
+
+    let hosts = crate::ssh_config::parse("Host web-1
+    HostName web1.example.com
+");
+    app.apply_local_step(NextStep::SshImportConfirm(hosts)).expect("import");
+
+    assert_eq!(screen_name(&app), "SshImport", "a failed save keeps the user where they were");
+    assert!(unlocked(&app).config.servers.is_empty(), "nothing may be left behind in memory");
+}
+
+/// Deleting a bastion must not leave the hosts behind it pointing at nothing.
+/// A dangling `Uuid` is a reference nothing would ever clean up, and it fails
+/// at connect time — long after the user could tell what caused it.
+#[test]
+fn deleting_a_bastion_puts_the_hosts_behind_it_back_on_a_direct_connect() {
+    let (_dir, mut app) = password_vault(|config| {
+        let bastion = entry("bastion");
+        let mut behind = entry("behind");
+        behind.jump_host = Some(bastion.id);
+        config.servers = vec![bastion, behind];
+    });
+    type_password(&mut app, PASSWORD);
+
+    let bastion_id = unlocked(&app).config.servers[0].id;
+    app.apply_local_step(NextStep::GoDelete(bastion_id)).expect("confirm");
+    app.apply_local_step(NextStep::ConfirmYes).expect("delete");
+
+    let servers = &unlocked(&app).config.servers;
+    assert_eq!(servers.len(), 1);
+    assert_eq!(servers[0].jump_host, None, "the reference must go with the entry");
+}
+
+/// `p` reaches the forwards list, and add / toggle / delete each write
+/// through. The rules are the one thing here that a *session* acts on, so a
+/// rule that is in memory and not on disk is one that quietly does not run
+/// next launch.
+#[test]
+fn port_forwards_are_added_toggled_and_deleted_through_the_list() {
+    let (dir, mut app) = password_vault(|config| config.servers = vec![entry("web-1")]);
+    type_password(&mut app, PASSWORD);
+
+    let server_id = unlocked(&app).config.servers[0].id;
+    press(&mut app, char_key('p'));
+    assert_eq!(screen_name(&app), "Forwards");
+
+    press(&mut app, char_key('a'));
+    assert_eq!(screen_name(&app), "ForwardForm");
+    let kind = crate::config::ForwardKind::Local {
+        bind_addr: "127.0.0.1".into(),
+        bind_port: 8080,
+        dest_host: "db.internal".into(),
+        dest_port: 5432,
+    };
+    app.apply_local_step(NextStep::ForwardFormSave(crate::tui::forward_form::ForwardFormData { id: None, kind }))
+        .expect("save");
+
+    assert_eq!(screen_name(&app), "Forwards");
+    let rule_id = unlocked(&app).config.servers[0].forwards[0].id;
+    assert!(unlocked(&app).config.servers[0].forwards[0].enabled);
+
+    // Off, but kept — that is what the flag is for.
+    app.apply_local_step(NextStep::ForwardToggle(rule_id)).expect("toggle");
+    assert!(!unlocked(&app).config.servers[0].forwards[0].enabled);
+    assert_eq!(unlocked(&app).config.servers[0].forwards.len(), 1);
+
+    app.apply_local_step(NextStep::GoForwardDeleteConfirm(rule_id)).expect("confirm");
+    assert_eq!(screen_name(&app), "ConfirmDeleteForward");
+    app.apply_local_step(NextStep::ConfirmDeleteForwardNo).expect("keep it");
+    assert_eq!(screen_name(&app), "Forwards");
+    assert_eq!(unlocked(&app).config.servers[0].forwards.len(), 1, "\"no\" keeps the rule");
+
+    app.apply_local_step(NextStep::GoForwardDeleteConfirm(rule_id)).expect("confirm");
+    app.apply_local_step(NextStep::ConfirmDeleteForwardYes).expect("delete");
+    assert_eq!(screen_name(&app), "Forwards");
+    assert!(unlocked(&app).config.servers[0].forwards.is_empty());
+
+    // Every step above saved, so the vault agrees. Checked after the app is
+    // dropped: `VaultLock` holds the flock in this process, and a second store
+    // on the same file would contend with it.
+    drop(app);
+    let store = ConfigStore::new(dir.path().join("config.enc"));
+    assert!(store.load(PASSWORD).expect("reopen").config.servers[0].forwards.is_empty());
+    let _ = server_id;
+}
+
+/// A rule turned off is a rule that is still there next launch. The flag is
+/// the whole reason `d` is not the only way to stop a forward.
+#[test]
+fn a_disabled_forward_survives_a_restart_still_disabled() {
+    let (dir, mut app) = password_vault(|config| config.servers = vec![entry("web-1")]);
+    type_password(&mut app, PASSWORD);
+    let server_id = unlocked(&app).config.servers[0].id;
+
+    app.apply_local_step(NextStep::GoForwards(server_id)).expect("open");
+    let kind = crate::config::ForwardKind::Dynamic { bind_addr: "127.0.0.1".into(), bind_port: 1080 };
+    app.apply_local_step(NextStep::GoForwardAdd).expect("add");
+    app.apply_local_step(NextStep::ForwardFormSave(crate::tui::forward_form::ForwardFormData { id: None, kind }))
+        .expect("save");
+    let rule_id = unlocked(&app).config.servers[0].forwards[0].id;
+    app.apply_local_step(NextStep::ForwardToggle(rule_id)).expect("toggle");
+
+    drop(app);
+    let store = ConfigStore::new(dir.path().join("config.enc"));
+    let reopened = store.load(PASSWORD).expect("reopen");
+    assert_eq!(reopened.config.servers[0].forwards.len(), 1);
+    assert!(!reopened.config.servers[0].forwards[0].enabled);
+}
+
+/// None of the forward steps suspends the terminal, holds a connection or
+/// redraws from inside an await, so none of them belongs in
+/// `handle_unlocked_key`'s six-arm match — putting one there would quietly
+/// make it untestable.
+#[test]
+fn the_forward_steps_need_no_terminal() {
+    let (_dir, mut app) = password_vault(|config| config.servers = vec![entry("web-1")]);
+    type_password(&mut app, PASSWORD);
+
+    for step in [NextStep::GoForwards(unlocked(&app).config.servers[0].id), NextStep::GoForwardAdd, NextStep::ForwardFormCancel, NextStep::ForwardsBack] {
+        assert!(app.apply_local_step(step).expect("step").is_none(), "a forward step must not need a terminal");
+    }
+}
+
 #[test]
 fn adding_a_server_persists_it_and_returns_to_the_list() {
     let (dir, mut app) = password_vault(|_| {});
@@ -199,6 +381,7 @@ fn adding_a_server_persists_it_and_returns_to_the_list() {
         username: "root".into(),
         tags: vec!["prod".into()],
         auth: AuthMethod::password("hunter2"),
+        jump_host: None,
     };
     app.apply_local_step(NextStep::FormSubmit(data)).expect("submit");
 
@@ -421,7 +604,7 @@ fn a_handshake_record_lands_on_the_entry_and_is_saved() {
     type_password(&mut app, PASSWORD);
     let id = unlocked(&app).config.servers[0].id;
 
-    app.record_session(id, &session::SessionRecord { fingerprint: Some("SHA256:abc".into()), connected_at: 100, system_info: None });
+    app.record_session(id, &session::SessionRecord { fingerprint: Some("SHA256:abc".into()), connected_at: 100, system_info: None }, &[]);
 
     let e = &unlocked(&app).config.servers[0];
     assert_eq!(e.host_key_fingerprint.as_deref(), Some("SHA256:abc"));
@@ -445,9 +628,9 @@ fn the_probe_s_record_adds_system_info_without_moving_the_timestamp() {
     let id = unlocked(&app).config.servers[0].id;
 
     let mut record = session::SessionRecord { fingerprint: Some("SHA256:abc".into()), connected_at: 100, system_info: None };
-    app.record_session(id, &record);
+    app.record_session(id, &record, &[]);
     record.system_info = Some(SystemInfo { cpu_cores: Some(8), ..SystemInfo::default() });
-    app.record_session(id, &record);
+    app.record_session(id, &record, &[]);
 
     let e = &unlocked(&app).config.servers[0];
     assert_eq!(e.last_connected_unix, Some(100), "the connection time is stamped once");
