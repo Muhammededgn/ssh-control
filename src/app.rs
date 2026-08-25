@@ -361,10 +361,7 @@ impl App {
                 },
                 // Same shape, different reason: opening it would strip the
                 // fields the newer build stored.
-                Err(AppError::SchemaTooNew { .. }) => AppState::CannotOpen {
-                    title: strings.schema_too_new_title,
-                    message: strings.schema_too_new_message,
-                },
+                Err(AppError::SchemaTooNew { .. }) => self.schema_too_new_state(),
                 Err(e) => {
                     if has_password {
                         let mut unlock = UnlockState::new(UnlockMode::Unlock);
@@ -755,6 +752,9 @@ impl App {
                     // just belongs to another instance. Say that plainly rather
                     // than dressing it up as a save failure.
                     Err(AppError::VaultInUse) => self.set_totp_daily_error(strings.err_vault_in_use.to_string()),
+                    // Nor is this one a save failure, and no retyped code fixes
+                    // it: the vault needs the newer binary, full stop.
+                    Err(AppError::SchemaTooNew { .. }) => self.state = self.schema_too_new_state(),
                     Err(e) => self.set_totp_daily_error(format!("{}{e}", strings.save_error_prefix)),
                 }
             }
@@ -783,6 +783,19 @@ impl App {
         }
     }
 
+    /// The screen a vault written by a newer build belongs on, whichever
+    /// unlock route hit the refusal.
+    ///
+    /// `SchemaTooNew` can surface from all three — the silent device path, the
+    /// TOTP-daily code, and the password — and only the first used to route it
+    /// here. The other two printed it inline under `save_error_prefix`, which
+    /// names the wrong operation: nothing was being saved, the vault was being
+    /// opened. None of them has anything to retype, so all three land here.
+    fn schema_too_new_state(&self) -> AppState {
+        let strings = self.lang.strings();
+        AppState::CannotOpen { title: strings.schema_too_new_title, message: strings.schema_too_new_message }
+    }
+
     /// Falls back to the password screen, saying why.
     fn escalate(&mut self, reason: &str) {
         let mut unlock = UnlockState::new(UnlockMode::Unlock);
@@ -797,6 +810,10 @@ impl App {
                 self.reconcile_device_state(&unlocked);
                 self.enter_unlocked(unlocked);
             }
+            // The one unlock failure that is not about the password at all.
+            // Leaving it on the lock screen invites the user to try again with
+            // a password that was never wrong.
+            Err(AppError::SchemaTooNew { .. }) => self.state = self.schema_too_new_state(),
             Err(e) => {
                 let message = self.error_text(&e);
                 if let AppState::Locked(unlock) = &mut self.state {

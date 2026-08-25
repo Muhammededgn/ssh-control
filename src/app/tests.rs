@@ -137,6 +137,21 @@ fn a_wrong_password_stays_on_the_lock_screen() {
     }
 }
 
+/// A vault from a newer build is not a password problem, so it does not belong
+/// on the password screen: there is nothing to retype. It used to land there
+/// anyway, under the save-error prefix, which named an operation that was not
+/// happening — the vault was being opened, not saved.
+#[test]
+fn a_newer_schema_leaves_the_lock_screen_for_a_screen_that_explains() {
+    let (_dir, mut app) = password_vault(|c| c.schema_version = crate::config::model::CURRENT_SCHEMA_VERSION + 1);
+    type_password(&mut app, PASSWORD);
+
+    match &app.state {
+        AppState::CannotOpen { title, .. } => assert_eq!(*title, app.lang.strings().schema_too_new_title),
+        _ => panic!("a newer vault must not sit on the lock screen"),
+    }
+}
+
 /// Mode 3: the password opens the vault, but the server list is not reachable
 /// until a code has been checked too.
 #[test]
