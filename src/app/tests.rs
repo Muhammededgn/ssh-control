@@ -12,7 +12,7 @@
 //! here.
 
 use super::*;
-use crate::config::model::{AuthMethod, ServerEntry, SystemInfo};
+use crate::config::model::{AuthMethod, ForwardKind, ScriptStep, ServerEntry, StepCondition, SystemInfo};
 use crate::tui::server_form::ServerFormData;
 
 const PASSWORD: &str = "correct horse battery";
@@ -289,6 +289,66 @@ fn deleting_a_bastion_puts_the_hosts_behind_it_back_on_a_direct_connect() {
     let servers = &unlocked(&app).config.servers;
     assert_eq!(servers.len(), 1);
     assert_eq!(servers[0].jump_host, None, "the reference must go with the entry");
+}
+
+// ---------------------------------------------------------------------------
+// What a connect resolves out of the vault
+// ---------------------------------------------------------------------------
+
+/// The borrow window in front of every connect, which had no coverage while it
+/// was inlined in `connect_flow` — a flow that cannot be driven without a
+/// terminal. Three things it decides are easy to get wrong and invisible when
+/// they are: placeholders expand against the entry being connected to, only
+/// `run_on_connect` scripts come along, and the forwards are cloned rather
+/// than left behind with the borrow.
+#[test]
+fn a_connect_resolves_its_scripts_and_forwards_inside_the_borrow() {
+    let step = |command: &str| ScriptStep { command: command.into(), condition: StepCondition::Always, timeout_secs: None };
+    let (_dir, mut app) = password_vault(|config| {
+        let mut e = entry("web-1");
+        e.scripts.push(Script { id: Uuid::new_v4(), name: "greet".into(), run_on_connect: true, steps: vec![step("echo {{host}} {{username}}")] });
+        e.scripts.push(Script { id: Uuid::new_v4(), name: "deploy".into(), run_on_connect: false, steps: vec![step("make deploy")] });
+        e.forwards.push(ForwardRule::new(ForwardKind::Local { bind_addr: "127.0.0.1".into(), bind_port: 8080, dest_host: "localhost".into(), dest_port: 80 }));
+        config.servers = vec![e];
+    });
+    type_password(&mut app, PASSWORD);
+    let id = unlocked(&app).config.servers[0].id;
+
+    let context = app.connect_context(id).expect("the entry is there");
+
+    assert_eq!(context.on_connect.len(), 1, "only the run_on_connect script comes along");
+    assert_eq!(context.on_connect[0].steps[0].command, "echo web-1.example.com root", "expanded against this entry");
+    assert_eq!(context.forwards.len(), 1);
+    assert!(context.target.is_ok());
+}
+
+/// A chain that loops has to be caught here, inside the borrow, because a
+/// `jump_host` is a `Uuid` and there is nothing left to resolve it against by
+/// the time the connect runs. It rides out as an `Err` rather than ending the
+/// context so each flow can word it its own way.
+#[test]
+fn a_looping_jump_chain_comes_back_as_an_error_rather_than_a_panic() {
+    let (_dir, mut app) = password_vault(|config| {
+        let mut a = entry("a");
+        let mut b = entry("b");
+        a.jump_host = Some(b.id);
+        b.jump_host = Some(a.id);
+        config.servers = vec![a, b];
+    });
+    type_password(&mut app, PASSWORD);
+    let id = unlocked(&app).config.servers[0].id;
+
+    let context = app.connect_context(id).expect("the entry is there");
+    assert!(context.target.is_err());
+}
+
+/// A server that is not there at all is no context, not an empty one — the
+/// flow returns before it touches the terminal.
+#[test]
+fn a_missing_server_resolves_to_nothing() {
+    let (_dir, mut app) = password_vault(|_| {});
+    type_password(&mut app, PASSWORD);
+    assert!(app.connect_context(Uuid::new_v4()).is_none());
 }
 
 /// `p` reaches the forwards list, and add / toggle / delete each write

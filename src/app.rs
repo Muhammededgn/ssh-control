@@ -12,7 +12,7 @@ use crate::config::device::{self, DeviceState};
 use crate::config::format::{SLOT_DEVICE, SLOT_PASSWORD, Slot};
 use crate::config::keyslot::{self, MasterKey};
 use crate::config::store::{ConfigStore, Unlocked, VaultShape};
-use crate::config::{Config, ConnectMode, Script, Secret, ServerEntry, TotpConfig};
+use crate::config::{Config, ConnectMode, Script, Secret, ServerEntry, SystemInfo, TotpConfig};
 use crate::crypto::kdf::KdfParams;
 use crate::error::{AppError, Result};
 use crate::i18n::{Lang, Strings};
@@ -252,6 +252,19 @@ pub struct App {
 /// One authenticated connection plus its sftp channel. The russh handle has to
 /// be kept alive alongside the stream — dropping it closes the channel out from
 /// under the client.
+/// Everything a connect needs from the vault, resolved inside the borrow.
+///
+/// A plain owned bundle rather than a tuple because both flows destructure it
+/// and a fourth field would otherwise be a fourth unnamed position.
+struct ConnectContext {
+    /// The bastion chain, resolved. `Err` is a chain that loops or names a
+    /// deleted server, and it rides this far rather than failing in
+    /// `connect_context` so each flow can report it its own way.
+    target: Result<ssh::Target>,
+    forwards: Vec<ForwardRule>,
+    on_connect: Vec<Script>,
+}
+
 pub(crate) struct RemoteSession {
     server_id: Uuid,
     #[allow(dead_code, reason = "owned to keep the channel — and any bastion tunnel under it — alive for the lifetime of the sftp stream")]
@@ -2042,33 +2055,113 @@ impl App {
         }
     }
 
+    /// Everything a connect needs out of the vault, resolved while the entry
+    /// is still borrowed.
+    ///
+    /// Not async and no terminal, so it can be tested — and so the borrow of
+    /// `self.state` ends here rather than reaching an `.await` (the `NextStep`
+    /// rule). What comes out owns its credentials and its already-expanded
+    /// commands; nothing in it is a `Uuid` that would need the vault again.
+    ///
+    /// Shared by both connect flows because a second copy would be a second
+    /// chance to forget that placeholders expand per entry, or that a bastion
+    /// chain is only resolvable in here.
+    fn connect_context(&self, id: Uuid) -> Option<ConnectContext> {
+        let AppState::Unlocked(u) = &self.state else {
+            return None;
+        };
+        let entry = u.config.servers.iter().find(|s| s.id == id)?;
+        // Placeholders are resolved here, where the entry is still borrowed —
+        // the expanded copies are what crosses the await.
+        let vars = ScriptVars::from_entry(entry);
+        Some(ConnectContext {
+            // So is the bastion chain, and it has to be: a `Uuid` means
+            // nothing once `config` is out of scope.
+            target: ssh::Target::from_entry(entry, &u.config.servers),
+            // `ForwardRule` holds no credential, so cloning it here costs
+            // nothing worth protecting — but it has to be here all the same,
+            // because `entry` is gone by the time the session is up.
+            forwards: entry.forwards.clone(),
+            on_connect: entry.scripts.iter().filter(|s| s.run_on_connect).map(|s| vars.expand_script(s)).collect(),
+        })
+    }
+
+    /// Opens the connection and records what the handshake taught the vault.
+    ///
+    /// `None` means there is nothing to connect to and the reason is already
+    /// on the status bar — an abandoned wait, a changed host key, a refused
+    /// connection. Either way nothing was suspended and nothing was written,
+    /// so there is nothing for the caller to undo.
+    ///
+    /// Both flows go through this so `observe_handshake` + `observe_jumps` +
+    /// `record_session` stay one implementation. The fingerprint is persisted
+    /// *before* the session starts: one written only at the end would re-run
+    /// TOFU if the process were killed during it.
+    ///
+    /// The future inside borrows only `target`, which is the caller's local —
+    /// `await_redrawing`'s rule that the future must not borrow `self`.
+    async fn establish(&mut self, terminal: &mut TerminalGuard, id: Uuid, target: &ssh::Target) -> Option<(ssh::Connected, session::SessionRecord)> {
+        let strings = self.lang.strings();
+
+        // The list stays on screen through the handshake — a blank terminal
+        // with nothing on it for up to twenty seconds was the whole of #51 —
+        // and the row says which server is being reached.
+        self.connecting = Some((id, Instant::now()));
+        let attempt = self.await_on_screen(terminal, ssh::connect(target)).await;
+        // Esc. `App::run` clears the indicator.
+        let connect_result = attempt?;
+
+        let connected = match connect_result {
+            Ok(connected) => connected,
+            Err(AppError::HostKeyChanged { fingerprint }) => {
+                self.set_status(format!("{}{fingerprint}{}", strings.host_key_changed_prefix, strings.host_key_changed_suffix));
+                return None;
+            }
+            Err(e) => {
+                self.set_status(format!("{}{e}", strings.connect_error_prefix));
+                return None;
+            }
+        };
+
+        // What a connect teaches the vault is decided in one place, so
+        // `cli::connect` records exactly the same things (see
+        // `crate::session`).
+        let record = session::observe_handshake(&connected);
+        let jump_records = session::observe_jumps(&connected, &target.jump_ids);
+        self.record_session(id, &record, &jump_records);
+        Some((connected, record))
+    }
+
+    /// The second half of the recording: the sysinfo snapshot, once the probe
+    /// that rode alongside the session has produced one.
+    ///
+    /// Only when it actually produced something — `apply_to` keeps the last
+    /// good snapshot, so a second save would rewrite the whole vault to store
+    /// nothing. That rule is here rather than in each flow because it is
+    /// exactly the kind of thing a copy forgets.
+    fn finish(&mut self, id: Uuid, record: &mut session::SessionRecord, info: Option<SystemInfo>) {
+        record.system_info = info;
+        if record.system_info.is_some() {
+            // The hops were written by `establish`; there is nothing new to
+            // say about them.
+            self.record_session(id, record, &[]);
+        }
+    }
+
+    /// The full-screen connect: the terminal is handed over and the app is off
+    /// screen until the remote shell exits.
+    ///
+    /// The counterpart is `pane_connect_flow`. What they share is in
+    /// `connect_context`, `establish` and `finish`; what differs is this
+    /// suspend, and it is the whole difference between the modes.
     async fn connect_flow(&mut self, terminal: &mut TerminalGuard, id: Uuid) -> Result<()> {
         let strings = self.lang.strings();
-        // Only what the connection itself needs, plus the scripts that run on
-        // connect — never a clone of the whole entry, which would leave an
-        // extra credential copy and every `Script` behind (see `ssh::Target`).
-        let target = match &self.state {
-            AppState::Unlocked(u) => u.config.servers.iter().find(|s| s.id == id).map(|e| {
-                // Placeholders are resolved here, where the entry is still
-                // borrowed — the expanded copies are what crosses the await.
-                let vars = ScriptVars::from_entry(e);
-                // So is the bastion chain, and it has to be: a `Uuid` means
-                // nothing once `config` is out of scope.
-                let target = ssh::Target::from_entry(e, &u.config.servers);
-                // `ForwardRule` holds no credential, so cloning it here costs
-                // nothing worth protecting — but it has to be here all the
-                // same, because `e` is gone by the time the session is up.
-                let forwards = e.forwards.clone();
-                (target, forwards, e.scripts.iter().filter(|s| s.run_on_connect).map(|s| vars.expand_script(s)).collect::<Vec<_>>())
-            }),
-            AppState::Setup(_) | AppState::Unopenable | AppState::CannotOpen { .. } | AppState::Locked(_) | AppState::LockedTotpDaily(_) => None,
-        };
-        let Some((target, forward_rules, on_connect_scripts)) = target else {
+        let Some(context) = self.connect_context(id) else {
             return Ok(());
         };
         // A chain that loops or names a deleted server fails before anything is
         // opened, and reads as a connect error like any other.
-        let target = match target {
+        let target = match context.target {
             Ok(target) => target,
             Err(e) => {
                 self.set_status(format!("{}{e}", strings.connect_error_prefix));
@@ -2076,39 +2169,10 @@ impl App {
             }
         };
 
-        // The list stays on screen through the handshake — a blank terminal
-        // with nothing on it for up to twenty seconds was the whole of #51 —
-        // and the row says which server is being reached.
-        self.connecting = Some((id, Instant::now()));
-        let attempt = self.await_on_screen(terminal, ssh::connect(&target)).await;
-        // Esc. Nothing was suspended and nothing was written, so there is
-        // nothing to undo; `App::run` clears the indicator.
-        let Some(connect_result) = attempt else {
+        let established = self.establish(terminal, id, &target).await;
+        let Some((connected, mut record)) = established else {
             return Ok(());
         };
-
-        // A connect that failed never suspends. Handing the primary buffer over
-        // to show an error the status bar can show is the bug.
-        let connected = match connect_result {
-            Ok(connected) => connected,
-            Err(AppError::HostKeyChanged { fingerprint }) => {
-                self.set_status(format!("{}{fingerprint}{}", strings.host_key_changed_prefix, strings.host_key_changed_suffix));
-                return Ok(());
-            }
-            Err(e) => {
-                self.set_status(format!("{}{e}", strings.connect_error_prefix));
-                return Ok(());
-            }
-        };
-
-        // What a connect teaches the vault is decided in one place, so
-        // `cli::connect` records exactly the same things (see
-        // `crate::session`). The handshake half is known now and is written
-        // now: a fingerprint persisted only once the session ended would
-        // re-run TOFU if the process were killed during it.
-        let mut record = session::observe_handshake(&connected);
-        let jump_records = session::observe_jumps(&connected, &target.jump_ids);
-        self.record_session(id, &record, &jump_records);
 
         // The late suspend. The primary buffer is handed over here and not a
         // line earlier, with a shell about to land on it.
@@ -2121,14 +2185,14 @@ impl App {
         // teardown story. It borrows nothing from `self`, so it sits inside
         // `await_redrawing`'s rule as well as the `NextStep` one.
         let _forwards = {
-            let forwards = ssh::forward::start(Arc::clone(&connected.handle), &forward_rules).await;
+            let forwards = ssh::forward::start(Arc::clone(&connected.handle), &context.forwards).await;
             session::print_forward_report(&forwards, strings);
             forwards
         };
 
         // Auto-run scripts flagged `run_on_connect`, printed plain to the
         // (now-suspended) primary screen buffer.
-        for script in &on_connect_scripts {
+        for script in &context.on_connect {
             let mut partial = String::new();
             script_runner::run_script(&connected.handle, script, |event| {
                 session::print_script_event_plain(event, strings, &mut partial);
@@ -2148,15 +2212,7 @@ impl App {
 
         terminal.resume()?;
 
-        record.system_info = info.ok();
-        // Only when the probe actually produced something: `apply_to` keeps the
-        // last good snapshot, so a second save would rewrite the whole vault to
-        // store nothing.
-        if record.system_info.is_some() {
-            // The hops were written above; there is nothing new to say about
-            // them, and re-applying would be a second pass over the same value.
-            self.record_session(id, &record, &[]);
-        }
+        self.finish(id, &mut record, info.ok());
 
         if let AppState::Unlocked(u) = &mut self.state {
             u.status = shell.err().map(|e| StatusMessage::new(format!("{}{e}", strings.disconnected_prefix)));
