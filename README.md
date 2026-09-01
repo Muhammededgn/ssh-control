@@ -14,7 +14,9 @@ so `vim`, `htop`, `tmux` and Ctrl+C behave exactly as they would under plain
 
 - **Encrypted vault** — Argon2id-derived key, AES-256-GCM, authenticated header
 - **Four security modes** — from no prompt at all to a code-only daily unlock with the password as fallback
-- **Full PTY passthrough** — byte-for-byte, with window-resize forwarding
+- **Two connect modes** — a full-screen PTY passthrough (byte-for-byte, with
+  window-resize forwarding) or the session drawn in a pane with the app still on
+  screen; `Enter` runs the one you picked in Settings and `t` runs the other
 - **TOFU host keys** — fingerprints are pinned on first connect and a mismatch
   refuses the connection
 - **System info** — CPU / RAM / disk / GPU snapshot fetched on connect and shown
@@ -88,12 +90,13 @@ from a service manager.
 
 | Screen | Keys |
 |---|---|
-| Server list | `Enter` connect · `/` search · `a` add · `e` edit · `d` delete · `s` scripts · `f` files · `l` lock · `F1` settings · `q` quit |
+| Server list | `Enter` connect · `t` connect the other way · `/` search · `a` add · `e` edit · `d` delete · `s` scripts · `f` files · `l` lock · `F1` settings · `q` quit |
 | Forms | `Tab` next field · `Ctrl+Enter` save · `Esc` cancel |
 | Script list | `Enter` run · `m` run on several servers · `a` add · `e` edit · `d` delete · `Esc` back |
 | Step editor | `←`/`→` change condition · `Ctrl+↑`/`Ctrl+↓` reorder · `Esc` cancel |
 | Run log | `↑`/`↓` `PgUp`/`PgDn` `Home` scroll · `End` follow the tail |
 | File browser | `Tab` switch pane · `Enter` open · `Backspace` up · `Space` mark · `t` transfer · `r` refresh · `.` hidden files · `Esc` back |
+| Session pane | `Ctrl+B` `d` detach · `Ctrl+B` `Ctrl+B` send a literal `Ctrl+B` · `Esc` `Esc` quick detach (off inside full-screen programs like vim) · every other key goes to the remote shell |
 | Settings | `←`/`→` switch tab · `Esc` back |
 | Anywhere | `F2` keybindings, and `?` on the lists and the run log |
 

@@ -634,7 +634,7 @@ impl App {
     /// Every screen reachable before the vault is open.
     ///
     /// Split out from `handle_key` because none of it awaits and none of it
-    /// needs a terminal — only `draw` and the six flows behind
+    /// needs a terminal — only `draw` and the seven flows behind
     /// `handle_unlocked_key` do. That is what lets the tests drive an unlock
     /// end to end without a `TerminalGuard` to hand them.
     pub(crate) fn handle_locked_key(&mut self, key: KeyEvent) {
