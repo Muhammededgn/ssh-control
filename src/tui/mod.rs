@@ -18,4 +18,5 @@ pub mod theme;
 pub mod totp_prompt;
 pub mod totp_unlock;
 pub mod unlock;
+pub mod vt_input;
 pub mod widgets;
