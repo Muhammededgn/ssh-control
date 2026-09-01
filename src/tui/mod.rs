@@ -11,6 +11,7 @@ pub mod script_run;
 pub mod script_targets;
 pub mod scripts_list;
 pub mod server_form;
+pub mod session_pane;
 pub mod setup;
 pub mod settings;
 pub mod ssh_import;
