@@ -2275,7 +2275,10 @@ impl App {
         // Scope-bound exactly as in `connect_flow`: `Forwards` aborts every
         // listener when it drops, which is the whole teardown story, and no
         // exit path from here can skip it.
-        let _forwards = ssh::forward::start(Arc::clone(&connected.handle), &context.forwards).await;
+        // Named, unlike `connect_flow`'s, because the pane reads the report
+        // out of it — but held for the same reason: dropping it aborts every
+        // listener, and no exit path from here can skip that.
+        let forwards = ssh::forward::start(Arc::clone(&connected.handle), &context.forwards).await;
 
         let mut pane = SessionPaneState::new(context.name, cols, rows);
         let mut channel = connected.handle.channel_open_session().await?;
@@ -2287,7 +2290,7 @@ impl App {
         // Fed between the PTY request and the shell, so the report and the
         // script output sit above the first prompt — where `connect_flow`
         // puts them on the primary buffer.
-        for line in session::forward_report_lines(&_forwards, strings) {
+        for line in session::forward_report_lines(&forwards, strings) {
             pane.feed_line(&line);
         }
         for script in &context.on_connect {
