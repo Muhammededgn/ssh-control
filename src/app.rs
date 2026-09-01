@@ -12,7 +12,7 @@ use crate::config::device::{self, DeviceState};
 use crate::config::format::{SLOT_DEVICE, SLOT_PASSWORD, Slot};
 use crate::config::keyslot::{self, MasterKey};
 use crate::config::store::{ConfigStore, Unlocked, VaultShape};
-use crate::config::{Config, Script, Secret, ServerEntry, TotpConfig};
+use crate::config::{Config, ConnectMode, Script, Secret, ServerEntry, TotpConfig};
 use crate::crypto::kdf::KdfParams;
 use crate::error::{AppError, Result};
 use crate::i18n::{Lang, Strings};
@@ -173,6 +173,7 @@ pub(crate) enum NextStep {
     SettingsLangSelected(Lang),
     SettingsThemeSelected(Theme),
     SettingsAutoLockSelected(u32),
+    SettingsConnectModeSelected(ConnectMode),
     SettingsChangePassword { current: Zeroizing<String>, new: Zeroizing<String> },
     ChangeSecurityMode { mode: AuthMode, password: Option<Zeroizing<String>>, totp_secret: Option<Zeroizing<String>> },
     TotpPromptSubmit(String),
@@ -1066,6 +1067,7 @@ impl App {
                     SettingsOutcome::LanguageSelected(lang) => NextStep::SettingsLangSelected(lang),
                     SettingsOutcome::ThemeSelected(t) => NextStep::SettingsThemeSelected(t),
                     SettingsOutcome::AutoLockSelected(minutes) => NextStep::SettingsAutoLockSelected(minutes),
+                    SettingsOutcome::ConnectModeSelected(mode) => NextStep::SettingsConnectModeSelected(mode),
                     SettingsOutcome::ChangePassword { current, new } => {
                         NextStep::SettingsChangePassword { current, new }
                     }
@@ -1224,8 +1226,9 @@ impl App {
                 let auth_mode = self.current_auth_mode();
                 self.with_unlocked(|u| {
                     let auto_lock_minutes = u.config.auto_lock_minutes;
+                    let connect_mode = u.config.connect_mode;
                     u.screen =
-                        Screen::Settings(SettingsState::new(lang, current_theme, auth_mode, device::credential_store_available(), auto_lock_minutes));
+                        Screen::Settings(SettingsState::new(lang, current_theme, auth_mode, device::credential_store_available(), auto_lock_minutes, connect_mode));
                 });
             }
             NextStep::FormCancel => self.with_unlocked(|u| {
@@ -1258,6 +1261,7 @@ impl App {
                 t.save_to_file(&self.store.theme_path());
             }
             NextStep::SettingsAutoLockSelected(minutes) => self.set_auto_lock(minutes),
+            NextStep::SettingsConnectModeSelected(mode) => self.set_connect_mode(mode),
             NextStep::SettingsChangePassword { current, new } => {
                 self.change_master_password(&current, &new)?;
             }
@@ -1888,6 +1892,31 @@ impl App {
         if let Screen::Settings(settings) = &mut u.screen {
             match result {
                 Ok(()) => settings.info = Some(strings.status_auto_lock_saved.to_string()),
+                Err(e) => settings.error = Some(format!("{}{e}", strings.save_error_prefix)),
+            }
+        }
+    }
+
+    /// Stores which of the two connect modes `Enter` uses.
+    ///
+    /// Same shape as `set_auto_lock`, and the rollback is the point: the value
+    /// is only in memory until the save succeeds, so a read-only config
+    /// directory cannot leave the running app on a setting the next launch
+    /// will not have.
+    fn set_connect_mode(&mut self, mode: ConnectMode) {
+        let strings = self.lang.strings();
+        let AppState::Unlocked(u) = &mut self.state else {
+            return;
+        };
+        let previous = u.config.connect_mode;
+        u.config.connect_mode = mode;
+        let result = self.store.save(&u.config, &u.master_key, &u.slots);
+        if result.is_err() {
+            u.config.connect_mode = previous;
+        }
+        if let Screen::Settings(settings) = &mut u.screen {
+            match result {
+                Ok(()) => settings.info = Some(strings.status_connect_mode_saved.to_string()),
                 Err(e) => settings.error = Some(format!("{}{e}", strings.save_error_prefix)),
             }
         }

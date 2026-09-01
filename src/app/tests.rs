@@ -477,6 +477,42 @@ fn a_failed_save_leaves_the_auto_lock_where_it_was() {
     }
 }
 
+/// Same rollback rule for the connect mode: a read-only config directory must
+/// not leave the running app connecting one way while the next launch connects
+/// the other.
+#[test]
+fn a_failed_save_leaves_the_connect_mode_where_it_was() {
+    let (dir, mut app) = password_vault(|_| {});
+    type_password(&mut app, PASSWORD);
+    assert_eq!(unlocked(&app).config.connect_mode, ConnectMode::FullScreen);
+    press(&mut app, KeyEvent::from(KeyCode::F(1)));
+    block_saves(&dir);
+
+    app.apply_local_step(NextStep::SettingsConnectModeSelected(ConnectMode::Pane)).expect("step");
+
+    assert_eq!(unlocked(&app).config.connect_mode, ConnectMode::FullScreen);
+    match &unlocked(&app).screen {
+        Screen::Settings(s) => assert!(s.error.is_some(), "the screen must say the write failed"),
+        _ => panic!("expected the settings screen"),
+    }
+}
+
+/// A preference nobody can persist is not a preference. This walks the whole
+/// way out to disk and back rather than trusting the in-memory value.
+#[test]
+fn the_connect_mode_survives_a_restart() {
+    let (dir, mut app) = password_vault(|_| {});
+    type_password(&mut app, PASSWORD);
+    press(&mut app, KeyEvent::from(KeyCode::F(1)));
+    app.apply_local_step(NextStep::SettingsConnectModeSelected(ConnectMode::Pane)).expect("step");
+    assert_eq!(unlocked(&app).config.connect_mode, ConnectMode::Pane);
+    drop(app);
+
+    let mut reopened = App::new(ConfigStore::new(dir.path().join("config.enc")));
+    type_password(&mut reopened, PASSWORD);
+    assert_eq!(unlocked(&reopened).config.connect_mode, ConnectMode::Pane);
+}
+
 /// The vault on disk was never replaced — writes are atomic — so undoing the
 /// in-memory half has to restore the previous state whole. A `config.totp` left
 /// set here would have the app demanding a second factor the vault knows

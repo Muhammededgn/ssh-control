@@ -256,6 +256,12 @@ pub struct Strings {
     pub status_auto_lock_saved: &'static str,
     pub status_auto_locked: &'static str,
 
+    // Connect tab
+    pub settings_tab_connect: &'static str,
+    pub connect_mode_full_screen: &'static str,
+    pub connect_mode_pane: &'static str,
+    pub status_connect_mode_saved: &'static str,
+
     // Status messages
     pub status_saved: &'static str,
     pub status_deleted: &'static str,
@@ -517,6 +523,11 @@ pub static EN: Strings = Strings {
     status_auto_lock_saved: "Auto-lock timeout saved",
     status_auto_locked: "Locked after inactivity",
 
+    settings_tab_connect: "Connect",
+    connect_mode_full_screen: "Full screen — hands the terminal over",
+    connect_mode_pane: "In a pane — keeps the app on screen",
+    status_connect_mode_saved: "Connect mode saved",
+
     status_saved: "Saved",
     status_deleted: "Deleted",
     save_error_prefix: "Save error: ",
@@ -773,6 +784,11 @@ pub static TR: Strings = Strings {
     auto_lock_minutes_suffix: " dakika",
     status_auto_lock_saved: "Otomatik kilit süresi kaydedildi",
     status_auto_locked: "Hareketsizlik nedeniyle kilitlendi",
+
+    settings_tab_connect: "Bağlanma",
+    connect_mode_full_screen: "Tam ekran — terminali devreder",
+    connect_mode_pane: "Bölmede — uygulamayı ekranda tutar",
+    status_connect_mode_saved: "Bağlanma modu kaydedildi",
 
     status_saved: "Kaydedildi",
     status_deleted: "Silindi",
@@ -1031,6 +1047,11 @@ pub static ES: Strings = Strings {
     status_auto_lock_saved: "Tiempo de bloqueo automático guardado",
     status_auto_locked: "Bloqueado por inactividad",
 
+    settings_tab_connect: "Conexión",
+    connect_mode_full_screen: "Pantalla completa — cede el terminal",
+    connect_mode_pane: "En un panel — mantiene la app en pantalla",
+    status_connect_mode_saved: "Modo de conexión guardado",
+
     status_saved: "Guardado",
     status_deleted: "Eliminado",
     save_error_prefix: "Error al guardar: ",
@@ -1287,6 +1308,11 @@ pub static RU: Strings = Strings {
     auto_lock_minutes_suffix: " мин.",
     status_auto_lock_saved: "Время автоблокировки сохранено",
     status_auto_locked: "Заблокировано из-за бездействия",
+
+    settings_tab_connect: "Подключение",
+    connect_mode_full_screen: "Во весь экран — терминал отдаётся сеансу",
+    connect_mode_pane: "В панели — приложение остаётся на экране",
+    status_connect_mode_saved: "Режим подключения сохранён",
 
     status_saved: "Сохранено",
     status_deleted: "Удалено",
