@@ -366,7 +366,7 @@ pub static EN: Strings = Strings {
 
     main_menu_title: " Servers ",
     main_menu_empty: "(no servers — press 'a' to add one)",
-    main_menu_hint: "Enter: connect  /: search  a: add  e: edit  d: delete  s: scripts  f: files  p: forwards  i: import  o: sort  l: lock  F1: settings  q: quit  ?: help",
+    main_menu_hint: "Enter: connect  t: other mode  /: search  a: add  e: edit  d: delete  s: scripts  f: files  p: forwards  i: import  o: sort  l: lock  F1: settings  q: quit  ?: help",
     main_menu_filter_hint: "type to filter  Enter: connect  Esc: clear",
     main_menu_filter_label: "Filter: ",
     main_menu_no_match: "(no server matches the filter)",
@@ -628,7 +628,7 @@ pub static TR: Strings = Strings {
 
     main_menu_title: " Sunucular ",
     main_menu_empty: "(sunucu yok — 'a' ile ekle)",
-    main_menu_hint: "Enter: bağlan  /: ara  a: ekle  e: düzenle  d: sil  s: scriptler  f: dosyalar  p: yönlendirme  i: içe aktar  o: sırala  l: kilitle  F1: ayarlar  q: çık  ?: yardım",
+    main_menu_hint: "Enter: bağlan  t: diğer mod  /: ara  a: ekle  e: düzenle  d: sil  s: scriptler  f: dosyalar  p: yönlendirme  i: içe aktar  o: sırala  l: kilitle  F1: ayarlar  q: çık  ?: yardım",
     main_menu_filter_hint: "yazarak filtrele  Enter: bağlan  Esc: temizle",
     main_menu_filter_label: "Filtre: ",
     main_menu_no_match: "(filtreye uyan sunucu yok)",
@@ -890,7 +890,7 @@ pub static ES: Strings = Strings {
 
     main_menu_title: " Servidores ",
     main_menu_empty: "(sin servidores — pulsa 'a' para añadir uno)",
-    main_menu_hint: "Enter: conectar  /: buscar  a: añadir  e: editar  d: eliminar  s: scripts  f: archivos  p: reenvíos  i: importar  o: ordenar  l: bloquear  F1: ajustes  q: salir  ?: ayuda",
+    main_menu_hint: "Enter: conectar  t: otro modo  /: buscar  a: añadir  e: editar  d: eliminar  s: scripts  f: archivos  p: reenvíos  i: importar  o: ordenar  l: bloquear  F1: ajustes  q: salir  ?: ayuda",
     main_menu_filter_hint: "escribe para filtrar  Enter: conectar  Esc: limpiar",
     main_menu_filter_label: "Filtro: ",
     main_menu_no_match: "(ningún servidor coincide con el filtro)",
@@ -1152,7 +1152,7 @@ pub static RU: Strings = Strings {
 
     main_menu_title: " Серверы ",
     main_menu_empty: "(нет серверов — нажмите 'a' чтобы добавить)",
-    main_menu_hint: "Enter: подключиться  /: поиск  a: добавить  e: изменить  d: удалить  s: скрипты  f: файлы  p: проброс  i: импорт  o: сортировка  l: заблокировать  F1: настройки  q: выход  ?: справка",
+    main_menu_hint: "Enter: подключиться  t: другой режим  /: поиск  a: добавить  e: изменить  d: удалить  s: скрипты  f: файлы  p: проброс  i: импорт  o: сортировка  l: заблокировать  F1: настройки  q: выход  ?: справка",
     main_menu_filter_hint: "введите текст для фильтра  Enter: подключиться  Esc: сбросить",
     main_menu_filter_label: "Фильтр: ",
     main_menu_no_match: "(нет серверов, подходящих под фильтр)",

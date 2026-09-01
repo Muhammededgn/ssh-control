@@ -207,7 +207,12 @@ fn sort_label(sort: ServerSort, strings: &Strings) -> &'static str {
 
 pub enum MainMenuAction {
     None,
+    /// Connect the way the stored preference says. `app.rs` owns the choice,
+    /// for the reason `CycleSort` does: the preference is in `Config` and this
+    /// screen only asks.
     Connect(Uuid),
+    /// Connect the other way — whichever mode the preference did not pick.
+    ConnectAlternate(Uuid),
     Add,
     Edit(Uuid),
     Delete(Uuid),
@@ -321,6 +326,14 @@ impl MainMenuState {
             KeyCode::Char('p') => self
                 .selected_entry(servers, sort)
                 .map(|s| MainMenuAction::Forwards(s.id))
+                .unwrap_or(MainMenuAction::None),
+            // No modifier, because `Ctrl+Enter` cannot be told apart from a
+            // plain `Enter` on a terminal without the keyboard enhancement
+            // flags (#38) — the user would ask for one mode and silently get
+            // the other, with no way for the app to know.
+            KeyCode::Char('t') => self
+                .selected_entry(servers, sort)
+                .map(|s| MainMenuAction::ConnectAlternate(s.id))
                 .unwrap_or(MainMenuAction::None),
             KeyCode::Char('o') => MainMenuAction::CycleSort,
             KeyCode::Char('l') => MainMenuAction::Lock,

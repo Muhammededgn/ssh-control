@@ -292,6 +292,62 @@ fn deleting_a_bastion_puts_the_hosts_behind_it_back_on_a_direct_connect() {
 }
 
 // ---------------------------------------------------------------------------
+// Which connect mode a key means
+// ---------------------------------------------------------------------------
+
+/// The only part of the two flows that can be tested without a terminal, and
+/// the part that decides which one runs. `Enter` is the stored preference and
+/// `t` is always the other, so the two keys swap together.
+#[test]
+fn enter_and_t_are_the_stored_mode_and_the_other_one() {
+    for (stored, on_enter, on_t) in [
+        (ConnectMode::FullScreen, "Connect", "ConnectPane"),
+        (ConnectMode::Pane, "ConnectPane", "Connect"),
+    ] {
+        let (_dir, mut app) = password_vault(|config| {
+            config.servers = vec![entry("web-1")];
+            config.connect_mode = stored;
+        });
+        type_password(&mut app, PASSWORD);
+
+        assert_eq!(step_name(app.resolve_next_step(KeyEvent::from(KeyCode::Enter))), on_enter, "{stored:?} on Enter");
+        assert_eq!(step_name(app.resolve_next_step(char_key('t'))), on_t, "{stored:?} on t");
+    }
+}
+
+fn step_name(step: NextStep) -> &'static str {
+    match step {
+        NextStep::Connect(_) => "Connect",
+        NextStep::ConnectPane(_) => "ConnectPane",
+        _ => "something else",
+    }
+}
+
+/// Both are flows that need a terminal, so both have to come back out of
+/// `apply_local_step` rather than being quietly swallowed there.
+#[test]
+fn both_connect_steps_are_handed_back_for_the_terminal() {
+    let (_dir, mut app) = password_vault(|config| config.servers = vec![entry("web-1")]);
+    type_password(&mut app, PASSWORD);
+    let id = unlocked(&app).config.servers[0].id;
+
+    for step in [NextStep::Connect(id), NextStep::ConnectPane(id)] {
+        assert!(app.apply_local_step(step).expect("step").is_some(), "a connect needs the terminal");
+    }
+}
+
+/// `t` is a single-letter shortcut, so `/` mode has to keep it as filter text
+/// — a server called `test` must be typeable.
+#[test]
+fn t_is_filter_text_while_the_search_box_is_open() {
+    let (_dir, mut app) = password_vault(|config| config.servers = vec![entry("web-1")]);
+    type_password(&mut app, PASSWORD);
+    press(&mut app, char_key('/'));
+
+    assert_eq!(step_name(app.resolve_next_step(char_key('t'))), "something else");
+}
+
+// ---------------------------------------------------------------------------
 // What a connect resolves out of the vault
 // ---------------------------------------------------------------------------
 
