@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::config::device::now_unix;
 use crate::config::{ServerEntry, ServerSort, SystemInfo};
 use crate::i18n::Strings;
+use crate::ssh::sysinfo::Usage;
 use crate::tui::chrome;
 use crate::tui::theme;
 use crate::tui::widgets::{self, list_title_with_position, render_list_scrollbar};
@@ -24,12 +25,13 @@ use crate::tui::widgets::{self, list_title_with_position, render_list_scrollbar}
 pub struct ListStatus<'a> {
     /// The server a flow is currently reaching, and when the attempt started.
     pub connecting: Option<(Uuid, Instant)>,
+    /// Live figures from a session that is open right now, and whose they are.
+    /// The detail card shows them in place of the stored snapshot's, marked as
+    /// live — a reading from three days ago and one from this second are
+    /// different claims and must not look the same.
+    pub live: Option<(Uuid, Usage)>,
     /// The transient message the footer shows.
     pub message: Option<&'a str>,
-}
-
-fn gib(bytes: u64) -> f64 {
-    bytes as f64 / 1_073_741_824.0
 }
 
 /// Renders a compact "CPU: ... | RAM: used/total GiB | Disk: used/total GiB |
@@ -54,7 +56,10 @@ fn detail_parts(entry: &ServerEntry, now: u64, strings: &Strings) -> Vec<String>
         details.push(format!("{}: {}", strings.last_connected_label, format_relative_time(ts, now, strings)));
     }
     if let Some(info) = &entry.system_info {
-        details.push(format_system_info(info, strings));
+        // The row never carries a live figure: it is the fallback for a
+        // terminal too narrow for the card, and it is the stored snapshot it
+        // has always been.
+        details.push(system_info_parts(info, None, strings).join("  |  "));
     }
     details
 }
@@ -65,7 +70,16 @@ fn detail_parts(entry: &ServerEntry, now: u64, strings: &Strings) -> Vec<String>
 const MIN_LIST_WIDTH: u16 = 52;
 const DETAIL_WIDTH: u16 = 40;
 
-fn format_system_info(info: &SystemInfo, strings: &Strings) -> String {
+/// Everything the probe learned, one part per figure, in reading order.
+///
+/// `live` replaces the used halves with what an open session is reporting and
+/// marks them, leaving the totals and everything else as the snapshot recorded
+/// them — a total cannot change between polls, which is why the poll does not
+/// re-read one.
+///
+/// Missing fields are skipped rather than shown as errors: not every remote
+/// shell has `lspci`, `free` or `df`.
+fn system_info_parts(info: &SystemInfo, live: Option<Usage>, strings: &Strings) -> Vec<String> {
     let mut parts = Vec::new();
 
     if info.cpu_model.is_some() || info.cpu_cores.is_some() {
@@ -87,29 +101,27 @@ fn format_system_info(info: &SystemInfo, strings: &Strings) -> String {
         parts.push(format!("{}: {cpu}", strings.sysinfo_cpu_label));
     }
 
-    if let (Some(used), Some(total)) = (info.mem_used_bytes, info.mem_total_bytes) {
-        parts.push(format!(
-            "{}: {:.1}/{:.1} GiB",
-            strings.sysinfo_ram_label,
-            gib(used),
-            gib(total)
-        ));
+    // A live reading with no stored total behind it is left out rather than
+    // shown alone: "4.1 GiB used" of an unknown whole answers nothing.
+    let mem_live = live.and_then(|u| u.mem_used_bytes);
+    if let (Some(used), Some(total)) = (mem_live.or(info.mem_used_bytes), info.mem_total_bytes) {
+        parts.push(marked(widgets::used_of_total(strings.sysinfo_ram_label, used, total), mem_live.is_some(), strings));
     }
 
-    if let (Some(used), Some(total)) = (info.disk_used_bytes, info.disk_total_bytes) {
-        parts.push(format!(
-            "{}: {:.1}/{:.1} GiB",
-            strings.sysinfo_disk_label,
-            gib(used),
-            gib(total)
-        ));
+    let disk_live = live.and_then(|u| u.disk_used_bytes);
+    if let (Some(used), Some(total)) = (disk_live.or(info.disk_used_bytes), info.disk_total_bytes) {
+        parts.push(marked(widgets::used_of_total(strings.sysinfo_disk_label, used, total), disk_live.is_some(), strings));
     }
 
     if let Some(gpu) = &info.gpu_model {
         parts.push(format!("{}: {gpu}", strings.sysinfo_gpu_label));
     }
 
-    parts.join("  |  ")
+    parts
+}
+
+fn marked(part: String, live: bool, strings: &Strings) -> String {
+    if live { part + strings.sysinfo_live_suffix } else { part }
 }
 
 /// "3m ago", "5h ago", "2d ago" — coarse on purpose. The question this answers
@@ -443,7 +455,7 @@ impl MainMenuState {
         status: ListStatus<'_>,
         strings: &Strings,
     ) {
-        let ListStatus { connecting, message } = status;
+        let ListStatus { connecting, live, message } = status;
         let visible = self.visible_indices(servers, sort);
         let filter_shown = self.typing || !self.filter.is_empty();
         let body = chrome::render(frame, area, strings.main_menu_title, self.footer(sort, connecting.is_some(), message, filter_shown, strings), strings);
@@ -522,7 +534,7 @@ impl MainMenuState {
 
         if let Some(detail_area) = detail_area {
             let entry = self.selected_entry(servers, sort);
-            self.render_detail(frame, detail_area, entry, servers, now, strings);
+            self.render_detail(frame, detail_area, entry, servers, now, live, strings);
         }
     }
 
@@ -531,7 +543,17 @@ impl MainMenuState {
     ///
     /// Nothing here is new information and nothing here is a new string — it is
     /// the same fields, given room to be read.
-    fn render_detail(&self, frame: &mut Frame, area: Rect, entry: Option<&ServerEntry>, servers: &[ServerEntry], now: u64, strings: &Strings) {
+    #[allow(clippy::too_many_arguments, reason = "one frame's worth of context for one card; bundling it would be a struct used in exactly one place")]
+    fn render_detail(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        entry: Option<&ServerEntry>,
+        servers: &[ServerEntry],
+        now: u64,
+        live: Option<(Uuid, Usage)>,
+        strings: &Strings,
+    ) {
         let Some(entry) = entry else {
             frame.render_widget(widgets::panel(strings.main_menu_title), area);
             return;
@@ -589,9 +611,14 @@ impl MainMenuState {
             ]));
         }
         if let Some(info) = &entry.system_info {
+            // Only this server's readings. A live figure is keyed by `Uuid`
+            // rather than taken as "whatever is open", or scrolling the list
+            // during a session would label every card with one machine's
+            // memory.
+            let live = live.filter(|(id, _)| *id == entry.id).map(|(_, usage)| usage);
             lines.push(Line::from(""));
-            for part in format_system_info(info, strings).split("  |  ") {
-                lines.push(Line::from(Span::styled(part.to_string(), Style::default().fg(theme::hint()))));
+            for part in system_info_parts(info, live, strings) {
+                lines.push(Line::from(Span::styled(part, Style::default().fg(theme::hint()))));
             }
         }
 
@@ -703,7 +730,7 @@ mod tests {
     fn render_connecting(state: &mut MainMenuState, servers: &[ServerEntry], height: u16, connecting: Option<(Uuid, Instant)>) -> String {
         let mut terminal = Terminal::new(TestBackend::new(80, height)).expect("test backend");
         terminal
-            .draw(|frame| state.render(frame, frame.area(), servers, ServerSort::Name, ListStatus { connecting, message: None }, &EN))
+            .draw(|frame| state.render(frame, frame.area(), servers, ServerSort::Name, ListStatus { connecting, live: None, message: None }, &EN))
             .expect("render");
         terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
     }
@@ -714,7 +741,7 @@ mod tests {
         let (width, height) = (80u16, 16u16);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test backend");
         terminal
-            .draw(|frame| state.render(frame, frame.area(), servers, ServerSort::Name, ListStatus { connecting, message: None }, &EN))
+            .draw(|frame| state.render(frame, frame.area(), servers, ServerSort::Name, ListStatus { connecting, live: None, message: None }, &EN))
             .expect("render");
         let cells: Vec<String> = terminal.backend().buffer().content().iter().map(|c| c.symbol().to_string()).collect();
         cells.chunks(width as usize).map(|row| row.concat()).collect()
@@ -1017,6 +1044,68 @@ mod tests {
             .draw(|frame| state.render(frame, frame.area(), servers, ServerSort::Name, ListStatus::default(), &EN))
             .expect("render");
         terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    /// `render_wide`, with a session open on the first entry.
+    fn render_live(state: &mut MainMenuState, servers: &[ServerEntry], live: Option<(Uuid, Usage)>) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(120, 20)).expect("test backend");
+        terminal
+            .draw(|frame| {
+                state.render(frame, frame.area(), servers, ServerSort::Name, ListStatus { live, ..ListStatus::default() }, &EN)
+            })
+            .expect("render");
+        terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    /// One entry, selected, carrying a snapshot from the last connect.
+    fn snapshotted() -> Vec<ServerEntry> {
+        let mut entries = servers(1);
+        entries[0].system_info = Some(SystemInfo {
+            cpu_model: None,
+            cpu_cores: None,
+            mem_total_bytes: Some(16 * 1_073_741_824),
+            mem_used_bytes: Some(4 * 1_073_741_824),
+            disk_total_bytes: Some(500 * 1_073_741_824),
+            disk_used_bytes: Some(100 * 1_073_741_824),
+            gpu_model: None,
+            fetched_at_unix: 0,
+        });
+        entries
+    }
+
+    /// The point of the whole feature: while a session is open the card shows
+    /// what the machine is doing now, and says which figure that is.
+    #[test]
+    fn a_live_reading_replaces_the_snapshot_and_is_marked_as_live() {
+        let entries = snapshotted();
+        let usage = Usage { mem_used_bytes: Some(9 * 1_073_741_824), disk_used_bytes: None };
+        let rendered = render_live(&mut MainMenuState::new(), &entries, Some((entries[0].id, usage)));
+        assert!(rendered.contains("RAM: 9.0/16.0 GiB"), "the live figure, not the stored 4.0");
+        assert!(rendered.contains(EN.sysinfo_live_suffix.trim()), "and it has to say it is live");
+        // `df` said nothing this poll, so disk stays the snapshot's — and stays
+        // unmarked, because it is not a current reading.
+        assert!(rendered.contains("Disk: 100.0/500.0 GiB"));
+    }
+
+    /// With nothing connected the card is exactly what it was before any of
+    /// this existed.
+    #[test]
+    fn with_no_session_the_card_shows_the_stored_snapshot() {
+        let entries = snapshotted();
+        let rendered = render_live(&mut MainMenuState::new(), &entries, None);
+        assert!(rendered.contains("RAM: 4.0/16.0 GiB"));
+        assert!(!rendered.contains(EN.sysinfo_live_suffix.trim()), "nothing is live");
+    }
+
+    /// Keyed by `Uuid`, never "whatever is open": otherwise scrolling the list
+    /// during a session would label every card with one machine's memory.
+    #[test]
+    fn a_live_reading_belongs_to_one_server_only() {
+        let entries = snapshotted();
+        let usage = Usage { mem_used_bytes: Some(9 * 1_073_741_824), disk_used_bytes: None };
+        let rendered = render_live(&mut MainMenuState::new(), &entries, Some((Uuid::new_v4(), usage)));
+        assert!(rendered.contains("RAM: 4.0/16.0 GiB"), "another server's session says nothing about this one");
+        assert!(!rendered.contains(EN.sysinfo_live_suffix.trim()));
     }
 
     /// A vault with one server used to leave a 200-column frame almost empty.
