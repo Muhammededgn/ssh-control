@@ -102,6 +102,22 @@ impl SessionPaneState {
         self.feed(b"\r\n");
     }
 
+    /// Follows the pane, and tells the parser before the remote is told.
+    ///
+    /// **Narrowing loses the tail of every line already on the grid, and
+    /// widening does not bring it back.** `vt100::Grid::set_size` resizes each
+    /// row with `Cell::new()` padding, which truncates rather than reflows —
+    /// there is no rewrap in the crate to reach for. That is what a plain
+    /// xterm does too, but most terminals people actually use (VTE, kitty,
+    /// alacritty, wezterm) reflow, so it reads as a regression against the
+    /// terminal the app is running in. `narrowing_truncates_what_is_already_on
+    /// _the_grid` pins it so a later backend change is a deliberate one.
+    ///
+    /// The grid's width has to stay equal to the width the remote was told:
+    /// autowrap happens at the grid edge, so a grid wider than the remote's
+    /// idea of the window would let a long line run past the visible area
+    /// instead of wrapping into it. That rules out the obvious workaround of
+    /// only ever growing.
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.parser.screen_mut().set_size(rows, cols);
         self.dirty = true;
@@ -465,6 +481,41 @@ mod tests {
         let rendered: String = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
         assert!(rendered.contains("hello"));
         assert!(rendered.contains("web-1"));
+    }
+
+    /// Narrowing the pane truncates every line already on the grid, and
+    /// widening it back does not restore them — `vt100` pads and truncates
+    /// rather than reflowing. Pinned rather than fixed: the grid's width must
+    /// equal the width the remote was told, or autowrap happens in the wrong
+    /// column, so "only ever grow the grid" is not available. Replacing the
+    /// backend with one that reflows is the real fix, and it should be a
+    /// deliberate change rather than something this test starts passing by
+    /// accident.
+    #[test]
+    fn narrowing_truncates_what_is_already_on_the_grid() {
+        let mut pane = SessionPaneState::new("web-1".into(), 70, 10);
+        pane.feed(b"Welcome to Ubuntu 24.04.4 LTS (GNU/Linux 6.8.0-generic x86_64)");
+        assert_eq!(pane.parser.screen().contents(), "Welcome to Ubuntu 24.04.4 LTS (GNU/Linux 6.8.0-generic x86_64)");
+
+        pane.resize(36, 10);
+        assert_eq!(pane.parser.screen().contents(), "Welcome to Ubuntu 24.04.4 LTS (GNU/L");
+
+        pane.resize(70, 10);
+        assert_eq!(pane.parser.screen().contents(), "Welcome to Ubuntu 24.04.4 LTS (GNU/L", "widening cannot undo it");
+    }
+
+    /// Widening alone never loses anything, which is worth stating next to the
+    /// test above: the damage needs a narrowing, not any resize at all.
+    #[test]
+    fn widening_keeps_everything_and_wraps_stay_wrapped() {
+        let mut pane = SessionPaneState::new("web-1".into(), 36, 10);
+        pane.feed(b"Welcome to Ubuntu 24.04.4 LTS (GNU/Linux 6.8.0-generic x86_64)");
+        pane.resize(70, 20);
+
+        assert_eq!(pane.parser.screen().size(), (20, 70));
+        let contents = pane.parser.screen().contents();
+        assert!(contents.starts_with("Welcome to Ubuntu 24.04.4 LTS (GNU/L"));
+        assert!(contents.contains("x86_64)"), "nothing is lost, it stays wrapped where it landed");
     }
 
     /// The app's own lines have to arrive as a terminal expects them: a bare

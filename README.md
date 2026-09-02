@@ -16,7 +16,9 @@ so `vim`, `htop`, `tmux` and Ctrl+C behave exactly as they would under plain
 - **Four security modes** — from no prompt at all to a code-only daily unlock with the password as fallback
 - **Two connect modes** — a full-screen PTY passthrough (byte-for-byte, with
   window-resize forwarding) or the session drawn in a pane with the app still on
-  screen; `Enter` runs the one you picked in Settings and `t` runs the other
+  screen; `Enter` runs the one you picked in Settings and `t` runs the other.
+  The pane does not reflow: narrowing the window cuts the tail off the lines
+  already on screen, as a plain xterm does
 - **TOFU host keys** — fingerprints are pinned on first connect and a mismatch
   refuses the connection
 - **System info** — CPU / RAM / disk / GPU snapshot fetched on connect and shown
