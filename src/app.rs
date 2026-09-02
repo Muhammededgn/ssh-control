@@ -251,6 +251,19 @@ pub struct App {
     /// Set by the flows, cleared centrally in `App::run` — no exit path can
     /// leave the list stuck saying "connecting…".
     pub(crate) connecting: Option<(Uuid, Instant)>,
+    /// The live used-memory and used-disk figures from the session that is
+    /// currently open, and which server they belong to.
+    ///
+    /// **In memory only, and it dies with the session.** `ServerEntry::
+    /// system_info` is the persisted snapshot and stays one: every save
+    /// rewrites the whole encrypted envelope, so a poll that persisted would
+    /// rewrite the vault every few seconds. A stored figure and a live one are
+    /// also different claims — one is "when we last connected", the other is
+    /// "now" — and the detail card marks which it is showing.
+    ///
+    /// Keyed by `Uuid` for the reason `connecting` is: a filter or a re-sort
+    /// moves rows out from under an index.
+    pub(crate) live: Option<(Uuid, ssh::sysinfo::Usage)>,
 }
 
 /// One authenticated connection plus its sftp channel. The russh handle has to
@@ -306,6 +319,7 @@ impl App {
             last_activity: Instant::now(),
             remote: None,
             connecting: None,
+            live: None,
         };
         app.state = app.resolve_initial_state();
         app
@@ -483,6 +497,7 @@ impl App {
         let strings = self.lang.strings();
         // Copied out before `self.state` is borrowed, like `status` below.
         let connecting = self.connecting;
+        let live = self.live;
         match &mut self.state {
             AppState::Locked(unlock) => {
                 terminal.terminal.draw(|frame| {
@@ -532,7 +547,7 @@ impl App {
                     let area = frame.area();
                     chrome::paint_background(frame, area);
                     match screen {
-                        Screen::MainMenu(state) => state.render(frame, area, &config.servers, config.server_sort, ListStatus { connecting, message: status.as_deref() }, strings),
+                        Screen::MainMenu(state) => state.render(frame, area, &config.servers, config.server_sort, ListStatus { connecting, live, message: status.as_deref() }, strings),
                         Screen::ServerForm(state) => state.render(frame, area, strings),
                         Screen::ConfirmDelete { state, .. } => state.render(frame, area, strings),
                         Screen::Settings(state) => state.render(frame, area, strings),
@@ -1497,6 +1512,9 @@ impl App {
     /// authenticated connection open would defeat the point of locking.
     fn drop_remote(&mut self) {
         self.remote = None;
+        // The readings belong to the connection, not to the entry. Keeping
+        // them after it closed would be showing a snapshot labelled "now".
+        self.live = None;
     }
 
     fn with_unlocked(&mut self, f: impl FnOnce(&mut UnlockedState)) {
@@ -2344,6 +2362,25 @@ impl App {
         let mut probe_live = true;
         let mut info = None;
 
+        // The live poll, as one future that never resolves rather than a task:
+        // it borrows `connected` (never `self`, the `await_redrawing` rule) and
+        // so is dropped with this frame, which is the whole of its teardown —
+        // `Forwards`' argument, one layer in. Its readings come back through a
+        // channel for the reason the on-connect script lines do: a future that
+        // borrowed `pane` would stop the arm that draws from touching it.
+        let (usage_tx, mut usage_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut usage_poll = std::pin::pin!(async {
+            loop {
+                tokio::time::sleep(USAGE_POLL_INTERVAL).await;
+                // An error is dropped rather than reported: the caller keeps
+                // its last good reading, and a failed exec channel says
+                // nothing about the machine worth putting on the title.
+                if let Ok(usage) = ssh::sysinfo::poll_usage(&connected.handle).await {
+                    let _ = usage_tx.send(usage);
+                }
+            }
+        });
+
         let mut last_draw = Instant::now() - PANE_REDRAW_INTERVAL;
         let mut size = (cols, rows);
         let mut error = None;
@@ -2374,6 +2411,20 @@ impl App {
                 probed = &mut probe, if probe_live => {
                     probe_live = false;
                     info = probed.ok();
+                    // The totals, learned once. The poll re-reads only what
+                    // moves, so without this the title has a numerator and no
+                    // denominator to put it over.
+                    if let Some(info) = &info {
+                        pane.set_totals(info);
+                        self.live = Some((id, pane.usage()));
+                    }
+                }
+                // Never resolves — it is here to be polled, and it is dropped
+                // with the flow.
+                () = &mut usage_poll => {}
+                Some(usage) = usage_rx.recv() => {
+                    pane.set_usage(usage);
+                    self.live = Some((id, pane.usage()));
                 }
                 _ = tokio::time::sleep(KEY_POLL_INTERVAL) => {
                     let now = Instant::now();
@@ -2411,6 +2462,9 @@ impl App {
         }
 
         self.finish(id, &mut record, info);
+        // The session is over, so there is nothing live left to show — the
+        // detail card goes back to the snapshot `finish` just wrote.
+        self.live = None;
 
         if let AppState::Unlocked(u) = &mut self.state {
             u.status = error.map(|e| StatusMessage::new(format!("{}{e}", strings.disconnected_prefix)));
@@ -3202,6 +3256,14 @@ const KEY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// 60 fps: fast enough that typing feels immediate, slow enough that a large
 /// `cat` is not one full redraw per SSH packet.
 const PANE_REDRAW_INTERVAL: Duration = Duration::from_millis(16);
+
+/// How often the live figures are re-read while a session is open.
+///
+/// A few seconds rather than a second: each poll is a fresh exec channel and a
+/// round trip, and used memory and used disk are not quantities anyone watches
+/// frame by frame. Long enough that a link with real latency is not permanently
+/// carrying a probe, short enough that the numbers visibly move.
+const USAGE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Which flow a connect key means, given the stored preference.
 ///

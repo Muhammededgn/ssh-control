@@ -97,6 +97,9 @@ pub struct Strings {
     pub sysinfo_disk_label: &'static str,
     pub sysinfo_gpu_label: &'static str,
     pub sysinfo_cores_suffix: &'static str,
+    /// Marks a figure that is being re-read from an open session, so a reading
+    /// taken three days ago is never mistaken for the current one.
+    pub sysinfo_live_suffix: &'static str,
 
     // Server form
     pub form_title_add: &'static str,
@@ -385,6 +388,7 @@ pub static EN: Strings = Strings {
     sysinfo_disk_label: "Disk",
     sysinfo_gpu_label: "GPU",
     sysinfo_cores_suffix: " cores",
+    sysinfo_live_suffix: " · live",
 
     form_title_add: " Add Server ",
     form_title_edit: " Edit Server ",
@@ -647,6 +651,7 @@ pub static TR: Strings = Strings {
     sysinfo_disk_label: "Depolama",
     sysinfo_gpu_label: "GPU",
     sysinfo_cores_suffix: " çekirdek",
+    sysinfo_live_suffix: " · canlı",
 
     form_title_add: " Sunucu Ekle ",
     form_title_edit: " Sunucu Düzenle ",
@@ -909,6 +914,7 @@ pub static ES: Strings = Strings {
     sysinfo_disk_label: "Disco",
     sysinfo_gpu_label: "GPU",
     sysinfo_cores_suffix: " núcleos",
+    sysinfo_live_suffix: " · en vivo",
 
     form_title_add: " Añadir Servidor ",
     form_title_edit: " Editar Servidor ",
@@ -1171,6 +1177,7 @@ pub static RU: Strings = Strings {
     sysinfo_disk_label: "Диск",
     sysinfo_gpu_label: "GPU",
     sysinfo_cores_suffix: " ядер",
+    sysinfo_live_suffix: " · сейчас",
 
     form_title_add: " Добавить сервер ",
     form_title_edit: " Изменить сервер ",

@@ -29,7 +29,9 @@ use ratatui::text::{Line, Span};
 use tui_term::vt100;
 use tui_term::widget::{Cursor, PseudoTerminal};
 
+use crate::config::SystemInfo;
 use crate::i18n::Strings;
+use crate::ssh::sysinfo::Usage;
 use crate::tui::{theme, vt_input, widgets};
 
 /// Rows the parser keeps above the visible screen.
@@ -79,11 +81,26 @@ pub struct SessionPaneState {
     parser: vt100::Parser,
     prefix: Prefix,
     dirty: bool,
+    /// The totals the one-off probe learned, and the used figures re-read
+    /// while the session is open. Title-only, and never persisted: the vault's
+    /// snapshot is still written once per connect by `App::finish`, and a save
+    /// rewrites the whole encrypted envelope.
+    mem_total_bytes: Option<u64>,
+    disk_total_bytes: Option<u64>,
+    usage: Usage,
 }
 
 impl SessionPaneState {
     pub fn new(server_name: String, cols: u16, rows: u16) -> Self {
-        Self { server_name, parser: vt100::Parser::new(rows, cols, SCROLLBACK), prefix: Prefix::Idle, dirty: true }
+        Self {
+            server_name,
+            parser: vt100::Parser::new(rows, cols, SCROLLBACK),
+            prefix: Prefix::Idle,
+            dirty: true,
+            mem_total_bytes: None,
+            disk_total_bytes: None,
+            usage: Usage::default(),
+        }
     }
 
     /// Bytes from the remote, straight into the parser.
@@ -121,6 +138,51 @@ impl SessionPaneState {
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.parser.screen_mut().set_size(rows, cols);
         self.dirty = true;
+    }
+
+    /// The totals, from the one-off probe that rides alongside the session.
+    ///
+    /// A total cannot change between polls, so it is learned once here and the
+    /// poll re-reads only what moves — which is the whole reason
+    /// `sysinfo::Usage` is not a `SystemInfo`.
+    pub fn set_totals(&mut self, info: &SystemInfo) {
+        self.mem_total_bytes = info.mem_total_bytes;
+        self.disk_total_bytes = info.disk_total_bytes;
+        self.usage.merge(Usage { mem_used_bytes: info.mem_used_bytes, disk_used_bytes: info.disk_used_bytes });
+        self.dirty = true;
+    }
+
+    /// One live reading. Merged rather than replaced, so a poll that answered
+    /// half the question leaves the other half showing its last good value.
+    pub fn set_usage(&mut self, usage: Usage) {
+        self.usage.merge(usage);
+        self.dirty = true;
+    }
+
+    /// What the pane knows about the machine right now, for the server list to
+    /// keep showing after the flow has taken it back.
+    pub fn usage(&self) -> Usage {
+        self.usage
+    }
+
+    /// The title's tail: the figures that move, or nothing at all until the
+    /// probe has answered.
+    ///
+    /// On the title and not the footer, deliberately. The footer is what sizes
+    /// the pane — `viewport` counts its wrapped rows — so a line that grows
+    /// when the first reading lands would resize the remote PTY mid-session,
+    /// and narrowing a `vt100` grid truncates every line already on it.
+    fn usage_title(&self, strings: &Strings) -> String {
+        let mut title = format!("{}{}", strings.session_pane_title_prefix, self.server_name);
+        if let (Some(used), Some(total)) = (self.usage.mem_used_bytes, self.mem_total_bytes) {
+            title.push_str("  ·  ");
+            title.push_str(&widgets::used_of_total(strings.sysinfo_ram_label, used, total));
+        }
+        if let (Some(used), Some(total)) = (self.usage.disk_used_bytes, self.disk_total_bytes) {
+            title.push_str("  ·  ");
+            title.push_str(&widgets::used_of_total(strings.sysinfo_disk_label, used, total));
+        }
+        title
     }
 
     /// Whether the remote is on the alternate screen — vim, less, htop.
@@ -244,7 +306,7 @@ impl SessionPaneState {
         // the whole area afterwards. That is `widgets::clear_surface`'s rule
         // honoured through the only hook the widget offers — its own `style`
         // is stored and never read.
-        let block = widgets::panel(&format!("{}{}", strings.session_pane_title_prefix, self.server_name)).style(theme::root());
+        let block = widgets::panel(&self.usage_title(strings)).style(theme::root());
         let cursor = Cursor::default().style(Style::default().fg(theme::accent()));
         frame.render_widget(PseudoTerminal::new(self.parser.screen()).block(block).cursor(cursor), area);
     }
@@ -516,6 +578,51 @@ mod tests {
         let contents = pane.parser.screen().contents();
         assert!(contents.starts_with("Welcome to Ubuntu 24.04.4 LTS (GNU/L"));
         assert!(contents.contains("x86_64)"), "nothing is lost, it stays wrapped where it landed");
+    }
+
+    fn snapshot() -> SystemInfo {
+        SystemInfo {
+            cpu_model: None,
+            cpu_cores: None,
+            mem_total_bytes: Some(16 * 1_073_741_824),
+            mem_used_bytes: Some(4 * 1_073_741_824),
+            disk_total_bytes: Some(500 * 1_073_741_824),
+            disk_used_bytes: Some(100 * 1_073_741_824),
+            gpu_model: None,
+            fetched_at_unix: 0,
+        }
+    }
+
+    /// The visible half of #49: with a session open the figures are on the
+    /// pane's own border and they move.
+    #[test]
+    fn the_title_carries_the_live_figures_once_the_probe_has_answered() {
+        let mut pane = SessionPaneState::new("web-1".into(), 76, 10);
+        // Before the probe there is a numerator without a denominator, so
+        // there is nothing worth saying.
+        assert_eq!(pane.usage_title(&EN), "Session: web-1");
+
+        pane.set_totals(&snapshot());
+        assert!(pane.usage_title(&EN).contains("RAM: 4.0/16.0 GiB"));
+
+        pane.set_usage(Usage { mem_used_bytes: Some(9 * 1_073_741_824), disk_used_bytes: None });
+        let title = pane.usage_title(&EN);
+        assert!(title.contains("RAM: 9.0/16.0 GiB"), "the poll moved it: {title}");
+        assert!(title.contains("Disk: 100.0/500.0 GiB"), "and left what the poll did not answer: {title}");
+    }
+
+    /// On the title and never the footer. `viewport` measures the footer's
+    /// wrapped rows, so a live figure there would resize the remote PTY the
+    /// moment the first reading landed — and narrowing a `vt100` grid cuts the
+    /// tail off every line already on it.
+    #[test]
+    fn a_live_reading_never_resizes_the_pane() {
+        let area = Rect::new(0, 0, 80, 24);
+        let before = viewport(area, &footer(false, false, &EN));
+        let mut pane = SessionPaneState::new("web-1".into(), 76, 10);
+        pane.set_totals(&snapshot());
+        pane.set_usage(Usage { mem_used_bytes: Some(9 * 1_073_741_824), disk_used_bytes: Some(1) });
+        assert_eq!(viewport(area, &footer(false, false, &EN)), before);
     }
 
     /// The app's own lines have to arrive as a terminal expects them: a bare
