@@ -145,10 +145,20 @@ impl SessionPaneState {
     /// A total cannot change between polls, so it is learned once here and the
     /// poll re-reads only what moves — which is the whole reason
     /// `sysinfo::Usage` is not a `SystemInfo`.
+    ///
+    /// **Its used figures only fill what no poll has answered yet, and this is
+    /// not the same as merging them in.** The probe is started at connect and
+    /// may take up to `EXEC_TIMEOUT` to answer, while the first poll lands
+    /// after `USAGE_POLL_INTERVAL` — so on a slow remote it finishes *second*,
+    /// carrying the older reading, and merging it would step the title
+    /// backwards once. Seeding the other way round makes whatever is already
+    /// here win, because whatever is already here is newer.
     pub fn set_totals(&mut self, info: &SystemInfo) {
         self.mem_total_bytes = info.mem_total_bytes;
         self.disk_total_bytes = info.disk_total_bytes;
-        self.usage.merge(Usage { mem_used_bytes: info.mem_used_bytes, disk_used_bytes: info.disk_used_bytes });
+        let mut seeded = Usage { mem_used_bytes: info.mem_used_bytes, disk_used_bytes: info.disk_used_bytes };
+        seeded.merge(self.usage);
+        self.usage = seeded;
         self.dirty = true;
     }
 
@@ -609,6 +619,22 @@ mod tests {
         let title = pane.usage_title(&EN);
         assert!(title.contains("RAM: 9.0/16.0 GiB"), "the poll moved it: {title}");
         assert!(title.contains("Disk: 100.0/500.0 GiB"), "and left what the poll did not answer: {title}");
+    }
+
+    /// The probe is started first and can still answer second — it has ten
+    /// seconds to the poll's five. What it carries is then the older reading,
+    /// and it must not step the title backwards.
+    #[test]
+    fn a_slow_probe_never_overwrites_a_newer_poll() {
+        let mut pane = SessionPaneState::new("web-1".into(), 76, 10);
+        pane.set_usage(Usage { mem_used_bytes: Some(9 * 1_073_741_824), disk_used_bytes: None });
+        pane.set_totals(&snapshot());
+
+        let title = pane.usage_title(&EN);
+        assert!(title.contains("RAM: 9.0/16.0 GiB"), "the poll's reading stands: {title}");
+        // Disk had no poll behind it, so the probe's own figure is the newest
+        // thing anyone knows and it fills in.
+        assert!(title.contains("Disk: 100.0/500.0 GiB"), "{title}");
     }
 
     /// On the title and never the footer. `viewport` measures the footer's
