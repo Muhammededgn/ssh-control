@@ -8,6 +8,7 @@ use zeroize::Zeroizing;
 
 use super::setup::{self, SetupOutcome, SetupState};
 use super::widgets::{self, mask};
+use crate::config::ConnectMode;
 use crate::i18n::{Lang, Strings};
 use crate::tui::chrome;
 use crate::tui::theme::{self, THEMES, Theme};
@@ -22,9 +23,10 @@ enum Tab {
     Password,
     Security,
     AutoLock,
+    Connect,
 }
 
-const TABS: [Tab; 5] = [Tab::Language, Tab::Theme, Tab::Password, Tab::Security, Tab::AutoLock];
+const TABS: [Tab; 6] = [Tab::Language, Tab::Theme, Tab::Password, Tab::Security, Tab::AutoLock, Tab::Connect];
 
 /// One place a tab is named, because two things read it: the sidebar draws it
 /// and `render` measures the sidebar from it.
@@ -35,8 +37,14 @@ fn tab_title(tab: Tab, strings: &Strings) -> &'static str {
         Tab::Password => strings.settings_tab_password,
         Tab::Security => strings.settings_tab_security,
         Tab::AutoLock => strings.settings_tab_auto_lock,
+        Tab::Connect => strings.settings_tab_connect,
     }
 }
+
+/// The two connect modes, in the order the tab lists them. The default is
+/// first, so an installation that never chose reads its own behaviour off the
+/// top of the list.
+const CONNECT_MODES: [ConnectMode; 2] = [ConnectMode::FullScreen, ConnectMode::Pane];
 
 /// Idle auto-lock choices, in minutes. `0` is "off"; anything else is a
 /// timeout. Presets rather than a free-text field so the value can never be
@@ -73,6 +81,10 @@ pub struct SettingsState {
     auto_lock_list_state: ListState,
     auto_lock_selected: usize,
 
+    // Connect tab
+    connect_list_state: ListState,
+    connect_selected: usize,
+
     // Two-Factor tab
     auth_mode: AuthMode,
     /// Whether this machine can back the modes that need an OS credential
@@ -91,6 +103,8 @@ pub enum SettingsOutcome {
     ThemeSelected(Theme),
     /// Idle auto-lock timeout in minutes; `0` disables it.
     AutoLockSelected(u32),
+    /// Which mode `Enter` connects in on the server list.
+    ConnectModeSelected(ConnectMode),
     ChangePassword { current: Zeroizing<String>, new: Zeroizing<String> },
     /// Rebuild the vault's key slots for a different security mode. One
     /// outcome covers every transition — the old per-transition variants were
@@ -114,6 +128,7 @@ impl SettingsState {
         auth_mode: AuthMode,
         credential_store: bool,
         auto_lock_minutes: u32,
+        connect_mode: ConnectMode,
     ) -> Self {
         let lang_selected = LANGS.iter().position(|l| *l == current_lang).unwrap_or(0);
         let mut lang_list_state = ListState::default();
@@ -130,6 +145,10 @@ impl SettingsState {
         let mut auto_lock_list_state = ListState::default();
         auto_lock_list_state.select(Some(auto_lock_selected));
 
+        let connect_selected = CONNECT_MODES.iter().position(|m| *m == connect_mode).unwrap_or(0);
+        let mut connect_list_state = ListState::default();
+        connect_list_state.select(Some(connect_selected));
+
         Self {
             tab: Tab::Language,
             lang_list_state,
@@ -145,6 +164,9 @@ impl SettingsState {
 
             auto_lock_list_state,
             auto_lock_selected,
+
+            connect_list_state,
+            connect_selected,
 
             auth_mode,
             credential_store,
@@ -169,7 +191,8 @@ impl SettingsState {
                     Tab::Theme => Tab::Password,
                     Tab::Password => Tab::Security,
                     Tab::Security => Tab::AutoLock,
-                    Tab::AutoLock => Tab::Language,
+                    Tab::AutoLock => Tab::Connect,
+                    Tab::Connect => Tab::Language,
                 };
                 self.error = None;
                 self.info = None;
@@ -184,6 +207,7 @@ impl SettingsState {
             Tab::Password => self.handle_password_key(key, strings),
             Tab::Security => self.handle_security_key(key, strings),
             Tab::AutoLock => self.handle_auto_lock_key(key),
+            Tab::Connect => self.handle_connect_key(key),
         }
     }
 
@@ -242,6 +266,26 @@ impl SettingsState {
                 }
             }
             KeyCode::Enter => return SettingsOutcome::AutoLockSelected(AUTO_LOCK_CHOICES[self.auto_lock_selected]),
+            _ => {}
+        }
+        SettingsOutcome::None
+    }
+
+    fn handle_connect_key(&mut self, key: KeyEvent) -> SettingsOutcome {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.connect_selected > 0 {
+                    self.connect_selected -= 1;
+                    self.connect_list_state.select(Some(self.connect_selected));
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.connect_selected + 1 < CONNECT_MODES.len() {
+                    self.connect_selected += 1;
+                    self.connect_list_state.select(Some(self.connect_selected));
+                }
+            }
+            KeyCode::Enter => return SettingsOutcome::ConnectModeSelected(CONNECT_MODES[self.connect_selected]),
             _ => {}
         }
         SettingsOutcome::None
@@ -366,6 +410,7 @@ impl SettingsState {
             Tab::Password => self.render_password_tab(frame, area, strings),
             Tab::Security => self.render_security_tab(frame, area, strings),
             Tab::AutoLock => self.render_auto_lock_tab(frame, area, strings),
+            Tab::Connect => self.render_connect_tab(frame, area, strings),
         }
     }
 
@@ -389,6 +434,33 @@ impl SettingsState {
             Span::styled(strings.settings_auto_lock_hint, Style::default().fg(theme::hint()))
         };
         widgets::render_list(frame, area, strings.settings_tab_auto_lock, items, &mut self.auto_lock_list_state, None, Some(Line::from(footer)), true);
+    }
+
+    fn render_connect_tab(&mut self, frame: &mut Frame, area: Rect, strings: &Strings) {
+        // Wrapped by hand: a `ListItem` truncates at the border, and these are
+        // sentences rather than labels — the mode descriptions lost their last
+        // words to the right edge until the mode chooser did the same.
+        let width = widgets::panel("").inner(area).width;
+        let items: Vec<ListItem> = CONNECT_MODES
+            .iter()
+            .map(|m| {
+                let text = match m {
+                    ConnectMode::FullScreen => strings.connect_mode_full_screen,
+                    ConnectMode::Pane => strings.connect_mode_pane,
+                };
+                ListItem::new(widgets::wrap_text(text, width).into_iter().map(Line::from).collect::<Vec<_>>())
+            })
+            .collect();
+        let footer = if let Some(err) = &self.error {
+            Span::styled(err.clone(), Style::default().fg(theme::error()))
+        } else if let Some(info) = &self.info {
+            Span::styled(info.clone(), Style::default().fg(theme::success()))
+        } else {
+            // The same keys as every other list on this screen, so the same
+            // string — the help overlay stays one row per binding.
+            Span::styled(strings.settings_lang_hint, Style::default().fg(theme::hint()))
+        };
+        widgets::render_list(frame, area, strings.settings_tab_connect, items, &mut self.connect_list_state, None, Some(Line::from(footer)), true);
     }
 
     fn render_theme_tab(&mut self, frame: &mut Frame, area: Rect, strings: &Strings) {
@@ -500,7 +572,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     fn state() -> SettingsState {
-        SettingsState::new(Lang::En, Theme::Dark, AuthMode::Password, false, 15)
+        SettingsState::new(Lang::En, Theme::Dark, AuthMode::Password, false, 15, ConnectMode::FullScreen)
     }
 
     fn press(state: &mut SettingsState, code: KeyCode) -> SettingsOutcome {
@@ -545,5 +617,39 @@ mod tests {
             press(&mut s, KeyCode::Right);
         }
         assert!(render(&mut s).contains("English"), "back on the language tab");
+    }
+
+    /// The preference is the screen's only job here — the two flows are
+    /// `app.rs`'s. `Enter` on the second entry has to name the pane, and it
+    /// has to be reachable by walking the cycle rather than only by index.
+    #[test]
+    fn the_connect_tab_offers_both_modes() {
+        let mut s = state();
+        for _ in 0..TABS.len() - 1 {
+            press(&mut s, KeyCode::Right);
+        }
+        let screen = render(&mut s);
+        assert!(screen.contains("Full screen"), "got {screen}");
+        assert!(screen.contains("pane"));
+
+        press(&mut s, KeyCode::Down);
+        let SettingsOutcome::ConnectModeSelected(mode) = press(&mut s, KeyCode::Enter) else {
+            panic!("Enter should select a connect mode");
+        };
+        assert_eq!(mode, ConnectMode::Pane);
+    }
+
+    /// The list opens on what is stored, not on the first entry — otherwise
+    /// the tab would report the wrong mode to anyone who had changed it.
+    #[test]
+    fn the_connect_tab_opens_on_the_stored_mode() {
+        let mut s = SettingsState::new(Lang::En, Theme::Dark, AuthMode::Password, false, 15, ConnectMode::Pane);
+        for _ in 0..TABS.len() - 1 {
+            press(&mut s, KeyCode::Right);
+        }
+        let SettingsOutcome::ConnectModeSelected(mode) = press(&mut s, KeyCode::Enter) else {
+            panic!("Enter should select a connect mode");
+        };
+        assert_eq!(mode, ConnectMode::Pane);
     }
 }

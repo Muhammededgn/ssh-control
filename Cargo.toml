@@ -31,6 +31,7 @@ sha2 = "0.11.0"
 thiserror = "2.0.19"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "time", "io-std", "signal", "io-util", "sync"] }
 totp-rs = { version = "5.7.2", features = ["gen_secret", "otpauth", "zeroize"] }
+tui-term = "0.3.4"
 uuid = { version = "1.24.0", features = ["v4", "serde"] }
 zeroize = "1.9.0"
 

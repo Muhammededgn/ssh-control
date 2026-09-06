@@ -130,71 +130,92 @@ impl SessionRecord {
     }
 }
 
-/// Prints a script event straight to the primary screen buffer.
+/// What the forwards did, as lines.
 ///
-/// Used by both connect paths for the `run_on_connect` scripts: the TUI has
-/// already suspended the alternate screen by this point and the CLI never
-/// entered one, so in both cases this is writing to the user's own terminal.
-/// `\r\n` rather than `\n` because raw mode is on and a bare newline would
-/// stair-step.
-/// Prints what the forwards did, plainly, to the primary buffer.
+/// Split out from the printer below because there are now two sinks and only
+/// one text: the full-screen connect writes these to the primary buffer, and
+/// the session pane feeds them to its own terminal emulator, which has no
+/// stdout to write to. A second wording of "forward failed" kept in step by
+/// hand is the shape `session.rs` exists to avoid.
 ///
-/// Called from both connect paths after `suspend()` and before the on-connect
-/// scripts, so it lands in scrollback alongside them — which CLAUDE.md notes
-/// is often the reason someone connected. It cannot be a status message: the
-/// terminal is suspended and the status bar is not on screen.
-///
-/// The labels are `ssh`'s own flag spellings and are not translated; only the
-/// error prefix is, and it is one that already exists.
-pub fn print_forward_report(forwards: &ssh::forward::Forwards, strings: &Strings) {
-    let mut out = std::io::stdout();
-    for started in &forwards.started {
-        let _ = write!(out, "{}\r\n", started.label);
-    }
-    for failed in &forwards.failed {
-        let _ = write!(out, "{}{}: {}\r\n", strings.log_error_prefix, failed.label, failed.error);
-    }
-    let _ = out.flush();
+/// The labels are `ssh`'s own flag spellings and are not translated — someone
+/// reading that line is reading it against `ssh -L`. Only the error prefix is,
+/// and it is one that already exists.
+pub fn forward_report_lines(forwards: &ssh::forward::Forwards, strings: &Strings) -> Vec<String> {
+    let mut lines: Vec<String> = forwards.started.iter().map(|started| started.label.clone()).collect();
+    lines.extend(forwards.failed.iter().map(|failed| format!("{}{}: {}", strings.log_error_prefix, failed.label, failed.error)));
+    lines
 }
 
-pub fn print_script_event_plain(event: RunEvent, strings: &Strings, partial: &mut String) {
-    let mut out = std::io::stdout();
+/// One script event, as the lines it should appear as.
+///
+/// `partial` is the caller's line accumulator: a chunk of output rarely ends
+/// on a newline, so the tail is held there and emitted by whichever event ends
+/// the step. That is why this takes `&mut String` rather than owning one —
+/// the state has to survive across the events of a single step.
+pub fn script_event_lines(event: RunEvent, strings: &Strings, partial: &mut String) -> Vec<String> {
+    let mut lines = Vec::new();
+    // Every terminating event flushes whatever the last chunk left behind
+    // before saying how the step ended, so a command whose final line has no
+    // newline is not swallowed by its own exit code.
+    let flush = |partial: &mut String, lines: &mut Vec<String>| {
+        if !partial.is_empty() {
+            lines.push(std::mem::take(partial));
+        }
+    };
 
     match event {
-        RunEvent::StepStarted { command, .. } => {
-            let _ = write!(out, "$ {command}\r\n");
-        }
+        RunEvent::StepStarted { command, .. } => lines.push(format!("$ {command}")),
         RunEvent::Output { chunk, .. } => {
             partial.push_str(&String::from_utf8_lossy(chunk));
             while let Some(pos) = partial.find('\n') {
                 let line: String = partial.drain(..=pos).collect();
-                let _ = write!(out, "{}\r\n", line.trim_end_matches(['\r', '\n']));
+                lines.push(line.trim_end_matches(['\r', '\n']).to_string());
             }
         }
         RunEvent::StepFinished { exit_code, .. } => {
-            if !partial.is_empty() {
-                let line = std::mem::take(partial);
-                let _ = write!(out, "{line}\r\n");
-            }
-            let _ = write!(out, "[{}{exit_code}]\r\n", strings.log_exit_prefix);
+            flush(partial, &mut lines);
+            lines.push(format!("[{}{exit_code}]", strings.log_exit_prefix));
         }
-        RunEvent::StepSkipped { .. } => {
-            let _ = write!(out, "{}\r\n", strings.log_skipped);
-        }
+        RunEvent::StepSkipped { .. } => lines.push(strings.log_skipped.to_string()),
         RunEvent::StepError { message, .. } => {
-            if !partial.is_empty() {
-                let line = std::mem::take(partial);
-                let _ = write!(out, "{line}\r\n");
-            }
-            let _ = write!(out, "{}{message}\r\n", strings.log_error_prefix);
+            flush(partial, &mut lines);
+            lines.push(format!("{}{message}", strings.log_error_prefix));
         }
         RunEvent::StepTimedOut { seconds, .. } => {
-            if !partial.is_empty() {
-                let line = std::mem::take(partial);
-                let _ = write!(out, "{line}\r\n");
-            }
-            let _ = write!(out, "{}{seconds}{}\r\n", strings.log_timed_out_prefix, strings.log_timed_out_suffix);
+            flush(partial, &mut lines);
+            lines.push(format!("{}{seconds}{}", strings.log_timed_out_prefix, strings.log_timed_out_suffix));
         }
+    }
+    lines
+}
+
+/// Prints what the forwards did, plainly, to the primary buffer.
+///
+/// Called from both full-screen connect paths after `suspend()` and before the
+/// on-connect scripts, so it lands in scrollback alongside them — which is
+/// often the reason someone connected. It cannot be a status message: the
+/// terminal is suspended and the status bar is not on screen.
+pub fn print_forward_report(forwards: &ssh::forward::Forwards, strings: &Strings) {
+    print_lines(forward_report_lines(forwards, strings));
+}
+
+/// Prints a script event straight to the primary screen buffer.
+///
+/// Used by both full-screen connect paths for the `run_on_connect` scripts:
+/// the TUI has already suspended the alternate screen by this point and the
+/// CLI never entered one, so in both cases this is writing to the user's own
+/// terminal.
+pub fn print_script_event_plain(event: RunEvent, strings: &Strings, partial: &mut String) {
+    print_lines(script_event_lines(event, strings, partial));
+}
+
+/// `\r\n` rather than `\n` because raw mode is on and a bare newline would
+/// stair-step.
+fn print_lines(lines: Vec<String>) {
+    let mut out = std::io::stdout();
+    for line in lines {
+        let _ = write!(out, "{line}\r\n");
     }
     let _ = out.flush();
 }
@@ -203,6 +224,7 @@ pub fn print_script_event_plain(event: RunEvent, strings: &Strings, partial: &mu
 mod tests {
     use super::*;
     use crate::config::AuthMethod;
+    use crate::i18n::EN;
 
     fn entry() -> ServerEntry {
         ServerEntry::new("web-1".into(), "web-1.example.com".into(), 22, "root".into(), AuthMethod::password("x"))
@@ -232,5 +254,48 @@ mod tests {
         assert_eq!(e.last_connected_unix, Some(200));
         assert_eq!(e.system_info.as_ref().and_then(|i| i.cpu_cores), Some(8), "the last good snapshot is kept, not blanked");
         assert!(e.host_key_fingerprint.is_none(), "a trusted key writes nothing");
+    }
+
+    /// A chunk rarely ends on a newline, and the tail has to survive to the
+    /// event that ends the step — otherwise a command whose last line has no
+    /// trailing newline loses it under its own exit code.
+    #[test]
+    fn output_is_emitted_a_line_at_a_time_and_the_tail_is_held() {
+        let mut partial = String::new();
+
+        let lines = script_event_lines(RunEvent::Output { index: 0, chunk: b"one\ntw" }, &EN, &mut partial);
+        assert_eq!(lines, vec!["one".to_string()]);
+        assert_eq!(partial, "tw", "the incomplete line waits for the rest of it");
+
+        let lines = script_event_lines(RunEvent::Output { index: 0, chunk: b"o\nthree" }, &EN, &mut partial);
+        assert_eq!(lines, vec!["two".to_string()]);
+
+        let lines = script_event_lines(RunEvent::StepFinished { index: 0, exit_code: 0 }, &EN, &mut partial);
+        assert_eq!(lines, vec!["three".to_string(), format!("[{}0]", EN.log_exit_prefix)]);
+        assert!(partial.is_empty());
+    }
+
+    /// `\r\n` from a remote shell must not survive into the line: it is the
+    /// terminal's business, and the pane's emulator would draw it as a second
+    /// carriage return.
+    #[test]
+    fn a_carriage_return_is_not_part_of_the_line() {
+        let mut partial = String::new();
+        let lines = script_event_lines(RunEvent::Output { index: 0, chunk: b"hello\r\n" }, &EN, &mut partial);
+        assert_eq!(lines, vec!["hello".to_string()]);
+    }
+
+    /// The step-ending events each flush the tail before their own line, so
+    /// none of them can swallow it. `StepSkipped` deliberately does not: a
+    /// skipped step produced no output to hold.
+    #[test]
+    fn every_ending_event_flushes_what_the_last_chunk_left() {
+        for ending in [RunEvent::StepFinished { index: 0, exit_code: 1 }, RunEvent::StepError { index: 0, message: "gone" }, RunEvent::StepTimedOut { index: 0, seconds: 30 }] {
+            let mut partial = String::from("tail");
+            let lines = script_event_lines(ending, &EN, &mut partial);
+            assert_eq!(lines.first().map(String::as_str), Some("tail"));
+            assert_eq!(lines.len(), 2);
+            assert!(partial.is_empty());
+        }
     }
 }

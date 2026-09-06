@@ -12,7 +12,7 @@
 //! here.
 
 use super::*;
-use crate::config::model::{AuthMethod, ServerEntry, SystemInfo};
+use crate::config::model::{AuthMethod, ForwardKind, ScriptStep, ServerEntry, StepCondition, SystemInfo};
 use crate::tui::server_form::ServerFormData;
 
 const PASSWORD: &str = "correct horse battery";
@@ -291,6 +291,122 @@ fn deleting_a_bastion_puts_the_hosts_behind_it_back_on_a_direct_connect() {
     assert_eq!(servers[0].jump_host, None, "the reference must go with the entry");
 }
 
+// ---------------------------------------------------------------------------
+// Which connect mode a key means
+// ---------------------------------------------------------------------------
+
+/// The only part of the two flows that can be tested without a terminal, and
+/// the part that decides which one runs. `Enter` is the stored preference and
+/// `t` is always the other, so the two keys swap together.
+#[test]
+fn enter_and_t_are_the_stored_mode_and_the_other_one() {
+    for (stored, on_enter, on_t) in [
+        (ConnectMode::FullScreen, "Connect", "ConnectPane"),
+        (ConnectMode::Pane, "ConnectPane", "Connect"),
+    ] {
+        let (_dir, mut app) = password_vault(|config| {
+            config.servers = vec![entry("web-1")];
+            config.connect_mode = stored;
+        });
+        type_password(&mut app, PASSWORD);
+
+        assert_eq!(step_name(app.resolve_next_step(KeyEvent::from(KeyCode::Enter))), on_enter, "{stored:?} on Enter");
+        assert_eq!(step_name(app.resolve_next_step(char_key('t'))), on_t, "{stored:?} on t");
+    }
+}
+
+fn step_name(step: NextStep) -> &'static str {
+    match step {
+        NextStep::Connect(_) => "Connect",
+        NextStep::ConnectPane(_) => "ConnectPane",
+        _ => "something else",
+    }
+}
+
+/// Both are flows that need a terminal, so both have to come back out of
+/// `apply_local_step` rather than being quietly swallowed there.
+#[test]
+fn both_connect_steps_are_handed_back_for_the_terminal() {
+    let (_dir, mut app) = password_vault(|config| config.servers = vec![entry("web-1")]);
+    type_password(&mut app, PASSWORD);
+    let id = unlocked(&app).config.servers[0].id;
+
+    for step in [NextStep::Connect(id), NextStep::ConnectPane(id)] {
+        assert!(app.apply_local_step(step).expect("step").is_some(), "a connect needs the terminal");
+    }
+}
+
+/// `t` is a single-letter shortcut, so `/` mode has to keep it as filter text
+/// — a server called `test` must be typeable.
+#[test]
+fn t_is_filter_text_while_the_search_box_is_open() {
+    let (_dir, mut app) = password_vault(|config| config.servers = vec![entry("web-1")]);
+    type_password(&mut app, PASSWORD);
+    press(&mut app, char_key('/'));
+
+    assert_eq!(step_name(app.resolve_next_step(char_key('t'))), "something else");
+}
+
+// ---------------------------------------------------------------------------
+// What a connect resolves out of the vault
+// ---------------------------------------------------------------------------
+
+/// The borrow window in front of every connect, which had no coverage while it
+/// was inlined in `connect_flow` — a flow that cannot be driven without a
+/// terminal. Three things it decides are easy to get wrong and invisible when
+/// they are: placeholders expand against the entry being connected to, only
+/// `run_on_connect` scripts come along, and the forwards are cloned rather
+/// than left behind with the borrow.
+#[test]
+fn a_connect_resolves_its_scripts_and_forwards_inside_the_borrow() {
+    let step = |command: &str| ScriptStep { command: command.into(), condition: StepCondition::Always, timeout_secs: None };
+    let (_dir, mut app) = password_vault(|config| {
+        let mut e = entry("web-1");
+        e.scripts.push(Script { id: Uuid::new_v4(), name: "greet".into(), run_on_connect: true, steps: vec![step("echo {{host}} {{username}}")] });
+        e.scripts.push(Script { id: Uuid::new_v4(), name: "deploy".into(), run_on_connect: false, steps: vec![step("make deploy")] });
+        e.forwards.push(ForwardRule::new(ForwardKind::Local { bind_addr: "127.0.0.1".into(), bind_port: 8080, dest_host: "localhost".into(), dest_port: 80 }));
+        config.servers = vec![e];
+    });
+    type_password(&mut app, PASSWORD);
+    let id = unlocked(&app).config.servers[0].id;
+
+    let context = app.connect_context(id).expect("the entry is there");
+
+    assert_eq!(context.on_connect.len(), 1, "only the run_on_connect script comes along");
+    assert_eq!(context.on_connect[0].steps[0].command, "echo web-1.example.com root", "expanded against this entry");
+    assert_eq!(context.forwards.len(), 1);
+    assert!(context.target.is_ok());
+}
+
+/// A chain that loops has to be caught here, inside the borrow, because a
+/// `jump_host` is a `Uuid` and there is nothing left to resolve it against by
+/// the time the connect runs. It rides out as an `Err` rather than ending the
+/// context so each flow can word it its own way.
+#[test]
+fn a_looping_jump_chain_comes_back_as_an_error_rather_than_a_panic() {
+    let (_dir, mut app) = password_vault(|config| {
+        let mut a = entry("a");
+        let mut b = entry("b");
+        a.jump_host = Some(b.id);
+        b.jump_host = Some(a.id);
+        config.servers = vec![a, b];
+    });
+    type_password(&mut app, PASSWORD);
+    let id = unlocked(&app).config.servers[0].id;
+
+    let context = app.connect_context(id).expect("the entry is there");
+    assert!(context.target.is_err());
+}
+
+/// A server that is not there at all is no context, not an empty one — the
+/// flow returns before it touches the terminal.
+#[test]
+fn a_missing_server_resolves_to_nothing() {
+    let (_dir, mut app) = password_vault(|_| {});
+    type_password(&mut app, PASSWORD);
+    assert!(app.connect_context(Uuid::new_v4()).is_none());
+}
+
 /// `p` reaches the forwards list, and add / toggle / delete each write
 /// through. The rules are the one thing here that a *session* acts on, so a
 /// rule that is in memory and not on disk is one that quietly does not run
@@ -475,6 +591,42 @@ fn a_failed_save_leaves_the_auto_lock_where_it_was() {
         Screen::Settings(s) => assert!(s.error.is_some(), "the screen must say the write failed"),
         _ => panic!("expected the settings screen"),
     }
+}
+
+/// Same rollback rule for the connect mode: a read-only config directory must
+/// not leave the running app connecting one way while the next launch connects
+/// the other.
+#[test]
+fn a_failed_save_leaves_the_connect_mode_where_it_was() {
+    let (dir, mut app) = password_vault(|_| {});
+    type_password(&mut app, PASSWORD);
+    assert_eq!(unlocked(&app).config.connect_mode, ConnectMode::FullScreen);
+    press(&mut app, KeyEvent::from(KeyCode::F(1)));
+    block_saves(&dir);
+
+    app.apply_local_step(NextStep::SettingsConnectModeSelected(ConnectMode::Pane)).expect("step");
+
+    assert_eq!(unlocked(&app).config.connect_mode, ConnectMode::FullScreen);
+    match &unlocked(&app).screen {
+        Screen::Settings(s) => assert!(s.error.is_some(), "the screen must say the write failed"),
+        _ => panic!("expected the settings screen"),
+    }
+}
+
+/// A preference nobody can persist is not a preference. This walks the whole
+/// way out to disk and back rather than trusting the in-memory value.
+#[test]
+fn the_connect_mode_survives_a_restart() {
+    let (dir, mut app) = password_vault(|_| {});
+    type_password(&mut app, PASSWORD);
+    press(&mut app, KeyEvent::from(KeyCode::F(1)));
+    app.apply_local_step(NextStep::SettingsConnectModeSelected(ConnectMode::Pane)).expect("step");
+    assert_eq!(unlocked(&app).config.connect_mode, ConnectMode::Pane);
+    drop(app);
+
+    let mut reopened = App::new(ConfigStore::new(dir.path().join("config.enc")));
+    type_password(&mut reopened, PASSWORD);
+    assert_eq!(unlocked(&reopened).config.connect_mode, ConnectMode::Pane);
 }
 
 /// The vault on disk was never replaced — writes are atomic — so undoing the
