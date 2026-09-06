@@ -355,7 +355,7 @@ pub fn render_panel_with(
         return;
     }
 
-    let block = style_block(modal(title));
+    let block = style_block(modal(""));
     // Derived from the frame rather than trusted from the caller: the same
     // screen runs full-width at first run and 24 columns narrower inside the
     // Settings tab that embeds it.
