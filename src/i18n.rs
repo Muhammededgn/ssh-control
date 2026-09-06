@@ -97,6 +97,9 @@ pub struct Strings {
     pub sysinfo_disk_label: &'static str,
     pub sysinfo_gpu_label: &'static str,
     pub sysinfo_cores_suffix: &'static str,
+    /// Marks a figure that is being re-read from an open session, so a reading
+    /// taken three days ago is never mistaken for the current one.
+    pub sysinfo_live_suffix: &'static str,
 
     // Server form
     pub form_title_add: &'static str,
@@ -256,6 +259,12 @@ pub struct Strings {
     pub status_auto_lock_saved: &'static str,
     pub status_auto_locked: &'static str,
 
+    // Connect tab
+    pub settings_tab_connect: &'static str,
+    pub connect_mode_full_screen: &'static str,
+    pub connect_mode_pane: &'static str,
+    pub status_connect_mode_saved: &'static str,
+
     // Status messages
     pub status_saved: &'static str,
     pub status_deleted: &'static str,
@@ -318,6 +327,13 @@ pub struct Strings {
     pub status_script_saved: &'static str,
     pub status_script_deleted: &'static str,
 
+    // Session pane
+    pub session_pane_title_prefix: &'static str,
+    pub session_pane_hint: &'static str,
+    pub session_pane_hint_alt_screen: &'static str,
+    pub session_pane_prefix_hint: &'static str,
+    pub session_pane_too_small: &'static str,
+
     // Port forwarding
     pub forwards_title: &'static str,
     pub forwards_hint: &'static str,
@@ -353,7 +369,7 @@ pub static EN: Strings = Strings {
 
     main_menu_title: " Servers ",
     main_menu_empty: "(no servers — press 'a' to add one)",
-    main_menu_hint: "Enter: connect  /: search  a: add  e: edit  d: delete  s: scripts  f: files  p: forwards  i: import  o: sort  l: lock  F1: settings  q: quit  ?: help",
+    main_menu_hint: "Enter: connect  t: other mode  /: search  a: add  e: edit  d: delete  s: scripts  f: files  p: forwards  i: import  o: sort  l: lock  F1: settings  q: quit  ?: help",
     main_menu_filter_hint: "type to filter  Enter: connect  Esc: clear",
     main_menu_filter_label: "Filter: ",
     main_menu_no_match: "(no server matches the filter)",
@@ -372,6 +388,7 @@ pub static EN: Strings = Strings {
     sysinfo_disk_label: "Disk",
     sysinfo_gpu_label: "GPU",
     sysinfo_cores_suffix: " cores",
+    sysinfo_live_suffix: " · live",
 
     form_title_add: " Add Server ",
     form_title_edit: " Edit Server ",
@@ -510,6 +527,11 @@ pub static EN: Strings = Strings {
     status_auto_lock_saved: "Auto-lock timeout saved",
     status_auto_locked: "Locked after inactivity",
 
+    settings_tab_connect: "Connect",
+    connect_mode_full_screen: "Full screen — hands the terminal over",
+    connect_mode_pane: "In a pane — keeps the app on screen",
+    status_connect_mode_saved: "Connect mode saved",
+
     status_saved: "Saved",
     status_deleted: "Deleted",
     save_error_prefix: "Save error: ",
@@ -570,6 +592,13 @@ pub static EN: Strings = Strings {
     status_script_saved: "Script saved.",
     status_script_deleted: "Script deleted.",
 
+    // Session pane
+    session_pane_title_prefix: "Session: ",
+    session_pane_hint: "Ctrl+B d: detach  Ctrl+B Ctrl+B: send Ctrl+B  Esc Esc: quick detach  every other key goes to the remote shell",
+    session_pane_hint_alt_screen: "Ctrl+B d: detach  Ctrl+B Ctrl+B: send Ctrl+B  every other key goes to the remote shell",
+    session_pane_prefix_hint: "Ctrl+B —  d: detach  Ctrl+B: send it literally  Esc: cancel",
+    session_pane_too_small: "This window is too small to run a session in a pane",
+
     forwards_title: " Port forwards ",
     forwards_hint: "a: add  e: edit  space: on/off  d: delete  Esc: back  ?: help",
     forwards_empty: "no port forwards for this server",
@@ -603,7 +632,7 @@ pub static TR: Strings = Strings {
 
     main_menu_title: " Sunucular ",
     main_menu_empty: "(sunucu yok — 'a' ile ekle)",
-    main_menu_hint: "Enter: bağlan  /: ara  a: ekle  e: düzenle  d: sil  s: scriptler  f: dosyalar  p: yönlendirme  i: içe aktar  o: sırala  l: kilitle  F1: ayarlar  q: çık  ?: yardım",
+    main_menu_hint: "Enter: bağlan  t: diğer mod  /: ara  a: ekle  e: düzenle  d: sil  s: scriptler  f: dosyalar  p: yönlendirme  i: içe aktar  o: sırala  l: kilitle  F1: ayarlar  q: çık  ?: yardım",
     main_menu_filter_hint: "yazarak filtrele  Enter: bağlan  Esc: temizle",
     main_menu_filter_label: "Filtre: ",
     main_menu_no_match: "(filtreye uyan sunucu yok)",
@@ -622,6 +651,7 @@ pub static TR: Strings = Strings {
     sysinfo_disk_label: "Depolama",
     sysinfo_gpu_label: "GPU",
     sysinfo_cores_suffix: " çekirdek",
+    sysinfo_live_suffix: " · canlı",
 
     form_title_add: " Sunucu Ekle ",
     form_title_edit: " Sunucu Düzenle ",
@@ -760,6 +790,11 @@ pub static TR: Strings = Strings {
     status_auto_lock_saved: "Otomatik kilit süresi kaydedildi",
     status_auto_locked: "Hareketsizlik nedeniyle kilitlendi",
 
+    settings_tab_connect: "Bağlanma",
+    connect_mode_full_screen: "Tam ekran — terminali devreder",
+    connect_mode_pane: "Bölmede — uygulamayı ekranda tutar",
+    status_connect_mode_saved: "Bağlanma modu kaydedildi",
+
     status_saved: "Kaydedildi",
     status_deleted: "Silindi",
     save_error_prefix: "Kaydetme hatası: ",
@@ -820,6 +855,13 @@ pub static TR: Strings = Strings {
     status_script_saved: "Script kaydedildi.",
     status_script_deleted: "Script silindi.",
 
+    // Session pane
+    session_pane_title_prefix: "Oturum: ",
+    session_pane_hint: "Ctrl+B d: ayrıl  Ctrl+B Ctrl+B: Ctrl+B gönder  Esc Esc: hızlı ayrıl  diğer her tuş uzak kabuğa gider",
+    session_pane_hint_alt_screen: "Ctrl+B d: ayrıl  Ctrl+B Ctrl+B: Ctrl+B gönder  diğer her tuş uzak kabuğa gider",
+    session_pane_prefix_hint: "Ctrl+B —  d: ayrıl  Ctrl+B: olduğu gibi gönder  Esc: vazgeç",
+    session_pane_too_small: "Bu pencere bir oturumu bölmede çalıştırmak için fazla küçük",
+
     forwards_title: " Port yönlendirme ",
     forwards_hint: "a: ekle  e: düzenle  boşluk: aç/kapa  d: sil  Esc: geri  ?: yardım",
     forwards_empty: "bu sunucu için port yönlendirme yok",
@@ -853,7 +895,7 @@ pub static ES: Strings = Strings {
 
     main_menu_title: " Servidores ",
     main_menu_empty: "(sin servidores — pulsa 'a' para añadir uno)",
-    main_menu_hint: "Enter: conectar  /: buscar  a: añadir  e: editar  d: eliminar  s: scripts  f: archivos  p: reenvíos  i: importar  o: ordenar  l: bloquear  F1: ajustes  q: salir  ?: ayuda",
+    main_menu_hint: "Enter: conectar  t: otro modo  /: buscar  a: añadir  e: editar  d: eliminar  s: scripts  f: archivos  p: reenvíos  i: importar  o: ordenar  l: bloquear  F1: ajustes  q: salir  ?: ayuda",
     main_menu_filter_hint: "escribe para filtrar  Enter: conectar  Esc: limpiar",
     main_menu_filter_label: "Filtro: ",
     main_menu_no_match: "(ningún servidor coincide con el filtro)",
@@ -872,6 +914,7 @@ pub static ES: Strings = Strings {
     sysinfo_disk_label: "Disco",
     sysinfo_gpu_label: "GPU",
     sysinfo_cores_suffix: " núcleos",
+    sysinfo_live_suffix: " · en vivo",
 
     form_title_add: " Añadir Servidor ",
     form_title_edit: " Editar Servidor ",
@@ -1010,6 +1053,11 @@ pub static ES: Strings = Strings {
     status_auto_lock_saved: "Tiempo de bloqueo automático guardado",
     status_auto_locked: "Bloqueado por inactividad",
 
+    settings_tab_connect: "Conexión",
+    connect_mode_full_screen: "Pantalla completa — cede el terminal",
+    connect_mode_pane: "En un panel — mantiene la app en pantalla",
+    status_connect_mode_saved: "Modo de conexión guardado",
+
     status_saved: "Guardado",
     status_deleted: "Eliminado",
     save_error_prefix: "Error al guardar: ",
@@ -1070,6 +1118,13 @@ pub static ES: Strings = Strings {
     status_script_saved: "Script guardado.",
     status_script_deleted: "Script eliminado.",
 
+    // Session pane
+    session_pane_title_prefix: "Sesión: ",
+    session_pane_hint: "Ctrl+B d: separar  Ctrl+B Ctrl+B: enviar Ctrl+B  Esc Esc: separar rápido  las demás teclas van al shell remoto",
+    session_pane_hint_alt_screen: "Ctrl+B d: separar  Ctrl+B Ctrl+B: enviar Ctrl+B  las demás teclas van al shell remoto",
+    session_pane_prefix_hint: "Ctrl+B —  d: separar  Ctrl+B: enviarlo literalmente  Esc: cancelar",
+    session_pane_too_small: "Esta ventana es demasiado pequeña para una sesión en panel",
+
     forwards_title: " Reenvío de puertos ",
     forwards_hint: "a: añadir  e: editar  espacio: on/off  d: eliminar  Esc: volver  ?: ayuda",
     forwards_empty: "sin reenvíos de puertos para este servidor",
@@ -1103,7 +1158,7 @@ pub static RU: Strings = Strings {
 
     main_menu_title: " Серверы ",
     main_menu_empty: "(нет серверов — нажмите 'a' чтобы добавить)",
-    main_menu_hint: "Enter: подключиться  /: поиск  a: добавить  e: изменить  d: удалить  s: скрипты  f: файлы  p: проброс  i: импорт  o: сортировка  l: заблокировать  F1: настройки  q: выход  ?: справка",
+    main_menu_hint: "Enter: подключиться  t: другой режим  /: поиск  a: добавить  e: изменить  d: удалить  s: скрипты  f: файлы  p: проброс  i: импорт  o: сортировка  l: заблокировать  F1: настройки  q: выход  ?: справка",
     main_menu_filter_hint: "введите текст для фильтра  Enter: подключиться  Esc: сбросить",
     main_menu_filter_label: "Фильтр: ",
     main_menu_no_match: "(нет серверов, подходящих под фильтр)",
@@ -1122,6 +1177,7 @@ pub static RU: Strings = Strings {
     sysinfo_disk_label: "Диск",
     sysinfo_gpu_label: "GPU",
     sysinfo_cores_suffix: " ядер",
+    sysinfo_live_suffix: " · сейчас",
 
     form_title_add: " Добавить сервер ",
     form_title_edit: " Изменить сервер ",
@@ -1260,6 +1316,11 @@ pub static RU: Strings = Strings {
     status_auto_lock_saved: "Время автоблокировки сохранено",
     status_auto_locked: "Заблокировано из-за бездействия",
 
+    settings_tab_connect: "Подключение",
+    connect_mode_full_screen: "Во весь экран — терминал отдаётся сеансу",
+    connect_mode_pane: "В панели — приложение остаётся на экране",
+    status_connect_mode_saved: "Режим подключения сохранён",
+
     status_saved: "Сохранено",
     status_deleted: "Удалено",
     save_error_prefix: "Ошибка сохранения: ",
@@ -1319,6 +1380,13 @@ pub static RU: Strings = Strings {
     log_error_prefix: "ошибка: ",
     status_script_saved: "Скрипт сохранён.",
     status_script_deleted: "Скрипт удалён.",
+
+    // Session pane
+    session_pane_title_prefix: "Сеанс: ",
+    session_pane_hint: "Ctrl+B d: отсоединиться  Ctrl+B Ctrl+B: отправить Ctrl+B  Esc Esc: быстрое отсоединение  все остальные клавиши идут в удалённую оболочку",
+    session_pane_hint_alt_screen: "Ctrl+B d: отсоединиться  Ctrl+B Ctrl+B: отправить Ctrl+B  все остальные клавиши идут в удалённую оболочку",
+    session_pane_prefix_hint: "Ctrl+B —  d: отсоединиться  Ctrl+B: отправить как есть  Esc: отмена",
+    session_pane_too_small: "Это окно слишком мало для сеанса в панели",
     forwards_title: " Проброс портов ",
     forwards_hint: "a: добавить  e: изменить  пробел: вкл/выкл  d: удалить  Esc: назад  ?: справка",
     forwards_empty: "для этого сервера нет проброса портов",

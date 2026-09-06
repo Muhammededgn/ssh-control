@@ -58,13 +58,8 @@ pub fn render(frame: &mut Frame, area: Rect, title: &str, footer: Vec<Line<'stat
         return area;
     }
 
-    // Wrapped rows, not lines: the server list's hint is longer than a
-    // hundred columns and was losing its last binding off the right edge.
-    let footer_height = crate::tui::widgets::wrapped_height(&footer, area.width.saturating_sub(2)) as u16;
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(HEADER_HEIGHT), Constraint::Min(3), Constraint::Length(footer_height)])
-        .split(area);
+    let footer_height = footer_height(&footer, area.width);
+    let rows = split(area, footer_height);
 
     render_header(frame, rows[0], title, strings);
     if footer_height > 0 {
@@ -74,6 +69,34 @@ pub fn render(frame: &mut Frame, area: Rect, title: &str, footer: Vec<Line<'stat
         );
     }
     rows[1]
+}
+
+/// The rect `render` would return, without drawing anything.
+///
+/// The session pane needs its own size *before* there is a frame to measure:
+/// the remote PTY is sized to the pane and the size is requested during the
+/// connect, well ahead of the first draw. Deriving it a second time by hand
+/// would be two arithmetics with one chance each to disagree about a wrapped
+/// footer, which is exactly the class of bug `detail_parts` exists to prevent
+/// on the server list — so `render` and this share the split literally.
+pub fn body(area: Rect, footer: &[Line<'_>]) -> Rect {
+    if area.height < MIN_CHROME_HEIGHT {
+        return area;
+    }
+    split(area, footer_height(footer, area.width))[1]
+}
+
+/// Wrapped rows, not lines: the server list's hint is longer than a hundred
+/// columns and was losing its last binding off the right edge.
+fn footer_height(footer: &[Line<'_>], width: u16) -> u16 {
+    crate::tui::widgets::wrapped_height(footer, width.saturating_sub(2)) as u16
+}
+
+fn split(area: Rect, footer_height: u16) -> std::rc::Rc<[Rect]> {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(HEADER_HEIGHT), Constraint::Min(3), Constraint::Length(footer_height)])
+        .split(area)
 }
 
 /// The app on the left, the screen on the right.
@@ -201,5 +224,29 @@ mod tests {
         let mut body = area;
         terminal.draw(|frame| body = render(frame, area, EN.main_menu_title, Vec::new(), &EN)).expect("render");
         assert_eq!(body, area);
+    }
+
+    /// The whole point of `body` being an extraction rather than a second
+    /// implementation. The session pane sizes a remote PTY off it before there
+    /// is a frame to measure, so a footer that wraps at one width and not
+    /// another must move both figures together or the remote's idea of the
+    /// window is wrong for the rest of the session.
+    #[test]
+    fn the_body_rect_is_the_one_render_would_have_returned() {
+        let hint = |text: &str| vec![Line::from(Span::raw(text.to_string()))];
+        let footers = [Vec::new(), hint("q: quit"), hint(EN.main_menu_hint), hint(EN.file_browser_hint)];
+        for footer in &footers {
+            // 44 is narrow enough to wrap the long hints and 120 is not, which
+            // is the case that catches a height counted in lines.
+            for (width, height) in [(44u16, 24u16), (80, 24), (120, 40), (100, 9), (40, 4)] {
+                let area = Rect { x: 0, y: 0, width, height };
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test backend");
+                let mut drawn = area;
+                terminal
+                    .draw(|frame| drawn = render(frame, area, EN.main_menu_title, footer.clone(), &EN))
+                    .expect("render");
+                assert_eq!(body(area, footer), drawn, "{width}x{height} with {} footer lines", footer.len());
+            }
+        }
     }
 }

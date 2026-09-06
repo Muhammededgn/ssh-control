@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::layout::Rect;
+use russh::ChannelMsg;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -12,7 +14,7 @@ use crate::config::device::{self, DeviceState};
 use crate::config::format::{SLOT_DEVICE, SLOT_PASSWORD, Slot};
 use crate::config::keyslot::{self, MasterKey};
 use crate::config::store::{ConfigStore, Unlocked, VaultShape};
-use crate::config::{Config, Script, Secret, ServerEntry, TotpConfig};
+use crate::config::{Config, ConnectMode, Script, Secret, ServerEntry, SystemInfo, TotpConfig};
 use crate::crypto::kdf::KdfParams;
 use crate::error::{AppError, Result};
 use crate::i18n::{Lang, Strings};
@@ -34,6 +36,7 @@ use crate::ssh_config::SshConfigHost;
 use crate::config::{AuthMethod, ForwardRule};
 use crate::tui::scripts_list::{ScriptsListAction, ScriptsListState};
 use crate::tui::server_form::{FormMode, FormOutcome, ServerFormData, ServerFormState};
+use crate::tui::session_pane::{self, PaneOutcome, SessionPaneState};
 use crate::tui::settings::{SettingsOutcome, SettingsState};
 use crate::tui::setup::{SetupOutcome, SetupState};
 use crate::tui::theme::{self, Theme};
@@ -159,6 +162,7 @@ pub(crate) enum NextStep {
     /// `?` from a screen where it cannot be mistaken for text input.
     Help,
     Connect(Uuid),
+    ConnectPane(Uuid),
     GoAdd,
     GoEdit(Uuid),
     GoDelete(Uuid),
@@ -173,6 +177,7 @@ pub(crate) enum NextStep {
     SettingsLangSelected(Lang),
     SettingsThemeSelected(Theme),
     SettingsAutoLockSelected(u32),
+    SettingsConnectModeSelected(ConnectMode),
     SettingsChangePassword { current: Zeroizing<String>, new: Zeroizing<String> },
     ChangeSecurityMode { mode: AuthMode, password: Option<Zeroizing<String>>, totp_secret: Option<Zeroizing<String>> },
     TotpPromptSubmit(String),
@@ -246,11 +251,40 @@ pub struct App {
     /// Set by the flows, cleared centrally in `App::run` — no exit path can
     /// leave the list stuck saying "connecting…".
     pub(crate) connecting: Option<(Uuid, Instant)>,
+    /// The live used-memory and used-disk figures from the session that is
+    /// currently open, and which server they belong to.
+    ///
+    /// **In memory only, and it dies with the session.** `ServerEntry::
+    /// system_info` is the persisted snapshot and stays one: every save
+    /// rewrites the whole encrypted envelope, so a poll that persisted would
+    /// rewrite the vault every few seconds. A stored figure and a live one are
+    /// also different claims — one is "when we last connected", the other is
+    /// "now" — and the detail card marks which it is showing.
+    ///
+    /// Keyed by `Uuid` for the reason `connecting` is: a filter or a re-sort
+    /// moves rows out from under an index.
+    pub(crate) live: Option<(Uuid, ssh::sysinfo::Usage)>,
 }
 
 /// One authenticated connection plus its sftp channel. The russh handle has to
 /// be kept alive alongside the stream — dropping it closes the channel out from
 /// under the client.
+/// Everything a connect needs from the vault, resolved inside the borrow.
+///
+/// A plain owned bundle rather than a tuple because both flows destructure it
+/// and a fourth field would otherwise be a fourth unnamed position.
+struct ConnectContext {
+    /// The pane's title. The full-screen mode has nowhere to put it — the app
+    /// is off screen — but the pane is drawn beside it.
+    name: String,
+    /// The bastion chain, resolved. `Err` is a chain that loops or names a
+    /// deleted server, and it rides this far rather than failing in
+    /// `connect_context` so each flow can report it its own way.
+    target: Result<ssh::Target>,
+    forwards: Vec<ForwardRule>,
+    on_connect: Vec<Script>,
+}
+
 pub(crate) struct RemoteSession {
     server_id: Uuid,
     #[allow(dead_code, reason = "owned to keep the channel — and any bastion tunnel under it — alive for the lifetime of the sftp stream")]
@@ -285,6 +319,7 @@ impl App {
             last_activity: Instant::now(),
             remote: None,
             connecting: None,
+            live: None,
         };
         app.state = app.resolve_initial_state();
         app
@@ -462,6 +497,7 @@ impl App {
         let strings = self.lang.strings();
         // Copied out before `self.state` is borrowed, like `status` below.
         let connecting = self.connecting;
+        let live = self.live;
         match &mut self.state {
             AppState::Locked(unlock) => {
                 terminal.terminal.draw(|frame| {
@@ -511,7 +547,7 @@ impl App {
                     let area = frame.area();
                     chrome::paint_background(frame, area);
                     match screen {
-                        Screen::MainMenu(state) => state.render(frame, area, &config.servers, config.server_sort, ListStatus { connecting, message: status.as_deref() }, strings),
+                        Screen::MainMenu(state) => state.render(frame, area, &config.servers, config.server_sort, ListStatus { connecting, live, message: status.as_deref() }, strings),
                         Screen::ServerForm(state) => state.render(frame, area, strings),
                         Screen::ConfirmDelete { state, .. } => state.render(frame, area, strings),
                         Screen::Settings(state) => state.render(frame, area, strings),
@@ -613,7 +649,7 @@ impl App {
     /// Every screen reachable before the vault is open.
     ///
     /// Split out from `handle_key` because none of it awaits and none of it
-    /// needs a terminal — only `draw` and the six flows behind
+    /// needs a terminal — only `draw` and the seven flows behind
     /// `handle_unlocked_key` do. That is what lets the tests drive an unlock
     /// end to end without a `TerminalGuard` to hand them.
     pub(crate) fn handle_locked_key(&mut self, key: KeyEvent) {
@@ -985,13 +1021,14 @@ impl App {
     async fn handle_unlocked_key(&mut self, key: KeyEvent, terminal: &mut TerminalGuard) -> Result<()> {
         let next = self.resolve_next_step(key);
         // Everything that can be done without a terminal is done here; what
-        // comes back is one of the six flows that suspend, redraw or hold a
+        // comes back is one of the seven flows that suspend, redraw or hold a
         // live connection, and only those need `terminal`.
         let Some(next) = self.apply_local_step(next)? else {
             return Ok(());
         };
         match next {
             NextStep::Connect(id) => self.connect_flow(terminal, id).await?,
+            NextStep::ConnectPane(id) => self.pane_connect_flow(terminal, id).await?,
             NextStep::RunScript { origin_server_id, script_id, targets } => {
                 self.run_script_flow(terminal, origin_server_id, script_id, targets).await?
             }
@@ -1036,7 +1073,8 @@ impl App {
             match &mut u.screen {
                 Screen::MainMenu(state) => match state.handle_key(key, &u.config.servers, u.config.server_sort) {
                     MainMenuAction::None => NextStep::None,
-                    MainMenuAction::Connect(id) => NextStep::Connect(id),
+                    MainMenuAction::Connect(id) => connect_step(u.config.connect_mode, id),
+                    MainMenuAction::ConnectAlternate(id) => connect_step(u.config.connect_mode.other(), id),
                     MainMenuAction::Add => NextStep::GoAdd,
                     MainMenuAction::Edit(id) => NextStep::GoEdit(id),
                     MainMenuAction::Delete(id) => NextStep::GoDelete(id),
@@ -1066,6 +1104,7 @@ impl App {
                     SettingsOutcome::LanguageSelected(lang) => NextStep::SettingsLangSelected(lang),
                     SettingsOutcome::ThemeSelected(t) => NextStep::SettingsThemeSelected(t),
                     SettingsOutcome::AutoLockSelected(minutes) => NextStep::SettingsAutoLockSelected(minutes),
+                    SettingsOutcome::ConnectModeSelected(mode) => NextStep::SettingsConnectModeSelected(mode),
                     SettingsOutcome::ChangePassword { current, new } => {
                         NextStep::SettingsChangePassword { current, new }
                     }
@@ -1224,8 +1263,9 @@ impl App {
                 let auth_mode = self.current_auth_mode();
                 self.with_unlocked(|u| {
                     let auto_lock_minutes = u.config.auto_lock_minutes;
+                    let connect_mode = u.config.connect_mode;
                     u.screen =
-                        Screen::Settings(SettingsState::new(lang, current_theme, auth_mode, device::credential_store_available(), auto_lock_minutes));
+                        Screen::Settings(SettingsState::new(lang, current_theme, auth_mode, device::credential_store_available(), auto_lock_minutes, connect_mode));
                 });
             }
             NextStep::FormCancel => self.with_unlocked(|u| {
@@ -1258,6 +1298,7 @@ impl App {
                 t.save_to_file(&self.store.theme_path());
             }
             NextStep::SettingsAutoLockSelected(minutes) => self.set_auto_lock(minutes),
+            NextStep::SettingsConnectModeSelected(mode) => self.set_connect_mode(mode),
             NextStep::SettingsChangePassword { current, new } => {
                 self.change_master_password(&current, &new)?;
             }
@@ -1268,6 +1309,7 @@ impl App {
             NextStep::TotpPromptCancel => self.state = self.locked_state(),
             // The six that await with a terminal go back to `handle_unlocked_key`.
             NextStep::Connect(id) => return Ok(Some(NextStep::Connect(id))),
+            NextStep::ConnectPane(id) => return Ok(Some(NextStep::ConnectPane(id))),
             NextStep::GoScripts(server_id) => self.with_unlocked(|u| {
                 if let Some(entry) = u.config.servers.iter().find(|s| s.id == server_id) {
                     u.screen = Screen::Scripts(ScriptsListState::new(server_id, entry.name.clone()));
@@ -1470,6 +1512,9 @@ impl App {
     /// authenticated connection open would defeat the point of locking.
     fn drop_remote(&mut self) {
         self.remote = None;
+        // The readings belong to the connection, not to the entry. Keeping
+        // them after it closed would be showing a snapshot labelled "now".
+        self.live = None;
     }
 
     fn with_unlocked(&mut self, f: impl FnOnce(&mut UnlockedState)) {
@@ -1893,6 +1938,31 @@ impl App {
         }
     }
 
+    /// Stores which of the two connect modes `Enter` uses.
+    ///
+    /// Same shape as `set_auto_lock`, and the rollback is the point: the value
+    /// is only in memory until the save succeeds, so a read-only config
+    /// directory cannot leave the running app on a setting the next launch
+    /// will not have.
+    fn set_connect_mode(&mut self, mode: ConnectMode) {
+        let strings = self.lang.strings();
+        let AppState::Unlocked(u) = &mut self.state else {
+            return;
+        };
+        let previous = u.config.connect_mode;
+        u.config.connect_mode = mode;
+        let result = self.store.save(&u.config, &u.master_key, &u.slots);
+        if result.is_err() {
+            u.config.connect_mode = previous;
+        }
+        if let Screen::Settings(settings) = &mut u.screen {
+            match result {
+                Ok(()) => settings.info = Some(strings.status_connect_mode_saved.to_string()),
+                Err(e) => settings.error = Some(format!("{}{e}", strings.save_error_prefix)),
+            }
+        }
+    }
+
     /// Rebuilds the vault's slot set for a different security mode.
     ///
     /// The master key never changes, so the vault body is not re-encrypted —
@@ -2013,33 +2083,114 @@ impl App {
         }
     }
 
+    /// Everything a connect needs out of the vault, resolved while the entry
+    /// is still borrowed.
+    ///
+    /// Not async and no terminal, so it can be tested — and so the borrow of
+    /// `self.state` ends here rather than reaching an `.await` (the `NextStep`
+    /// rule). What comes out owns its credentials and its already-expanded
+    /// commands; nothing in it is a `Uuid` that would need the vault again.
+    ///
+    /// Shared by both connect flows because a second copy would be a second
+    /// chance to forget that placeholders expand per entry, or that a bastion
+    /// chain is only resolvable in here.
+    fn connect_context(&self, id: Uuid) -> Option<ConnectContext> {
+        let AppState::Unlocked(u) = &self.state else {
+            return None;
+        };
+        let entry = u.config.servers.iter().find(|s| s.id == id)?;
+        // Placeholders are resolved here, where the entry is still borrowed —
+        // the expanded copies are what crosses the await.
+        let vars = ScriptVars::from_entry(entry);
+        Some(ConnectContext {
+            name: entry.name.clone(),
+            // So is the bastion chain, and it has to be: a `Uuid` means
+            // nothing once `config` is out of scope.
+            target: ssh::Target::from_entry(entry, &u.config.servers),
+            // `ForwardRule` holds no credential, so cloning it here costs
+            // nothing worth protecting — but it has to be here all the same,
+            // because `entry` is gone by the time the session is up.
+            forwards: entry.forwards.clone(),
+            on_connect: entry.scripts.iter().filter(|s| s.run_on_connect).map(|s| vars.expand_script(s)).collect(),
+        })
+    }
+
+    /// Opens the connection and records what the handshake taught the vault.
+    ///
+    /// `None` means there is nothing to connect to and the reason is already
+    /// on the status bar — an abandoned wait, a changed host key, a refused
+    /// connection. Either way nothing was suspended and nothing was written,
+    /// so there is nothing for the caller to undo.
+    ///
+    /// Both flows go through this so `observe_handshake` + `observe_jumps` +
+    /// `record_session` stay one implementation. The fingerprint is persisted
+    /// *before* the session starts: one written only at the end would re-run
+    /// TOFU if the process were killed during it.
+    ///
+    /// The future inside borrows only `target`, which is the caller's local —
+    /// `await_redrawing`'s rule that the future must not borrow `self`.
+    async fn establish(&mut self, terminal: &mut TerminalGuard, id: Uuid, target: &ssh::Target) -> Option<(ssh::Connected, session::SessionRecord)> {
+        let strings = self.lang.strings();
+
+        // The list stays on screen through the handshake — a blank terminal
+        // with nothing on it for up to twenty seconds was the whole of #51 —
+        // and the row says which server is being reached.
+        self.connecting = Some((id, Instant::now()));
+        let attempt = self.await_on_screen(terminal, ssh::connect(target)).await;
+        // Esc. `App::run` clears the indicator.
+        let connect_result = attempt?;
+
+        let connected = match connect_result {
+            Ok(connected) => connected,
+            Err(AppError::HostKeyChanged { fingerprint }) => {
+                self.set_status(format!("{}{fingerprint}{}", strings.host_key_changed_prefix, strings.host_key_changed_suffix));
+                return None;
+            }
+            Err(e) => {
+                self.set_status(format!("{}{e}", strings.connect_error_prefix));
+                return None;
+            }
+        };
+
+        // What a connect teaches the vault is decided in one place, so
+        // `cli::connect` records exactly the same things (see
+        // `crate::session`).
+        let record = session::observe_handshake(&connected);
+        let jump_records = session::observe_jumps(&connected, &target.jump_ids);
+        self.record_session(id, &record, &jump_records);
+        Some((connected, record))
+    }
+
+    /// The second half of the recording: the sysinfo snapshot, once the probe
+    /// that rode alongside the session has produced one.
+    ///
+    /// Only when it actually produced something — `apply_to` keeps the last
+    /// good snapshot, so a second save would rewrite the whole vault to store
+    /// nothing. That rule is here rather than in each flow because it is
+    /// exactly the kind of thing a copy forgets.
+    fn finish(&mut self, id: Uuid, record: &mut session::SessionRecord, info: Option<SystemInfo>) {
+        record.system_info = info;
+        if record.system_info.is_some() {
+            // The hops were written by `establish`; there is nothing new to
+            // say about them.
+            self.record_session(id, record, &[]);
+        }
+    }
+
+    /// The full-screen connect: the terminal is handed over and the app is off
+    /// screen until the remote shell exits.
+    ///
+    /// The counterpart is `pane_connect_flow`. What they share is in
+    /// `connect_context`, `establish` and `finish`; what differs is this
+    /// suspend, and it is the whole difference between the modes.
     async fn connect_flow(&mut self, terminal: &mut TerminalGuard, id: Uuid) -> Result<()> {
         let strings = self.lang.strings();
-        // Only what the connection itself needs, plus the scripts that run on
-        // connect — never a clone of the whole entry, which would leave an
-        // extra credential copy and every `Script` behind (see `ssh::Target`).
-        let target = match &self.state {
-            AppState::Unlocked(u) => u.config.servers.iter().find(|s| s.id == id).map(|e| {
-                // Placeholders are resolved here, where the entry is still
-                // borrowed — the expanded copies are what crosses the await.
-                let vars = ScriptVars::from_entry(e);
-                // So is the bastion chain, and it has to be: a `Uuid` means
-                // nothing once `config` is out of scope.
-                let target = ssh::Target::from_entry(e, &u.config.servers);
-                // `ForwardRule` holds no credential, so cloning it here costs
-                // nothing worth protecting — but it has to be here all the
-                // same, because `e` is gone by the time the session is up.
-                let forwards = e.forwards.clone();
-                (target, forwards, e.scripts.iter().filter(|s| s.run_on_connect).map(|s| vars.expand_script(s)).collect::<Vec<_>>())
-            }),
-            AppState::Setup(_) | AppState::Unopenable | AppState::CannotOpen { .. } | AppState::Locked(_) | AppState::LockedTotpDaily(_) => None,
-        };
-        let Some((target, forward_rules, on_connect_scripts)) = target else {
+        let Some(context) = self.connect_context(id) else {
             return Ok(());
         };
         // A chain that loops or names a deleted server fails before anything is
         // opened, and reads as a connect error like any other.
-        let target = match target {
+        let target = match context.target {
             Ok(target) => target,
             Err(e) => {
                 self.set_status(format!("{}{e}", strings.connect_error_prefix));
@@ -2047,39 +2198,10 @@ impl App {
             }
         };
 
-        // The list stays on screen through the handshake — a blank terminal
-        // with nothing on it for up to twenty seconds was the whole of #51 —
-        // and the row says which server is being reached.
-        self.connecting = Some((id, Instant::now()));
-        let attempt = self.await_on_screen(terminal, ssh::connect(&target)).await;
-        // Esc. Nothing was suspended and nothing was written, so there is
-        // nothing to undo; `App::run` clears the indicator.
-        let Some(connect_result) = attempt else {
+        let established = self.establish(terminal, id, &target).await;
+        let Some((connected, mut record)) = established else {
             return Ok(());
         };
-
-        // A connect that failed never suspends. Handing the primary buffer over
-        // to show an error the status bar can show is the bug.
-        let connected = match connect_result {
-            Ok(connected) => connected,
-            Err(AppError::HostKeyChanged { fingerprint }) => {
-                self.set_status(format!("{}{fingerprint}{}", strings.host_key_changed_prefix, strings.host_key_changed_suffix));
-                return Ok(());
-            }
-            Err(e) => {
-                self.set_status(format!("{}{e}", strings.connect_error_prefix));
-                return Ok(());
-            }
-        };
-
-        // What a connect teaches the vault is decided in one place, so
-        // `cli::connect` records exactly the same things (see
-        // `crate::session`). The handshake half is known now and is written
-        // now: a fingerprint persisted only once the session ended would
-        // re-run TOFU if the process were killed during it.
-        let mut record = session::observe_handshake(&connected);
-        let jump_records = session::observe_jumps(&connected, &target.jump_ids);
-        self.record_session(id, &record, &jump_records);
 
         // The late suspend. The primary buffer is handed over here and not a
         // line earlier, with a shell about to land on it.
@@ -2092,14 +2214,14 @@ impl App {
         // teardown story. It borrows nothing from `self`, so it sits inside
         // `await_redrawing`'s rule as well as the `NextStep` one.
         let _forwards = {
-            let forwards = ssh::forward::start(Arc::clone(&connected.handle), &forward_rules).await;
+            let forwards = ssh::forward::start(Arc::clone(&connected.handle), &context.forwards).await;
             session::print_forward_report(&forwards, strings);
             forwards
         };
 
         // Auto-run scripts flagged `run_on_connect`, printed plain to the
         // (now-suspended) primary screen buffer.
-        for script in &on_connect_scripts {
+        for script in &context.on_connect {
             let mut partial = String::new();
             script_runner::run_script(&connected.handle, script, |event| {
                 session::print_script_event_plain(event, strings, &mut partial);
@@ -2119,18 +2241,233 @@ impl App {
 
         terminal.resume()?;
 
-        record.system_info = info.ok();
-        // Only when the probe actually produced something: `apply_to` keeps the
-        // last good snapshot, so a second save would rewrite the whole vault to
-        // store nothing.
-        if record.system_info.is_some() {
-            // The hops were written above; there is nothing new to say about
-            // them, and re-applying would be a second pass over the same value.
-            self.record_session(id, &record, &[]);
-        }
+        self.finish(id, &mut record, info.ok());
 
         if let AppState::Unlocked(u) = &mut self.state {
             u.status = shell.err().map(|e| StatusMessage::new(format!("{}{e}", strings.disconnected_prefix)));
+        }
+
+        Ok(())
+    }
+
+    /// The pane connect: the session is drawn inside the app's own frame and
+    /// the terminal is never handed over.
+    ///
+    /// The counterpart is `connect_flow`. Everything before the shell is
+    /// shared (`connect_context`, `establish`, `finish`); what differs is that
+    /// nothing here suspends, so the report and the on-connect output have no
+    /// primary buffer to land on and are fed to the pane's own emulator
+    /// instead — the same arrangement, one screen further in.
+    ///
+    /// It owns its loop the way `run_script_flow` does, which is what lets
+    /// `draw_pane` and the key drain be free functions: `App::run` is blocked
+    /// in here, so the keys typed during the session would otherwise sit in
+    /// the terminal buffer and replay against the server list afterwards.
+    async fn pane_connect_flow(&mut self, terminal: &mut TerminalGuard, id: Uuid) -> Result<()> {
+        let strings = self.lang.strings();
+        let Some(context) = self.connect_context(id) else {
+            return Ok(());
+        };
+        let target = match context.target {
+            Ok(target) => target,
+            Err(e) => {
+                self.set_status(format!("{}{e}", strings.connect_error_prefix));
+                return Ok(());
+            }
+        };
+
+        // Measured before anything is opened, so a frame with no room for a
+        // shell costs the user a status message rather than a connection they
+        // then have to tear down.
+        let Some((cols, rows)) = pane_viewport(terminal, false, strings) else {
+            self.set_status(strings.session_pane_too_small.to_string());
+            return Ok(());
+        };
+
+        let established = self.establish(terminal, id, &target).await;
+        let Some((connected, mut record)) = established else {
+            return Ok(());
+        };
+        self.connecting = None;
+
+        // Scope-bound exactly as in `connect_flow`: `Forwards` aborts every
+        // listener when it drops, which is the whole teardown story, and no
+        // exit path from here can skip it.
+        // Named, unlike `connect_flow`'s, because the pane reads the report
+        // out of it — but held for the same reason: dropping it aborts every
+        // listener, and no exit path from here can skip that.
+        let forwards = ssh::forward::start(Arc::clone(&connected.handle), &context.forwards).await;
+
+        let mut pane = SessionPaneState::new(context.name, cols, rows);
+        let mut channel = connected.handle.channel_open_session().await?;
+        let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into());
+        // Sized to the pane, not to the terminal — that is the whole reason
+        // `chrome::body` exists as a function of its own.
+        channel.request_pty(false, &term, cols as u32, rows as u32, 0, 0, &[]).await?;
+
+        // Fed between the PTY request and the shell, so the report and the
+        // script output sit above the first prompt — where `connect_flow`
+        // puts them on the primary buffer.
+        for line in session::forward_report_lines(&forwards, strings) {
+            pane.feed_line(&line);
+        }
+        for script in &context.on_connect {
+            let mut partial = String::new();
+            // The lines travel through a channel for the reason
+            // `run_script_flow`'s events do: the run future must not borrow
+            // `pane`, or the arm that draws could not touch it either. In the
+            // full-screen mode the printer writes straight to a terminal
+            // nobody is redrawing, so it needs none of this.
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            {
+                let mut run = std::pin::pin!(script_runner::run_script(&connected.handle, script, |event| {
+                    for line in session::script_event_lines(event, strings, &mut partial) {
+                        let _ = tx.send(line);
+                    }
+                }));
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = &mut run => break,
+                        Some(line) = rx.recv() => {
+                            pane.feed_line(&line);
+                            // Whatever else is queued goes in the same pass —
+                            // one redraw per batch rather than one per line.
+                            while let Ok(more) = rx.try_recv() {
+                                pane.feed_line(&more);
+                            }
+                            pane.take_dirty();
+                            draw_pane(terminal, &mut pane, strings);
+                        }
+                    }
+                }
+            }
+            // The last step's exit code is usually sent microseconds before
+            // the future resolves; dropping it would lose a line.
+            while let Ok(line) = rx.try_recv() {
+                pane.feed_line(&line);
+            }
+            pane.take_dirty();
+            draw_pane(terminal, &mut pane, strings);
+        }
+
+        channel.request_shell(false).await?;
+
+        // The probe rides alongside the session rather than in front of it,
+        // for the reason `connect_flow`'s `tokio::join!` does: holding an
+        // interactive prompt behind `EXEC_TIMEOUT` to learn a CPU count is the
+        // wrong trade. Here it is a select arm rather than a join, because the
+        // session is a loop and not a future.
+        let mut probe = std::pin::pin!(ssh::sysinfo::fetch(&connected.handle));
+        let mut probe_live = true;
+        let mut info = None;
+
+        // The live poll, as one future that never resolves rather than a task:
+        // it borrows `connected` (never `self`, the `await_redrawing` rule) and
+        // so is dropped with this frame, which is the whole of its teardown —
+        // `Forwards`' argument, one layer in. Its readings come back through a
+        // channel for the reason the on-connect script lines do: a future that
+        // borrowed `pane` would stop the arm that draws from touching it.
+        let (usage_tx, mut usage_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut usage_poll = std::pin::pin!(async {
+            loop {
+                tokio::time::sleep(USAGE_POLL_INTERVAL).await;
+                // An error is dropped rather than reported: the caller keeps
+                // its last good reading, and a failed exec channel says
+                // nothing about the machine worth putting on the title.
+                if let Ok(usage) = ssh::sysinfo::poll_usage(&connected.handle).await {
+                    let _ = usage_tx.send(usage);
+                }
+            }
+        });
+
+        let mut last_draw = Instant::now() - PANE_REDRAW_INTERVAL;
+        let mut size = (cols, rows);
+        let mut error = None;
+
+        draw_pane(terminal, &mut pane, strings);
+        loop {
+            tokio::select! {
+                // Output that arrived in the same wakeup as a due tick is not
+                // made to wait for the next one, and a session that ended in
+                // it is not read as a keystroke opportunity.
+                biased;
+                msg = channel.wait() => match msg {
+                    Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                        pane.feed(&data);
+                        // Throttled rather than drawn per packet: a `cat` of a
+                        // large file would otherwise redraw once per 32 KiB
+                        // chunk. The tick arm draws whatever is still dirty,
+                        // so the tail of a burst is never left unpainted.
+                        if last_draw.elapsed() >= PANE_REDRAW_INTERVAL {
+                            pane.take_dirty();
+                            draw_pane(terminal, &mut pane, strings);
+                            last_draw = Instant::now();
+                        }
+                    }
+                    Some(ChannelMsg::ExitStatus { .. }) | Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                    _ => {}
+                },
+                probed = &mut probe, if probe_live => {
+                    probe_live = false;
+                    info = probed.ok();
+                    // The totals, learned once. The poll re-reads only what
+                    // moves, so without this the title has a numerator and no
+                    // denominator to put it over.
+                    if let Some(info) = &info {
+                        pane.set_totals(info);
+                        self.live = Some((id, pane.usage()));
+                    }
+                }
+                // Never resolves — it is here to be polled, and it is dropped
+                // with the flow.
+                () = &mut usage_poll => {}
+                Some(usage) = usage_rx.recv() => {
+                    pane.set_usage(usage);
+                    self.live = Some((id, pane.usage()));
+                }
+                _ = tokio::time::sleep(KEY_POLL_INTERVAL) => {
+                    let now = Instant::now();
+                    let mut out = Vec::new();
+                    let mut detach = collect_pane_bytes(pane.tick(now), &mut out);
+                    detach |= poll_pane_keys(&mut pane, now, &mut out);
+
+                    // Compared per tick rather than driven by SIGWINCH: what
+                    // matters is the *derived* rect, and the footer's height
+                    // is counted in wrapped rows, so a width change can move
+                    // the pane's height by more than the frame's changed. A
+                    // signal would still have to re-derive it.
+                    if let Some(current) = pane_viewport(terminal, pane.alt_screen(), strings)
+                        && current != size
+                    {
+                        size = current;
+                        pane.resize(current.0, current.1);
+                        let _ = channel.window_change(current.0 as u32, current.1 as u32, 0, 0).await;
+                    }
+
+                    if pane.take_dirty() {
+                        draw_pane(terminal, &mut pane, strings);
+                        last_draw = now;
+                    }
+                    if detach {
+                        break;
+                    }
+                    // One write per tick, which also makes a paste one write.
+                    if !out.is_empty() && let Err(e) = channel.data(&out[..]).await {
+                        error = Some(e);
+                        break;
+                    }
+                }
+            }
+        }
+
+        self.finish(id, &mut record, info);
+        // The session is over, so there is nothing live left to show — the
+        // detail card goes back to the snapshot `finish` just wrote.
+        self.live = None;
+
+        if let AppState::Unlocked(u) = &mut self.state {
+            u.status = error.map(|e| StatusMessage::new(format!("{}{e}", strings.disconnected_prefix)));
         }
 
         Ok(())
@@ -2914,6 +3251,83 @@ enum Cancel {
 /// `App::await_redrawing` runs on it too, for the same reason: a handshake
 /// produces no events either.
 const KEY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// The most often the pane repaints while the remote is talking. Roughly
+/// 60 fps: fast enough that typing feels immediate, slow enough that a large
+/// `cat` is not one full redraw per SSH packet.
+const PANE_REDRAW_INTERVAL: Duration = Duration::from_millis(16);
+
+/// How often the live figures are re-read while a session is open.
+///
+/// A few seconds rather than a second: each poll is a fresh exec channel and a
+/// round trip, and used memory and used disk are not quantities anyone watches
+/// frame by frame. Long enough that a link with real latency is not permanently
+/// carrying a probe, short enough that the numbers visibly move.
+const USAGE_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Which flow a connect key means, given the stored preference.
+///
+/// `Enter` is the preference and `t` is `other()`, so the two keys swap
+/// meaning together and neither screen has to know which is which.
+fn connect_step(mode: ConnectMode, id: Uuid) -> NextStep {
+    match mode {
+        ConnectMode::FullScreen => NextStep::Connect(id),
+        ConnectMode::Pane => NextStep::ConnectPane(id),
+    }
+}
+
+/// The PTY size for the frame as it is right now.
+///
+/// Takes the terminal rather than a `Rect` because the pane's own footer is
+/// part of the arithmetic — it is what decides how many rows the frame's body
+/// has — and the footer changes with the alternate screen.
+fn pane_viewport(terminal: &TerminalGuard, alt_screen: bool, strings: &'static Strings) -> Option<(u16, u16)> {
+    let size = terminal.terminal.size().ok()?;
+    let area = Rect { x: 0, y: 0, width: size.width, height: size.height };
+    session_pane::viewport(area, &session_pane::footer(false, alt_screen, strings))
+}
+
+fn draw_pane(terminal: &mut TerminalGuard, pane: &mut SessionPaneState, strings: &'static Strings) {
+    let _ = terminal.terminal.draw(|frame| {
+        let area = frame.area();
+        chrome::paint_background(frame, area);
+        let footer = session_pane::footer(pane.prefix_armed(), pane.alt_screen(), strings);
+        let body = chrome::render(frame, area, strings.session_pane_title_prefix, footer, strings);
+        pane.render(frame, body, strings);
+    });
+}
+
+/// Folds one outcome into the write buffer. Returns whether it was a detach.
+fn collect_pane_bytes(outcome: PaneOutcome, out: &mut Vec<u8>) -> bool {
+    match outcome {
+        PaneOutcome::Send(bytes) => {
+            out.extend_from_slice(&bytes);
+            false
+        }
+        PaneOutcome::Detach => true,
+        PaneOutcome::Nothing => false,
+    }
+}
+
+/// Drains the keyboard into `out`.
+///
+/// Everything goes to the remote except what the pane claims for itself —
+/// there is no cancel key here, unlike `poll_run_keys`, because `Ctrl+C` is
+/// the remote's. `Event::Resize` is discarded: the size is derived from the
+/// frame on the same tick.
+fn poll_pane_keys(pane: &mut SessionPaneState, now: Instant, out: &mut Vec<u8>) -> bool {
+    let mut detach = false;
+    while event::poll(Duration::ZERO).unwrap_or(false) {
+        match event::read() {
+            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                detach |= collect_pane_bytes(pane.handle_key(key, now), out);
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    detach
+}
 
 fn apply_run_event(event: OwnedRunEvent, run_state: &mut ScriptRunState, strings: &'static Strings) {
     match event {

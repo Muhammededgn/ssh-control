@@ -355,7 +355,7 @@ pub fn render_panel_with(
         return;
     }
 
-    let block = style_block(modal(title));
+    let block = style_block(modal(""));
     // Derived from the frame rather than trusted from the caller: the same
     // screen runs full-width at first run and 24 columns narrower inside the
     // Settings tab that embeds it.
@@ -423,7 +423,7 @@ pub fn wrapped_height(lines: &[Line], width: u16) -> usize {
 
 /// A byte count at whichever unit keeps it readable — "4.0 KiB", "1.2 GiB".
 ///
-/// Distinct from `main_menu`'s fixed-GiB helper on purpose: that one compares
+/// Distinct from `used_of_total`'s fixed GiB on purpose: that one compares
 /// two figures of the same magnitude (RAM used against RAM total), where a
 /// shifting unit would make the pair harder to read. Here the numbers range
 /// from a few bytes to several gigabytes and a fixed unit would print
@@ -438,6 +438,18 @@ pub fn format_size(bytes: u64) -> String {
     }
     // Whole bytes never need a decimal point; anything scaled does.
     if unit == 0 { format!("{bytes} B") } else { format!("{value:.1} {}", UNITS[unit]) }
+}
+
+/// "RAM: 4.1/16.0 GiB" — the one shape a used-against-total pair is written
+/// in, so the server list's detail card and the session pane's title cannot
+/// disagree about how a machine's memory reads.
+///
+/// Fixed GiB rather than `format_size`'s scaling unit: the two numbers are of
+/// the same magnitude by construction, and a pair printed in different units
+/// is a pair nobody can compare at a glance.
+pub fn used_of_total(label: &str, used: u64, total: u64) -> String {
+    const GIB: f64 = 1_073_741_824.0;
+    format!("{label}: {:.1}/{:.1} GiB", used as f64 / GIB, total as f64 / GIB)
 }
 
 /// Renders `data` as a QR code in half-block characters, for scanning an

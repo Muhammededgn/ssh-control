@@ -41,6 +41,42 @@ pub struct Config {
     /// the field, so no `schema_version` bump.
     #[serde(default)]
     pub server_sort: ServerSort,
+    /// Which of the two connect modes `Enter` uses on the server list; `t` is
+    /// always the other one. Inside the encrypted config for the same reason
+    /// as `auto_lock_minutes` and `server_sort`. Additive with
+    /// `serde(default)`: an older vault reads back as `FullScreen` — the
+    /// behaviour it already had — and an older binary ignores the field, so no
+    /// `schema_version` bump.
+    #[serde(default)]
+    pub connect_mode: ConnectMode,
+}
+
+/// How a connect presents itself.
+///
+/// Two genuinely different things, which is why neither replaces the other.
+/// `FullScreen` hands the terminal over and copies bytes through it, so
+/// interactive programs and `Ctrl+C` behave exactly as they would under plain
+/// `ssh` — the mode for anything heavy. `Pane` draws the session inside the
+/// app's frame through a VT parser, which can never make that promise but
+/// keeps the server list and its detail pane on screen — the mode for
+/// restarting a service or tailing a log.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConnectMode {
+    #[default]
+    FullScreen,
+    Pane,
+}
+
+impl ConnectMode {
+    /// `other`, not `next`: there are two of them, and a user pressing the
+    /// second key is asking for the one they did not choose — not for the next
+    /// entry in a cycle that might grow.
+    pub fn other(self) -> Self {
+        match self {
+            ConnectMode::FullScreen => ConnectMode::Pane,
+            ConnectMode::Pane => ConnectMode::FullScreen,
+        }
+    }
 }
 
 /// Ordering for the server list, cycled from the list itself and persisted.
@@ -96,6 +132,7 @@ impl Default for Config {
             totp: None,
             auto_lock_minutes: DEFAULT_AUTO_LOCK_MINUTES,
             server_sort: ServerSort::Name,
+            connect_mode: ConnectMode::FullScreen,
         }
     }
 }
@@ -402,6 +439,7 @@ mod tests {
         assert_eq!(config.servers[0].jump_host, None, "a bastion is additive too; an existing vault connects direct");
         assert!(config.servers[0].forwards.is_empty(), "and so are port forwards");
         assert_eq!(config.server_sort, ServerSort::Name, "an existing vault sorts by name");
+        assert_eq!(config.connect_mode, ConnectMode::FullScreen, "and connects the way it always did");
         let AuthMethod::Password { password } = &config.servers[0].auth else {
             panic!("expected password auth");
         };
