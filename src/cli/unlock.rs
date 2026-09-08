@@ -149,6 +149,15 @@ pub fn unlock(app: &mut App, prompt: &mut dyn Prompt) -> Result<()> {
                 if let AppState::Locked(unlock) = &app.state
                     && let Some(error) = &unlock.error
                 {
+                    // A vault another instance holds is not a mistyped
+                    // password: `ConfigStore::claim` runs in front of the
+                    // check, so no retry can ever succeed. Counting it as a try
+                    // burnt all three prompts on a message that was already
+                    // final — and a pipe that ran dry then exited as
+                    // "cancelled", naming the wrong cause (#58).
+                    if !unlock.retryable {
+                        return Err(AppError::Cli(error.clone()));
+                    }
                     tries += 1;
                     if tries >= MAX_TRIES {
                         return Err(AppError::Cli(error.clone()));
@@ -167,6 +176,11 @@ pub fn unlock(app: &mut App, prompt: &mut dyn Prompt) -> Result<()> {
                 if let AppState::LockedTotpDaily(totp) = &app.state
                     && let Some(error) = &totp.error
                 {
+                    // Same as the password arm: the code was right and has
+                    // already been spent, so retyping it cannot help.
+                    if !totp.retryable {
+                        return Err(AppError::Cli(error.clone()));
+                    }
                     tries += 1;
                     if tries >= MAX_TRIES {
                         return Err(AppError::Cli(error.clone()));
@@ -249,6 +263,29 @@ mod tests {
         assert!(unlock(&mut app, &mut prompt).is_err());
         assert_eq!(prompt.asked.len(), MAX_TRIES, "it must stop rather than loop forever");
         assert!(!matches!(app.state, AppState::Unlocked(_)));
+    }
+
+    /// `ConfigStore::claim` runs *before* the password is checked, so a vault
+    /// another instance holds refuses a password that was never wrong. Counting
+    /// that as a try burnt all three prompts on the same final message, and a
+    /// pipe that then ran dry exited as "cancelled" — naming the wrong cause to
+    /// the cron job that is this path's whole reason to exist (#58).
+    #[test]
+    fn a_vault_another_instance_holds_is_refused_once_and_not_re_asked() {
+        let (dir, _unused) = password_vault(|_| {});
+        let path = dir.path().join("config.enc");
+
+        // The lock lives on the `ConfigStore`, so holding one open is what a
+        // second window is — `flock` conflicts between two descriptors within
+        // one process just as it does across two.
+        let holder = ConfigStore::new(path.clone());
+        let _held = holder.load(PASSWORD).expect("the holder opens it");
+
+        let mut app = App::new(ConfigStore::new(path));
+        let mut prompt = Scripted { answers: vec![Some(PASSWORD), Some(PASSWORD), Some(PASSWORD)], asked: Vec::new() };
+
+        assert!(unlock(&mut app, &mut prompt).is_err());
+        assert_eq!(prompt.asked, vec!["Password"], "no retry can ever succeed, so there must be no second prompt");
     }
 
     #[test]

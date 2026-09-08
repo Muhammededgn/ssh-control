@@ -788,7 +788,12 @@ impl App {
                     // The code was right and has already been spent; the vault
                     // just belongs to another instance. Say that plainly rather
                     // than dressing it up as a save failure.
-                    Err(AppError::VaultInUse) => self.set_totp_daily_error(strings.err_vault_in_use.to_string()),
+                    Err(AppError::VaultInUse) => {
+                        self.set_totp_daily_error(strings.err_vault_in_use.to_string());
+                        if let AppState::LockedTotpDaily(totp_unlock) = &mut self.state {
+                            totp_unlock.retryable = false;
+                        }
+                    }
                     // Nor is this one a save failure, and no retyped code fixes
                     // it: the vault needs the newer binary, full stop.
                     Err(AppError::SchemaTooNew { .. }) => self.state = self.schema_too_new_state(),
@@ -853,8 +858,14 @@ impl App {
             Err(AppError::SchemaTooNew { .. }) => self.state = self.schema_too_new_state(),
             Err(e) => {
                 let message = self.error_text(&e);
+                // A contended vault is not a wrong password: `claim` runs in
+                // front of the check, so no retype can ever succeed. The screen
+                // still shows it as an error the user can act on — close the
+                // other window — but the CLI must not spend a try on it (#58).
+                let retryable = !matches!(e, AppError::VaultInUse);
                 if let AppState::Locked(unlock) = &mut self.state {
                     unlock.error = Some(message);
+                    unlock.retryable = retryable;
                 }
             }
         }
