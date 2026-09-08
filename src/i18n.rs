@@ -331,6 +331,7 @@ pub struct Strings {
     pub session_pane_title_prefix: &'static str,
     pub session_pane_hint: &'static str,
     pub session_pane_hint_alt_screen: &'static str,
+    pub session_pane_hint_script: &'static str,
     pub session_pane_prefix_hint: &'static str,
     pub session_pane_too_small: &'static str,
 
@@ -596,6 +597,7 @@ pub static EN: Strings = Strings {
     session_pane_title_prefix: "Session: ",
     session_pane_hint: "Ctrl+B d: detach  Ctrl+B Ctrl+B: send Ctrl+B  Esc Esc: quick detach  every other key goes to the remote shell",
     session_pane_hint_alt_screen: "Ctrl+B d: detach  Ctrl+B Ctrl+B: send Ctrl+B  every other key goes to the remote shell",
+    session_pane_hint_script: "Ctrl+B d: detach  the on-connect script is running — every other key waits for the shell",
     session_pane_prefix_hint: "Ctrl+B —  d: detach  Ctrl+B: send it literally  Esc: cancel",
     session_pane_too_small: "This window is too small to run a session in a pane",
 
@@ -859,6 +861,7 @@ pub static TR: Strings = Strings {
     session_pane_title_prefix: "Oturum: ",
     session_pane_hint: "Ctrl+B d: ayrıl  Ctrl+B Ctrl+B: Ctrl+B gönder  Esc Esc: hızlı ayrıl  diğer her tuş uzak kabuğa gider",
     session_pane_hint_alt_screen: "Ctrl+B d: ayrıl  Ctrl+B Ctrl+B: Ctrl+B gönder  diğer her tuş uzak kabuğa gider",
+    session_pane_hint_script: "Ctrl+B d: ayrıl  bağlantı betiği çalışıyor — diğer her tuş kabuğu bekler",
     session_pane_prefix_hint: "Ctrl+B —  d: ayrıl  Ctrl+B: olduğu gibi gönder  Esc: vazgeç",
     session_pane_too_small: "Bu pencere bir oturumu bölmede çalıştırmak için fazla küçük",
 
@@ -1122,6 +1125,7 @@ pub static ES: Strings = Strings {
     session_pane_title_prefix: "Sesión: ",
     session_pane_hint: "Ctrl+B d: separar  Ctrl+B Ctrl+B: enviar Ctrl+B  Esc Esc: separar rápido  las demás teclas van al shell remoto",
     session_pane_hint_alt_screen: "Ctrl+B d: separar  Ctrl+B Ctrl+B: enviar Ctrl+B  las demás teclas van al shell remoto",
+    session_pane_hint_script: "Ctrl+B d: separar  el script de conexión está en marcha — las demás teclas esperan al shell",
     session_pane_prefix_hint: "Ctrl+B —  d: separar  Ctrl+B: enviarlo literalmente  Esc: cancelar",
     session_pane_too_small: "Esta ventana es demasiado pequeña para una sesión en panel",
 
@@ -1385,6 +1389,7 @@ pub static RU: Strings = Strings {
     session_pane_title_prefix: "Сеанс: ",
     session_pane_hint: "Ctrl+B d: отсоединиться  Ctrl+B Ctrl+B: отправить Ctrl+B  Esc Esc: быстрое отсоединение  все остальные клавиши идут в удалённую оболочку",
     session_pane_hint_alt_screen: "Ctrl+B d: отсоединиться  Ctrl+B Ctrl+B: отправить Ctrl+B  все остальные клавиши идут в удалённую оболочку",
+    session_pane_hint_script: "Ctrl+B d: отсоединиться  выполняется скрипт подключения — остальные клавиши ждут оболочку",
     session_pane_prefix_hint: "Ctrl+B —  d: отсоединиться  Ctrl+B: отправить как есть  Esc: отмена",
     session_pane_too_small: "Это окно слишком мало для сеанса в панели",
     forwards_title: " Проброс портов ",

@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Rect;
 use russh::ChannelMsg;
+use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -2311,6 +2312,11 @@ impl App {
         for line in session::forward_report_lines(&forwards, strings) {
             pane.feed_line(&line);
         }
+        // `Ctrl+B d` during the script phase, which tears the session down
+        // rather than dropping into the shell — a `run_on_connect` step is
+        // unattended by definition and is the likeliest thing in the app to
+        // hang, so it must be abandonable (#61).
+        let mut detached = false;
         for script in &context.on_connect {
             let mut partial = String::new();
             // The lines travel through a channel for the reason
@@ -2325,6 +2331,7 @@ impl App {
                         let _ = tx.send(line);
                     }
                 }));
+                let mut tick = key_tick();
                 loop {
                     tokio::select! {
                         biased;
@@ -2337,7 +2344,24 @@ impl App {
                                 pane.feed_line(&more);
                             }
                             pane.take_dirty();
-                            draw_pane(terminal, &mut pane, strings);
+                            draw_pane_running_script(terminal, &mut pane, strings);
+                        }
+                        // The same long-lived tick the shell's loop polls on,
+                        // and the same key handling — but the bytes are
+                        // dropped: there is no shell to send them to yet, and
+                        // the footer says so. Only the detach is acted on.
+                        _ = tick.tick() => {
+                            let now = Instant::now();
+                            let mut discarded = Vec::new();
+                            let mut detach = collect_pane_bytes(pane.tick(now), &mut discarded);
+                            detach |= poll_pane_keys(&mut pane, now, &mut discarded);
+                            if pane.take_dirty() {
+                                draw_pane_running_script(terminal, &mut pane, strings);
+                            }
+                            if detach {
+                                detached = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -2348,7 +2372,20 @@ impl App {
                 pane.feed_line(&line);
             }
             pane.take_dirty();
-            draw_pane(terminal, &mut pane, strings);
+            draw_pane_running_script(terminal, &mut pane, strings);
+            if detached {
+                break;
+            }
+        }
+
+        if detached {
+            // The shell was never requested and the probe never started, so
+            // there is no sysinfo to fold in — but the handshake still
+            // happened, and `finish` is what stamps it. Dropping out of here
+            // takes `forwards`, the channel and the session with it.
+            self.finish(id, &mut record, None);
+            self.live = None;
+            return Ok(());
         }
 
         channel.request_shell(false).await?;
@@ -2384,6 +2421,7 @@ impl App {
         let mut last_draw = Instant::now() - PANE_REDRAW_INTERVAL;
         let mut size = (cols, rows);
         let mut error = None;
+        let mut tick = key_tick();
 
         draw_pane(terminal, &mut pane, strings);
         loop {
@@ -2426,7 +2464,7 @@ impl App {
                     pane.set_usage(usage);
                     self.live = Some((id, pane.usage()));
                 }
-                _ = tokio::time::sleep(KEY_POLL_INTERVAL) => {
+                _ = tick.tick() => {
                     let now = Instant::now();
                     let mut out = Vec::new();
                     let mut detach = collect_pane_bytes(pane.tick(now), &mut out);
@@ -2580,6 +2618,7 @@ impl App {
                         let mut run = std::pin::pin!(script_runner::run_script(&connected.handle, &script, move |event| {
                             let _ = tx.send(event.into_owned());
                         }));
+                        let mut tick = key_tick();
                         loop {
                             tokio::select! {
                                 // A finished run wins over a tick that came due
@@ -2602,7 +2641,7 @@ impl App {
                                 // `transfer_flow` already uses, needs no extra
                                 // dependency, and 50 ms is well under what a
                                 // keypress feels like.
-                                _ = tokio::time::sleep(KEY_POLL_INTERVAL) => {
+                                _ = tick.tick() => {
                                     if poll_run_keys(&mut run_state) {
                                         cancelled = true;
                                         break;
@@ -3250,7 +3289,28 @@ enum Cancel {
 ///
 /// `App::await_redrawing` runs on it too, for the same reason: a handshake
 /// produces no events either.
+///
+/// **The loops that poll on it hold the timer outside the `select!`**
+/// (`key_tick`), and that is not a tidiness choice. A `sleep` constructed
+/// inside the `select!` is a *new* future on every iteration, so a remote that
+/// keeps talking turns the loop over faster than the interval and the timer is
+/// restarted from zero before it can ever elapse — the tick then does not fire
+/// late, it does not fire at all, and detach and cancel are unreachable for as
+/// long as the output lasts (#57). `await_redrawing` is the one exception that
+/// may build its own: its other arm is a single future that resolves once, so
+/// it cannot hold the loop open.
 const KEY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// The long-lived timer the key arms poll on — see `KEY_POLL_INTERVAL`.
+///
+/// `MissedTickBehavior::Delay`: a burst of output that swallowed several
+/// periods should produce one key poll when it ends, not a backlog of them
+/// fired back to back.
+fn key_tick() -> tokio::time::Interval {
+    let mut tick = tokio::time::interval(KEY_POLL_INTERVAL);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    tick
+}
 
 /// The most often the pane repaints while the remote is talking. Roughly
 /// 60 fps: fast enough that typing feels immediate, slow enough that a large
@@ -3285,6 +3345,19 @@ fn pane_viewport(terminal: &TerminalGuard, alt_screen: bool, strings: &'static S
     let size = terminal.terminal.size().ok()?;
     let area = Rect { x: 0, y: 0, width: size.width, height: size.height };
     session_pane::viewport(area, &session_pane::footer(false, alt_screen, strings))
+}
+
+/// `draw_pane` for the phase before the shell exists — see
+/// `session_pane::script_footer` for why the footer is padded rather than
+/// simply shorter.
+fn draw_pane_running_script(terminal: &mut TerminalGuard, pane: &mut SessionPaneState, strings: &'static Strings) {
+    let _ = terminal.terminal.draw(|frame| {
+        let area = frame.area();
+        chrome::paint_background(frame, area);
+        let footer = session_pane::script_footer(area.width, strings);
+        let body = chrome::render(frame, area, strings.session_pane_title_prefix, footer, strings);
+        pane.render(frame, body, strings);
+    });
 }
 
 fn draw_pane(terminal: &mut TerminalGuard, pane: &mut SessionPaneState, strings: &'static Strings) {
