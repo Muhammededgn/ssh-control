@@ -41,6 +41,15 @@ pub struct UnlockState {
     confirm: Zeroizing<String>,
     focus: Focus,
     pub error: Option<String>,
+    /// Whether another password could ever help.
+    ///
+    /// `false` only when the vault is held by another instance:
+    /// `ConfigStore::claim` runs *before* the password is checked, deliberately
+    /// (`config::lock`), so that error is about the lock and not about what was
+    /// typed. The screen draws both the same way and the user can close the
+    /// other window and retype on the spot — but the CLI must not count it as a
+    /// try and re-prompt a pipe that has no more passwords in it (#58).
+    pub retryable: bool,
     /// Non-failure notice shown in place of the hint — currently only "the
     /// vault auto-locked", which is not an error and must not be red.
     pub info: Option<String>,
@@ -63,12 +72,14 @@ impl UnlockState {
             confirm: Zeroizing::new(String::new()),
             focus: Focus::Password,
             error: None,
+            retryable: true,
             info: None,
         }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, strings: &Strings) -> UnlockOutcome {
         self.error = None;
+        self.retryable = true;
         self.info = None;
         match key.code {
             KeyCode::Esc => return UnlockOutcome::Quit,
