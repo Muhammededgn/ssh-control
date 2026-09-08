@@ -3462,6 +3462,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hkdf 0.13.0",
  "keyring",
+ "libc",
  "qrcode",
  "ratatui",
  "russh",
