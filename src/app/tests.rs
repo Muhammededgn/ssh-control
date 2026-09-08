@@ -66,6 +66,17 @@ fn unlocked(app: &App) -> &UnlockedState {
     }
 }
 
+/// The server the list is actually pointing at — resolved through
+/// `selected_entry` rather than by indexing `servers`, which is the whole point
+/// of the screen's visible-index mapping.
+fn selected_id(app: &App) -> Option<Uuid> {
+    let u = unlocked(app);
+    match &u.screen {
+        Screen::MainMenu(menu) => menu.selected_entry(&u.config.servers, u.config.server_sort).map(|s| s.id),
+        _ => panic!("expected the server list"),
+    }
+}
+
 fn screen_name(app: &App) -> &'static str {
     match &app.state {
         AppState::Setup(_) => "Setup",
@@ -818,4 +829,71 @@ fn the_steps_that_need_a_terminal_are_handed_back() {
     assert!(matches!(app.apply_local_step(NextStep::GoFiles(id)), Ok(Some(NextStep::GoFiles(_)))));
     assert!(matches!(app.apply_local_step(NextStep::FilesRefresh), Ok(Some(NextStep::FilesRefresh))));
     assert!(app.connecting.is_none(), "nothing local ever sets the connect indicator");
+}
+
+/// Leaving a subscreen used to build `MainMenuState::new()` and clamp it,
+/// which is `selected: 0` plus a range check — so `p` then `Esc` from row 4
+/// came back on row 1, and the next `Enter` connected to the wrong server
+/// (#62). The anchor is the entry, never the index, for the reason
+/// `cycle_server_sort` re-anchors on one: a filter, a delete or a re-sort
+/// moves rows out from under an index.
+#[test]
+fn returning_from_a_subscreen_lands_on_the_server_it_was_opened_from() {
+    let (_dir, mut app) = password_vault(|config| config.servers = vec![entry("alpha"), entry("beta"), entry("gamma")]);
+    type_password(&mut app, PASSWORD);
+
+    let beta = unlocked(&app).config.servers[1].id;
+    press(&mut app, KeyEvent::from(KeyCode::Down));
+    assert_eq!(selected_id(&app), Some(beta), "the fixture starts on the wrong row");
+
+    for (open, back) in [
+        (NextStep::GoForwards(beta), NextStep::ForwardsBack),
+        (NextStep::GoScripts(beta), NextStep::ScriptsBack),
+        (NextStep::GoEdit(beta), NextStep::FormCancel),
+        (NextStep::GoDelete(beta), NextStep::ConfirmNo),
+    ] {
+        app.apply_local_step(open).expect("open");
+        app.apply_local_step(back).expect("back");
+        assert_eq!(selected_id(&app), Some(beta), "the selection moved");
+    }
+}
+
+/// The entry the confirm dialog asked about is gone by the time the list comes
+/// back, so the anchor resolves to nothing — a fallback, not a panic.
+#[test]
+fn returning_from_a_delete_falls_back_to_the_first_row() {
+    let (_dir, mut app) = password_vault(|config| config.servers = vec![entry("alpha"), entry("beta")]);
+    type_password(&mut app, PASSWORD);
+
+    let beta = unlocked(&app).config.servers[1].id;
+    press(&mut app, KeyEvent::from(KeyCode::Down));
+    app.apply_local_step(NextStep::GoDelete(beta)).expect("confirm");
+    app.apply_local_step(NextStep::ConfirmYes).expect("delete");
+
+    assert_eq!(unlocked(&app).config.servers.len(), 1);
+    assert_eq!(selected_id(&app), unlocked(&app).config.servers.first().map(|s| s.id));
+}
+
+/// A saved add lands on the entry it just created rather than on row 1 — the
+/// same anchoring, applied to the one screen that has an id to carry rather
+/// than one to read back off the screen it is leaving.
+#[test]
+fn saving_a_new_server_selects_it() {
+    let (_dir, mut app) = password_vault(|config| config.servers = vec![entry("alpha"), entry("zulu")]);
+    type_password(&mut app, PASSWORD);
+
+    app.apply_local_step(NextStep::GoAdd).expect("add");
+    app.apply_local_step(NextStep::FormSubmit(ServerFormData {
+        name: "mike".into(),
+        host: "mike.example.com".into(),
+        port: 22,
+        username: "root".into(),
+        tags: Vec::new(),
+        jump_host: None,
+        auth: AuthMethod::password("hunter2"),
+    }))
+    .expect("save");
+
+    let mike = unlocked(&app).config.servers.iter().find(|s| s.name == "mike").map(|s| s.id);
+    assert_eq!(selected_id(&app), mike);
 }
