@@ -105,6 +105,10 @@ fn run_tui(path: PathBuf) -> Result<()> {
 
     tokio_main(async move {
         let mut terminal = TerminalGuard::init()?;
+        // Inside the runtime, and before the first frame: a `SIGTERM` between
+        // `init` and here would still leave the terminal on the alternate
+        // screen, which is the whole failure (#63).
+        terminal.restore_on_fatal_signal()?;
         let mut app = App::new(ConfigStore::new(path));
         let result = app.run(&mut terminal).await;
         drop(terminal);

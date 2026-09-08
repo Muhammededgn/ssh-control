@@ -337,6 +337,30 @@ pub fn footer(prefix_armed: bool, alt_screen: bool, strings: &Strings) -> Vec<Li
     vec![Line::from(Span::styled(hint, Style::default().fg(theme::hint())))]
 }
 
+/// The footer for the phase before the shell exists: a `run_on_connect` script
+/// is producing the lines the pane is showing.
+///
+/// **Padded to the height the shell's footer will take**, and that is the whole
+/// reason it takes a width. The body rect is derived from the footer, so a
+/// shorter hint here would make the pane one row taller than the shell is about
+/// to inherit — and narrowing a `vt100` grid cuts the tail off every line
+/// already on it (#55), which here is exactly the script output somebody was
+/// waiting to read.
+///
+/// It names only `Ctrl+B d`, because that is the only binding live in this
+/// phase: there is no shell to send anything else to.
+pub fn script_footer(width: u16, strings: &Strings) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(strings.session_pane_hint_script, Style::default().fg(theme::hint())))];
+    // The same width `chrome::footer_height` measures against — the block's
+    // two border columns are not text.
+    let inner = width.saturating_sub(2);
+    let target = widgets::wrapped_height(&footer(false, false, strings), inner);
+    while widgets::wrapped_height(&lines, inner) < target {
+        lines.push(Line::from(""));
+    }
+    lines
+}
+
 /// The size the remote PTY should be, for a frame of `area`.
 ///
 /// `None` when the frame leaves too little to run a shell in — the flow says
@@ -469,6 +493,20 @@ mod tests {
         pane.handle_key(key(KeyCode::Esc), now);
         let late = now + Duration::from_millis(400);
         assert_eq!(sent(pane.handle_key(key(KeyCode::Esc), late)), Some(vec![0x1b, 0x1b]));
+    }
+
+    /// The pane the script writes into has to be the size the shell inherits:
+    /// `vt100` truncates on a narrowing resize and never brings the text back
+    /// (#55), so a shorter script-phase footer would eat the script's own
+    /// output the moment the shell started.
+    #[test]
+    fn the_script_footer_sizes_the_pane_exactly_as_the_shell_footer_does() {
+        for width in [40, 60, 80, 100, 132] {
+            let area = Rect { x: 0, y: 0, width, height: 30 };
+            let shell = viewport(area, &footer(false, false, &EN));
+            let script = viewport(area, &script_footer(width, &EN));
+            assert_eq!(shell, script, "width {width}");
+        }
     }
 
     /// Mashing `Esc` is the ordinary idiom in vim, less and htop, and a detach

@@ -14,6 +14,10 @@ use crate::tui::theme;
 pub struct TotpUnlockState {
     code: String,
     pub error: Option<String>,
+    /// Whether another code could ever help — see `UnlockState::retryable`.
+    /// A contended vault is not a mistyped code, and here the code that was
+    /// accepted has already been spent.
+    pub retryable: bool,
     /// Non-failure notice shown in place of the hint — currently only "the
     /// vault auto-locked", which is not an error and must not be red.
     pub info: Option<String>,
@@ -33,11 +37,12 @@ impl Default for TotpUnlockState {
 
 impl TotpUnlockState {
     pub fn new() -> Self {
-        Self { code: String::new(), error: None, info: None }
+        Self { code: String::new(), error: None, retryable: true, info: None }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> TotpUnlockOutcome {
         self.error = None;
+        self.retryable = true;
         self.info = None;
         match key.code {
             KeyCode::Esc => return TotpUnlockOutcome::Quit,

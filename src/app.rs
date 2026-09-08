@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Rect;
 use russh::ChannelMsg;
+use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -787,7 +788,12 @@ impl App {
                     // The code was right and has already been spent; the vault
                     // just belongs to another instance. Say that plainly rather
                     // than dressing it up as a save failure.
-                    Err(AppError::VaultInUse) => self.set_totp_daily_error(strings.err_vault_in_use.to_string()),
+                    Err(AppError::VaultInUse) => {
+                        self.set_totp_daily_error(strings.err_vault_in_use.to_string());
+                        if let AppState::LockedTotpDaily(totp_unlock) = &mut self.state {
+                            totp_unlock.retryable = false;
+                        }
+                    }
                     // Nor is this one a save failure, and no retyped code fixes
                     // it: the vault needs the newer binary, full stop.
                     Err(AppError::SchemaTooNew { .. }) => self.state = self.schema_too_new_state(),
@@ -852,8 +858,14 @@ impl App {
             Err(AppError::SchemaTooNew { .. }) => self.state = self.schema_too_new_state(),
             Err(e) => {
                 let message = self.error_text(&e);
+                // A contended vault is not a wrong password: `claim` runs in
+                // front of the check, so no retype can ever succeed. The screen
+                // still shows it as an error the user can act on — close the
+                // other window — but the CLI must not spend a try on it (#58).
+                let retryable = !matches!(e, AppError::VaultInUse);
                 if let AppState::Locked(unlock) = &mut self.state {
                     unlock.error = Some(message);
+                    unlock.retryable = retryable;
                 }
             }
         }
@@ -1269,21 +1281,15 @@ impl App {
                 });
             }
             NextStep::FormCancel => self.with_unlocked(|u| {
-                let mut menu = MainMenuState::new();
-                menu.clamp_selection(&u.config.servers, u.config.server_sort);
-                u.screen = Screen::MainMenu(menu);
+                Self::back_to_menu(u);
             }),
             NextStep::FormSubmit(data) => self.submit_form(data)?,
             NextStep::ConfirmYes => self.confirm_delete()?,
             NextStep::ConfirmNo => self.with_unlocked(|u| {
-                let mut menu = MainMenuState::new();
-                menu.clamp_selection(&u.config.servers, u.config.server_sort);
-                u.screen = Screen::MainMenu(menu);
+                Self::back_to_menu(u);
             }),
             NextStep::SettingsClose => self.with_unlocked(|u| {
-                let mut menu = MainMenuState::new();
-                menu.clamp_selection(&u.config.servers, u.config.server_sort);
-                u.screen = Screen::MainMenu(menu);
+                Self::back_to_menu(u);
             }),
             NextStep::SettingsLangSelected(lang) => {
                 self.lang = lang;
@@ -1316,9 +1322,7 @@ impl App {
                 }
             }),
             NextStep::ScriptsBack => self.with_unlocked(|u| {
-                let mut menu = MainMenuState::new();
-                menu.clamp_selection(&u.config.servers, u.config.server_sort);
-                u.screen = Screen::MainMenu(menu);
+                Self::back_to_menu(u);
             }),
             NextStep::GoScriptAdd => self.with_unlocked(|u| {
                 let ctx = match &u.screen {
@@ -1411,9 +1415,7 @@ impl App {
                 }
             }),
             NextStep::ForwardsBack => self.with_unlocked(|u| {
-                let mut menu = MainMenuState::new();
-                menu.clamp_selection(&u.config.servers, u.config.server_sort);
-                u.screen = Screen::MainMenu(menu);
+                Self::back_to_menu(u);
             }),
             NextStep::GoForwardAdd => self.with_unlocked(|u| {
                 if let Screen::Forwards(list) = &u.screen {
@@ -1458,9 +1460,7 @@ impl App {
             NextStep::ConfirmDeleteForwardNo => self.back_to_forwards(),
             NextStep::GoSshImport => self.open_ssh_import(),
             NextStep::SshImportCancel => self.with_unlocked(|u| {
-                let mut menu = MainMenuState::new();
-                menu.clamp_selection(&u.config.servers, u.config.server_sort);
-                u.screen = Screen::MainMenu(menu);
+                Self::back_to_menu(u);
             }),
             NextStep::SshImportConfirm(hosts) => self.import_ssh_hosts(hosts),
             NextStep::ScriptTargetsCancel => self.with_unlocked(|u| {
@@ -1484,9 +1484,7 @@ impl App {
                 self.remember_browser_dirs();
                 self.drop_remote();
                 self.with_unlocked(|u| {
-                    let mut menu = MainMenuState::new();
-                    menu.clamp_selection(&u.config.servers, u.config.server_sort);
-                    u.screen = Screen::MainMenu(menu);
+                    Self::back_to_menu(u);
                 });
             }
             NextStep::ScriptRunSave(path) => self.save_script_log(&path),
@@ -1515,6 +1513,47 @@ impl App {
         // The readings belong to the connection, not to the entry. Keeping
         // them after it closed would be showing a snapshot labelled "now".
         self.live = None;
+    }
+
+    /// Back to the server list, on the server the subscreen was opened from.
+    ///
+    /// The anchor is read off the screen being left — every subscreen that
+    /// names a server carries its `Uuid` — and goes through
+    /// `MainMenuState::anchored`, the same re-anchoring `cycle_server_sort`
+    /// performs. Every back handler used to build `MainMenuState::new()` and
+    /// clamp it, which is `selected: 0` plus a range check: the selection came
+    /// back on row 1 and the next `Enter` connected to the wrong server (#62).
+    ///
+    /// One helper rather than a copy per site, because ten copies of the same
+    /// three lines are ten chances to drift apart — which is how they got here.
+    ///
+    /// The filter is deliberately not restored: the subscreens do not carry
+    /// one, so the anchor is resolved against the unfiltered list.
+    fn back_to_menu(u: &mut UnlockedState) {
+        let anchor = match &u.screen {
+            Screen::ServerForm(form) => match form.mode {
+                FormMode::Edit(id) => Some(id),
+                // A cancelled add has no entry to go back to.
+                FormMode::Add => None,
+            },
+            Screen::Scripts(state) => Some(state.server_id),
+            Screen::Forwards(state) => Some(state.server_id),
+            Screen::FileBrowser(state) => Some(state.server_id),
+            Screen::ConfirmDeleteScript { server_id, .. } | Screen::ConfirmDeleteForward { server_id, .. } => Some(*server_id),
+            // The answer decides: a confirmed delete resolves to nothing and
+            // falls back to the first row, which is what `confirm_delete`
+            // wants; a refused one lands back on the entry it asked about.
+            Screen::ConfirmDelete { target, .. } => Some(*target),
+            Screen::MainMenu(_)
+            | Screen::Settings(_)
+            | Screen::TotpPrompt(_)
+            | Screen::ScriptTargets(_)
+            | Screen::SshImport(_)
+            | Screen::ScriptForm(_)
+            | Screen::ScriptRun(_)
+            | Screen::ForwardForm(_) => None,
+        };
+        u.screen = Screen::MainMenu(MainMenuState::anchored(&u.config.servers, u.config.server_sort, anchor));
     }
 
     fn with_unlocked(&mut self, f: impl FnOnce(&mut UnlockedState)) {
@@ -1598,10 +1637,8 @@ impl App {
 
         match self.store.save(&u.config, &u.master_key, &u.slots) {
             Ok(()) => {
-                let mut menu = MainMenuState::new();
-                menu.clamp_selection(&u.config.servers, u.config.server_sort);
                 u.status = Some(StatusMessage::new(format!("{}{imported}{}", strings.status_imported_prefix, strings.status_imported_suffix)));
-                u.screen = Screen::MainMenu(menu);
+                Self::back_to_menu(u);
             }
             Err(e) => {
                 u.config.servers.truncate(before);
@@ -1722,12 +1759,18 @@ impl App {
         };
         let mode = form.mode;
 
-        match mode {
+        // What the list should land on afterwards. An add anchors on the entry
+        // it just created, an edit on the one it changed — `back_to_menu`
+        // covers the cancel path, but by here the form has already been
+        // replaced by the save, so the id is carried rather than read back.
+        let anchor = match mode {
             FormMode::Add => {
                 let mut entry = ServerEntry::new(data.name, data.host, data.port, data.username, data.auth);
                 entry.tags = data.tags;
                 entry.jump_host = data.jump_host;
+                let id = entry.id;
                 u.config.servers.push(entry);
+                Some(id)
             }
             FormMode::Edit(id) => {
                 if let Some(entry) = u.config.servers.iter_mut().find(|s| s.id == id) {
@@ -1739,15 +1782,14 @@ impl App {
                     entry.auth = data.auth;
                     entry.jump_host = data.jump_host;
                 }
+                Some(id)
             }
-        }
+        };
 
         match self.store.save(&u.config, &u.master_key, &u.slots) {
             Ok(()) => {
-                let mut menu = MainMenuState::new();
-                menu.clamp_selection(&u.config.servers, u.config.server_sort);
                 u.status = Some(StatusMessage::new(strings.status_saved.to_string()));
-                u.screen = Screen::MainMenu(menu);
+                u.screen = Screen::MainMenu(MainMenuState::anchored(&u.config.servers, u.config.server_sort, anchor));
             }
             Err(e) => {
                 if let Screen::ServerForm(state) = &mut u.screen {
@@ -1779,13 +1821,13 @@ impl App {
         }
 
         let save_result = self.store.save(&u.config, &u.master_key, &u.slots);
-        let mut menu = MainMenuState::new();
-        menu.clamp_selection(&u.config.servers, u.config.server_sort);
+        // The deleted entry is gone, so the anchor resolves to nothing and the
+        // selection falls back to the first row.
+        Self::back_to_menu(u);
         u.status = Some(StatusMessage::new(match save_result {
             Ok(()) => strings.status_deleted.to_string(),
             Err(e) => format!("{}{e}", strings.delete_error_prefix),
         }));
-        u.screen = Screen::MainMenu(menu);
         Ok(())
     }
 
@@ -2075,9 +2117,7 @@ impl App {
         };
 
         if totp::verify_enrollment(totp_config.secret_base32.as_str(), code) {
-            let mut menu = MainMenuState::new();
-            menu.clamp_selection(&u.config.servers, u.config.server_sort);
-            u.screen = Screen::MainMenu(menu);
+            Self::back_to_menu(u);
         } else if let Screen::TotpPrompt(state) = &mut u.screen {
             state.error = Some(strings.err_totp_invalid_code.to_string());
         }
@@ -2311,6 +2351,11 @@ impl App {
         for line in session::forward_report_lines(&forwards, strings) {
             pane.feed_line(&line);
         }
+        // `Ctrl+B d` during the script phase, which tears the session down
+        // rather than dropping into the shell — a `run_on_connect` step is
+        // unattended by definition and is the likeliest thing in the app to
+        // hang, so it must be abandonable (#61).
+        let mut detached = false;
         for script in &context.on_connect {
             let mut partial = String::new();
             // The lines travel through a channel for the reason
@@ -2325,6 +2370,7 @@ impl App {
                         let _ = tx.send(line);
                     }
                 }));
+                let mut tick = key_tick();
                 loop {
                     tokio::select! {
                         biased;
@@ -2337,7 +2383,24 @@ impl App {
                                 pane.feed_line(&more);
                             }
                             pane.take_dirty();
-                            draw_pane(terminal, &mut pane, strings);
+                            draw_pane_running_script(terminal, &mut pane, strings);
+                        }
+                        // The same long-lived tick the shell's loop polls on,
+                        // and the same key handling — but the bytes are
+                        // dropped: there is no shell to send them to yet, and
+                        // the footer says so. Only the detach is acted on.
+                        _ = tick.tick() => {
+                            let now = Instant::now();
+                            let mut discarded = Vec::new();
+                            let mut detach = collect_pane_bytes(pane.tick(now), &mut discarded);
+                            detach |= poll_pane_keys(&mut pane, now, &mut discarded);
+                            if pane.take_dirty() {
+                                draw_pane_running_script(terminal, &mut pane, strings);
+                            }
+                            if detach {
+                                detached = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -2348,7 +2411,20 @@ impl App {
                 pane.feed_line(&line);
             }
             pane.take_dirty();
-            draw_pane(terminal, &mut pane, strings);
+            draw_pane_running_script(terminal, &mut pane, strings);
+            if detached {
+                break;
+            }
+        }
+
+        if detached {
+            // The shell was never requested and the probe never started, so
+            // there is no sysinfo to fold in — but the handshake still
+            // happened, and `finish` is what stamps it. Dropping out of here
+            // takes `forwards`, the channel and the session with it.
+            self.finish(id, &mut record, None);
+            self.live = None;
+            return Ok(());
         }
 
         channel.request_shell(false).await?;
@@ -2384,6 +2460,7 @@ impl App {
         let mut last_draw = Instant::now() - PANE_REDRAW_INTERVAL;
         let mut size = (cols, rows);
         let mut error = None;
+        let mut tick = key_tick();
 
         draw_pane(terminal, &mut pane, strings);
         loop {
@@ -2426,7 +2503,7 @@ impl App {
                     pane.set_usage(usage);
                     self.live = Some((id, pane.usage()));
                 }
-                _ = tokio::time::sleep(KEY_POLL_INTERVAL) => {
+                _ = tick.tick() => {
                     let now = Instant::now();
                     let mut out = Vec::new();
                     let mut detach = collect_pane_bytes(pane.tick(now), &mut out);
@@ -2580,6 +2657,7 @@ impl App {
                         let mut run = std::pin::pin!(script_runner::run_script(&connected.handle, &script, move |event| {
                             let _ = tx.send(event.into_owned());
                         }));
+                        let mut tick = key_tick();
                         loop {
                             tokio::select! {
                                 // A finished run wins over a tick that came due
@@ -2602,7 +2680,7 @@ impl App {
                                 // `transfer_flow` already uses, needs no extra
                                 // dependency, and 50 ms is well under what a
                                 // keypress feels like.
-                                _ = tokio::time::sleep(KEY_POLL_INTERVAL) => {
+                                _ = tick.tick() => {
                                     if poll_run_keys(&mut run_state) {
                                         cancelled = true;
                                         break;
@@ -3250,7 +3328,28 @@ enum Cancel {
 ///
 /// `App::await_redrawing` runs on it too, for the same reason: a handshake
 /// produces no events either.
+///
+/// **The loops that poll on it hold the timer outside the `select!`**
+/// (`key_tick`), and that is not a tidiness choice. A `sleep` constructed
+/// inside the `select!` is a *new* future on every iteration, so a remote that
+/// keeps talking turns the loop over faster than the interval and the timer is
+/// restarted from zero before it can ever elapse — the tick then does not fire
+/// late, it does not fire at all, and detach and cancel are unreachable for as
+/// long as the output lasts (#57). `await_redrawing` is the one exception that
+/// may build its own: its other arm is a single future that resolves once, so
+/// it cannot hold the loop open.
 const KEY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// The long-lived timer the key arms poll on — see `KEY_POLL_INTERVAL`.
+///
+/// `MissedTickBehavior::Delay`: a burst of output that swallowed several
+/// periods should produce one key poll when it ends, not a backlog of them
+/// fired back to back.
+fn key_tick() -> tokio::time::Interval {
+    let mut tick = tokio::time::interval(KEY_POLL_INTERVAL);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    tick
+}
 
 /// The most often the pane repaints while the remote is talking. Roughly
 /// 60 fps: fast enough that typing feels immediate, slow enough that a large
@@ -3285,6 +3384,19 @@ fn pane_viewport(terminal: &TerminalGuard, alt_screen: bool, strings: &'static S
     let size = terminal.terminal.size().ok()?;
     let area = Rect { x: 0, y: 0, width: size.width, height: size.height };
     session_pane::viewport(area, &session_pane::footer(false, alt_screen, strings))
+}
+
+/// `draw_pane` for the phase before the shell exists — see
+/// `session_pane::script_footer` for why the footer is padded rather than
+/// simply shorter.
+fn draw_pane_running_script(terminal: &mut TerminalGuard, pane: &mut SessionPaneState, strings: &'static Strings) {
+    let _ = terminal.terminal.draw(|frame| {
+        let area = frame.area();
+        chrome::paint_background(frame, area);
+        let footer = session_pane::script_footer(area.width, strings);
+        let body = chrome::render(frame, area, strings.session_pane_title_prefix, footer, strings);
+        pane.render(frame, body, strings);
+    });
 }
 
 fn draw_pane(terminal: &mut TerminalGuard, pane: &mut SessionPaneState, strings: &'static Strings) {
