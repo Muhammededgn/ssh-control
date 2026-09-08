@@ -1270,21 +1270,15 @@ impl App {
                 });
             }
             NextStep::FormCancel => self.with_unlocked(|u| {
-                let mut menu = MainMenuState::new();
-                menu.clamp_selection(&u.config.servers, u.config.server_sort);
-                u.screen = Screen::MainMenu(menu);
+                Self::back_to_menu(u);
             }),
             NextStep::FormSubmit(data) => self.submit_form(data)?,
             NextStep::ConfirmYes => self.confirm_delete()?,
             NextStep::ConfirmNo => self.with_unlocked(|u| {
-                let mut menu = MainMenuState::new();
-                menu.clamp_selection(&u.config.servers, u.config.server_sort);
-                u.screen = Screen::MainMenu(menu);
+                Self::back_to_menu(u);
             }),
             NextStep::SettingsClose => self.with_unlocked(|u| {
-                let mut menu = MainMenuState::new();
-                menu.clamp_selection(&u.config.servers, u.config.server_sort);
-                u.screen = Screen::MainMenu(menu);
+                Self::back_to_menu(u);
             }),
             NextStep::SettingsLangSelected(lang) => {
                 self.lang = lang;
@@ -1317,9 +1311,7 @@ impl App {
                 }
             }),
             NextStep::ScriptsBack => self.with_unlocked(|u| {
-                let mut menu = MainMenuState::new();
-                menu.clamp_selection(&u.config.servers, u.config.server_sort);
-                u.screen = Screen::MainMenu(menu);
+                Self::back_to_menu(u);
             }),
             NextStep::GoScriptAdd => self.with_unlocked(|u| {
                 let ctx = match &u.screen {
@@ -1412,9 +1404,7 @@ impl App {
                 }
             }),
             NextStep::ForwardsBack => self.with_unlocked(|u| {
-                let mut menu = MainMenuState::new();
-                menu.clamp_selection(&u.config.servers, u.config.server_sort);
-                u.screen = Screen::MainMenu(menu);
+                Self::back_to_menu(u);
             }),
             NextStep::GoForwardAdd => self.with_unlocked(|u| {
                 if let Screen::Forwards(list) = &u.screen {
@@ -1459,9 +1449,7 @@ impl App {
             NextStep::ConfirmDeleteForwardNo => self.back_to_forwards(),
             NextStep::GoSshImport => self.open_ssh_import(),
             NextStep::SshImportCancel => self.with_unlocked(|u| {
-                let mut menu = MainMenuState::new();
-                menu.clamp_selection(&u.config.servers, u.config.server_sort);
-                u.screen = Screen::MainMenu(menu);
+                Self::back_to_menu(u);
             }),
             NextStep::SshImportConfirm(hosts) => self.import_ssh_hosts(hosts),
             NextStep::ScriptTargetsCancel => self.with_unlocked(|u| {
@@ -1485,9 +1473,7 @@ impl App {
                 self.remember_browser_dirs();
                 self.drop_remote();
                 self.with_unlocked(|u| {
-                    let mut menu = MainMenuState::new();
-                    menu.clamp_selection(&u.config.servers, u.config.server_sort);
-                    u.screen = Screen::MainMenu(menu);
+                    Self::back_to_menu(u);
                 });
             }
             NextStep::ScriptRunSave(path) => self.save_script_log(&path),
@@ -1516,6 +1502,47 @@ impl App {
         // The readings belong to the connection, not to the entry. Keeping
         // them after it closed would be showing a snapshot labelled "now".
         self.live = None;
+    }
+
+    /// Back to the server list, on the server the subscreen was opened from.
+    ///
+    /// The anchor is read off the screen being left — every subscreen that
+    /// names a server carries its `Uuid` — and goes through
+    /// `MainMenuState::anchored`, the same re-anchoring `cycle_server_sort`
+    /// performs. Every back handler used to build `MainMenuState::new()` and
+    /// clamp it, which is `selected: 0` plus a range check: the selection came
+    /// back on row 1 and the next `Enter` connected to the wrong server (#62).
+    ///
+    /// One helper rather than a copy per site, because ten copies of the same
+    /// three lines are ten chances to drift apart — which is how they got here.
+    ///
+    /// The filter is deliberately not restored: the subscreens do not carry
+    /// one, so the anchor is resolved against the unfiltered list.
+    fn back_to_menu(u: &mut UnlockedState) {
+        let anchor = match &u.screen {
+            Screen::ServerForm(form) => match form.mode {
+                FormMode::Edit(id) => Some(id),
+                // A cancelled add has no entry to go back to.
+                FormMode::Add => None,
+            },
+            Screen::Scripts(state) => Some(state.server_id),
+            Screen::Forwards(state) => Some(state.server_id),
+            Screen::FileBrowser(state) => Some(state.server_id),
+            Screen::ConfirmDeleteScript { server_id, .. } | Screen::ConfirmDeleteForward { server_id, .. } => Some(*server_id),
+            // The answer decides: a confirmed delete resolves to nothing and
+            // falls back to the first row, which is what `confirm_delete`
+            // wants; a refused one lands back on the entry it asked about.
+            Screen::ConfirmDelete { target, .. } => Some(*target),
+            Screen::MainMenu(_)
+            | Screen::Settings(_)
+            | Screen::TotpPrompt(_)
+            | Screen::ScriptTargets(_)
+            | Screen::SshImport(_)
+            | Screen::ScriptForm(_)
+            | Screen::ScriptRun(_)
+            | Screen::ForwardForm(_) => None,
+        };
+        u.screen = Screen::MainMenu(MainMenuState::anchored(&u.config.servers, u.config.server_sort, anchor));
     }
 
     fn with_unlocked(&mut self, f: impl FnOnce(&mut UnlockedState)) {
@@ -1599,10 +1626,8 @@ impl App {
 
         match self.store.save(&u.config, &u.master_key, &u.slots) {
             Ok(()) => {
-                let mut menu = MainMenuState::new();
-                menu.clamp_selection(&u.config.servers, u.config.server_sort);
                 u.status = Some(StatusMessage::new(format!("{}{imported}{}", strings.status_imported_prefix, strings.status_imported_suffix)));
-                u.screen = Screen::MainMenu(menu);
+                Self::back_to_menu(u);
             }
             Err(e) => {
                 u.config.servers.truncate(before);
@@ -1723,12 +1748,18 @@ impl App {
         };
         let mode = form.mode;
 
-        match mode {
+        // What the list should land on afterwards. An add anchors on the entry
+        // it just created, an edit on the one it changed — `back_to_menu`
+        // covers the cancel path, but by here the form has already been
+        // replaced by the save, so the id is carried rather than read back.
+        let anchor = match mode {
             FormMode::Add => {
                 let mut entry = ServerEntry::new(data.name, data.host, data.port, data.username, data.auth);
                 entry.tags = data.tags;
                 entry.jump_host = data.jump_host;
+                let id = entry.id;
                 u.config.servers.push(entry);
+                Some(id)
             }
             FormMode::Edit(id) => {
                 if let Some(entry) = u.config.servers.iter_mut().find(|s| s.id == id) {
@@ -1740,15 +1771,14 @@ impl App {
                     entry.auth = data.auth;
                     entry.jump_host = data.jump_host;
                 }
+                Some(id)
             }
-        }
+        };
 
         match self.store.save(&u.config, &u.master_key, &u.slots) {
             Ok(()) => {
-                let mut menu = MainMenuState::new();
-                menu.clamp_selection(&u.config.servers, u.config.server_sort);
                 u.status = Some(StatusMessage::new(strings.status_saved.to_string()));
-                u.screen = Screen::MainMenu(menu);
+                u.screen = Screen::MainMenu(MainMenuState::anchored(&u.config.servers, u.config.server_sort, anchor));
             }
             Err(e) => {
                 if let Screen::ServerForm(state) = &mut u.screen {
@@ -1780,13 +1810,13 @@ impl App {
         }
 
         let save_result = self.store.save(&u.config, &u.master_key, &u.slots);
-        let mut menu = MainMenuState::new();
-        menu.clamp_selection(&u.config.servers, u.config.server_sort);
+        // The deleted entry is gone, so the anchor resolves to nothing and the
+        // selection falls back to the first row.
+        Self::back_to_menu(u);
         u.status = Some(StatusMessage::new(match save_result {
             Ok(()) => strings.status_deleted.to_string(),
             Err(e) => format!("{}{e}", strings.delete_error_prefix),
         }));
-        u.screen = Screen::MainMenu(menu);
         Ok(())
     }
 
@@ -2076,9 +2106,7 @@ impl App {
         };
 
         if totp::verify_enrollment(totp_config.secret_base32.as_str(), code) {
-            let mut menu = MainMenuState::new();
-            menu.clamp_selection(&u.config.servers, u.config.server_sort);
-            u.screen = Screen::MainMenu(menu);
+            Self::back_to_menu(u);
         } else if let Screen::TotpPrompt(state) = &mut u.screen {
             state.error = Some(strings.err_totp_invalid_code.to_string());
         }
