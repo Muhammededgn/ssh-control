@@ -103,8 +103,8 @@ impl ScriptsListState {
         let items: Vec<ListItem> = scripts
             .iter()
             .map(|s| {
-                let run_marker = if s.run_on_connect { " [auto]" } else { "" };
-                ListItem::new(format!("{}  ({} steps){run_marker}", s.name, s.steps.len()))
+                let run_marker = if s.run_on_connect { strings.script_auto_marker } else { "" };
+                ListItem::new(format!("{}  {}{}{}{run_marker}", s.name, strings.script_steps_prefix, s.steps.len(), strings.script_steps_suffix))
             })
             .collect();
 
