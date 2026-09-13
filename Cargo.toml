@@ -21,6 +21,10 @@ directories = "6.0.0"
 getrandom = "0.4.3"
 hkdf = "0.13.0"
 keyring = "4.1.6"
+# Only for the fatal-signal teardown in `terminal`: resetting a signal's
+# disposition to the default and re-raising it is not something `rustix` exposes
+# outside its explicitly unstable `runtime` module.
+libc = "0.2.189"
 qrcode = { version = "0.14.1", default-features = false }
 ratatui = "0.30.2"
 russh = "0.62.5"

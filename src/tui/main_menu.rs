@@ -280,7 +280,7 @@ impl MainMenuState {
         indices
     }
 
-    fn selected_entry<'a>(&self, servers: &'a [ServerEntry], sort: ServerSort) -> Option<&'a ServerEntry> {
+    pub(crate) fn selected_entry<'a>(&self, servers: &'a [ServerEntry], sort: ServerSort) -> Option<&'a ServerEntry> {
         self.visible_indices(servers, sort).get(self.selected).and_then(|&i| servers.get(i))
     }
 
@@ -426,6 +426,21 @@ impl MainMenuState {
     /// out from under it — leaving the index alone would quietly select a
     /// different entry. This is `clear_filter`'s re-anchoring, applied to the
     /// order rather than the filter.
+    /// A fresh list with the selection already on `anchor`, or on the first row
+    /// when that entry is gone.
+    ///
+    /// This is what a subscreen returns to. `new()` plus `clamp_selection` is
+    /// the shape that put the selection back on row 1 every time — a clamp only
+    /// keeps an index in range, it has no idea which entry was meant, and by
+    /// the time you come back the row for a given `Uuid` may have moved anyway
+    /// (a delete, a re-sort). Same argument as `resort`'s: an index is not a
+    /// stable handle to a server.
+    pub fn anchored(servers: &[ServerEntry], sort: ServerSort, anchor: Option<Uuid>) -> Self {
+        let mut menu = Self::new();
+        menu.reanchor(servers, sort, anchor);
+        menu
+    }
+
     pub fn resort(&mut self, servers: &[ServerEntry], from: ServerSort, to: ServerSort) {
         let anchor = self.selected_entry(servers, from).map(|s| s.id);
         self.reanchor(servers, to, anchor);
