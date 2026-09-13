@@ -16,7 +16,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use uuid::Uuid;
 
-use super::widgets::render_form;
+use super::widgets::{hint_line, render_form};
 use crate::config::model::DEFAULT_BIND_ADDR;
 use crate::config::{ForwardKind, ForwardRule};
 use crate::i18n::Strings;
@@ -256,7 +256,7 @@ impl ForwardFormState {
         }
 
         let focus_row = self.fields().iter().position(|f| *f == self.focus).unwrap_or(0);
-        let footer = vec![Line::from(Span::styled(strings.forward_form_hint, Style::default().fg(theme::hint())))];
+        let footer = vec![hint_line(strings.forward_form_hint)];
         let body = chrome::render(frame, area, title, footer, strings);
         render_form(frame, body, title, lines, focus_row, strings.terminal_too_small);
     }

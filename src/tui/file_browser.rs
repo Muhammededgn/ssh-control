@@ -345,7 +345,7 @@ impl FileBrowserState {
         if let Some(status) = &self.status {
             footer.push(Line::from(Span::styled(status.clone(), Style::default().fg(theme::warning()))));
         }
-        footer.push(Line::from(Span::styled(strings.file_browser_hint, Style::default().fg(theme::hint()))));
+        footer.push(widgets::hint_line(strings.file_browser_hint));
         let body = chrome::render(frame, area, strings.file_browser_title, footer, strings);
 
         let panes = Layout::default()

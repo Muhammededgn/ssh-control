@@ -688,14 +688,11 @@ impl MainMenuState {
         // While a connect is in flight the only key that does anything is the
         // one that abandons it, so that is the only one offered — the rest of
         // the bindings are unreachable until the flow returns.
-        help_text.push(Line::from(Span::styled(
-            match (connecting, self.typing) {
-                (true, _) => strings.esc_cancel_hint,
-                (false, true) => strings.main_menu_filter_hint,
-                (false, false) => strings.main_menu_hint,
-            },
-            Style::default().fg(theme::hint()),
-        )));
+        help_text.push(widgets::hint_line(match (connecting, self.typing) {
+            (true, _) => strings.esc_cancel_hint,
+            (false, true) => strings.main_menu_filter_hint,
+            (false, false) => strings.main_menu_hint,
+        }));
         help_text
     }
 }

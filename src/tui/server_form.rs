@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use super::widgets::{mask, render_form};
+use super::widgets::{hint_line, mask, render_form};
 use crate::config::{AuthMethod, Secret, ServerEntry};
 use crate::i18n::Strings;
 use crate::tui::chrome;
@@ -430,7 +430,7 @@ impl ServerFormState {
         // `fields()` and `lines` are built in the same order, so the focused
         // field's index is its row — that is what `render_form` scrolls to.
         let focus_row = self.fields().iter().position(|f| *f == self.focus).unwrap_or(0);
-        let body = chrome::render(frame, area, title, vec![Line::from(Span::styled(strings.form_hint, Style::default().fg(theme::hint())))], strings);
+        let body = chrome::render(frame, area, title, vec![hint_line(strings.form_hint)], strings);
         render_form(frame, body, title, lines, focus_row, strings.terminal_too_small);
     }
 }

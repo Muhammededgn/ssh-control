@@ -124,7 +124,7 @@ impl SshImportState {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect, strings: &Strings) {
-        let mut footer = vec![Line::from(Span::styled(strings.ssh_import_hint, Style::default().fg(theme::hint())))];
+        let mut footer = vec![widgets::hint_line(strings.ssh_import_hint)];
         if let Some(error) = &self.error {
             footer.push(Line::from(Span::styled(error.clone(), Style::default().fg(theme::error()))));
         }

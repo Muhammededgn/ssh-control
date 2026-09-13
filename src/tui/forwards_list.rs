@@ -84,7 +84,7 @@ impl ForwardsListState {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect, forwards: &[ForwardRule], status: Option<&str>, strings: &Strings) {
-        let mut footer = vec![Line::from(Span::styled(strings.forwards_hint, Style::default().fg(theme::hint())))];
+        let mut footer = vec![widgets::hint_line(strings.forwards_hint)];
         if let Some(status) = status {
             footer.insert(0, Line::from(Span::styled(status.to_string(), Style::default().fg(theme::success()))));
         }

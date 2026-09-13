@@ -369,6 +369,47 @@ pub fn render_panel_with(
     render_lines_scrolled(frame, rect, title, lines, focus_row, block, true);
 }
 
+/// The longest a `key: action` pair's key may be before the chunk is treated
+/// as prose rather than a binding. Every real key is far shorter than this;
+/// the limit is what stops a sentence containing a colon from having its first
+/// clause lifted out of the sentence.
+const MAX_BINDING_KEY: usize = 20;
+
+/// A hint string as the status bar draws it: each binding's *key* in the body
+/// ink, its description after it in `hint`.
+///
+/// `hint` is the app's secondary ink, and on a dark background that is grey on
+/// near-black — fine for a label, wrong for the one row on screen that is only
+/// useful if it can be read at a glance. Lifting the whole line would flatten
+/// it into an undifferentiated stripe, so only the half anyone is scanning for
+/// is lifted: the key. The description stays secondary, which is what makes
+/// the row scannable rather than merely brighter.
+///
+/// The split is the one `help::bindings` already relies on — bindings joined
+/// by two spaces, each written `key: action` — so this adds no new convention
+/// and no new string. A chunk that is not in that shape (a bullet, a bare
+/// instruction like "type to filter", a prose hint with a colon far into it)
+/// comes back whole in `hint`, which is the old appearance exactly.
+pub fn hint_line(hint: &str) -> Line<'static> {
+    let key_style = Style::default().fg(theme::text());
+    let rest_style = Style::default().fg(theme::hint());
+    let mut spans = Vec::new();
+
+    for (i, chunk) in hint.split("  ").enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ", rest_style));
+        }
+        match chunk.find(':') {
+            Some(at) if at <= MAX_BINDING_KEY => {
+                spans.push(Span::styled(chunk[..=at].to_string(), key_style));
+                spans.push(Span::styled(chunk[at + 1..].to_string(), rest_style));
+            }
+            _ => spans.push(Span::styled(chunk.to_string(), rest_style)),
+        }
+    }
+    Line::from(spans)
+}
+
 /// The marker beside a selected row. Paired with `theme::selection()`, and the
 /// half of the pair that still works with no colour at all.
 pub const SELECT_MARKER: &str = "\u{258c} ";
@@ -545,6 +586,55 @@ mod tests {
         let rendered: String = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
         assert_eq!(rendered.matches(title.trim()).count(), 1, "the title is on the border more than once:\n{rendered}");
         assert!(rendered.contains('\u{2193}'), "a panel with forty lines in twelve rows has to say there is more below:\n{rendered}");
+    }
+
+    /// Whatever the split does, it must put every character back. A footer
+    /// that quietly drops a binding while recolouring the rest is strictly
+    /// worse than the unreadable grey it replaced.
+    #[test]
+    fn a_hint_survives_being_split_into_keys_and_actions() {
+        for strings in [&crate::i18n::EN, &crate::i18n::TR, &crate::i18n::ES, &crate::i18n::RU] {
+            for hint in [
+                strings.main_menu_hint,
+                strings.main_menu_filter_hint,
+                strings.form_hint,
+                strings.file_browser_hint,
+                strings.forwards_hint,
+                strings.scripts_list_hint,
+                strings.session_pane_hint,
+                strings.session_pane_prefix_hint,
+                strings.unlock_hint,
+                strings.esc_cancel_hint,
+            ] {
+                assert_eq!(hint_line(hint).to_string(), hint, "the split lost something");
+            }
+        }
+    }
+
+    /// The key is lifted to the body ink and the description stays secondary —
+    /// that difference is the whole feature, so a change that styles both the
+    /// same has to fail rather than merely look flat.
+    #[test]
+    fn a_binding_is_drawn_as_a_bright_key_and_a_dim_action() {
+        let line = hint_line("Enter: connect  q: quit");
+        let styles: Vec<_> = line.spans.iter().map(|s| s.style.fg).collect();
+        assert_eq!(line.spans.len(), 5, "key, action, separator, key, action");
+        assert_eq!(line.spans[0].content, "Enter:");
+        assert_eq!(styles[0], Some(theme::text()));
+        assert_eq!(styles[1], Some(theme::hint()));
+        assert_ne!(styles[0], styles[1]);
+    }
+
+    /// Not every hint is a binding list. A bare instruction, a bullet, and a
+    /// sentence whose colon is far into it all come back in one piece and in
+    /// the secondary ink — the appearance they had before any of this.
+    #[test]
+    fn anything_that_is_not_a_binding_stays_one_dim_span() {
+        for text in ["type to filter", "•", "Scan the QR code below into your authenticator: it is the same secret"] {
+            let line = hint_line(text);
+            assert_eq!(line.spans.len(), 1, "{text:?} is not a key/action pair");
+            assert_eq!(line.spans[0].style.fg, Some(theme::hint()));
+        }
     }
 
     #[test]

@@ -360,7 +360,7 @@ impl ScriptFormState {
         let hint_line = if let Some(err) = &self.error {
             Line::from(Span::styled(err.clone(), Style::default().fg(theme::error())))
         } else {
-            Line::from(Span::styled(strings.steps_list_hint, Style::default().fg(theme::hint())))
+            widgets::hint_line(strings.steps_list_hint)
         };
         let body = chrome::render(frame, area, title, vec![hint_line], strings);
         let chunks = Layout::default()

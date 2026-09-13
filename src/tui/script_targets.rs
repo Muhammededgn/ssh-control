@@ -118,7 +118,7 @@ impl ScriptTargetsState {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect, servers: &[ServerEntry], strings: &Strings) {
-        let footer = vec![Line::from(Span::styled(strings.script_targets_hint, Style::default().fg(theme::hint())))];
+        let footer = vec![widgets::hint_line(strings.script_targets_hint)];
         let body = chrome::render(frame, area, strings.script_targets_title, footer, strings);
 
         let items: Vec<ListItem> = servers

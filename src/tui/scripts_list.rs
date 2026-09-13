@@ -96,7 +96,7 @@ impl ScriptsListState {
         if let Some(s) = status {
             footer.push(Line::from(Span::styled(s.to_string(), Style::default().fg(theme::warning()))));
         }
-        footer.push(Line::from(Span::styled(strings.scripts_list_hint, Style::default().fg(theme::hint()))));
+        footer.push(widgets::hint_line(strings.scripts_list_hint));
 
         let body = chrome::render(frame, area, strings.scripts_list_title, footer, strings);
 

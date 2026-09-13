@@ -66,9 +66,17 @@ const AUTO: Palette = Palette {
 };
 
 /// A dark preset that actually commits to being dark, rather than deferring.
-/// Same five inks as `AUTO`; the difference is that it paints.
+/// The difference is that it paints — and that its hints are readable.
+///
+/// `AUTO` keeps `DarkGray` because that preset's whole contract is that it
+/// looks exactly like the app did before any of this existed. `DARK` is under
+/// no such obligation: it already chose the background it is being read
+/// against, so it can pick a grey that carries on it, the same way `LIGHT`
+/// picks `Indexed(240)` against its own. `DarkGray` on `Indexed(234)` is the
+/// low-contrast pairing that made the status bar — the app's entire
+/// discoverability surface — the hardest row on screen to read.
 const DARK: Palette = Palette {
-    hint: Color::DarkGray,
+    hint: Color::Indexed(245),
     accent: Color::Cyan,
     error: Color::Red,
     success: Color::Green,
@@ -305,6 +313,23 @@ mod tests {
         assert_eq!(AUTO.background, Color::Reset);
         assert_eq!(AUTO.surface, Color::Reset);
         assert_eq!(AUTO.text, Color::Reset);
+    }
+
+    /// A preset that paints its own background has to pick a hint that carries
+    /// on it. `DarkGray` was inherited from `AUTO` — where it is the whole
+    /// contract — onto `Indexed(234)`, which made the status bar, the app's
+    /// entire discoverability surface, the least readable row on screen.
+    ///
+    /// `AUTO` is exempt and must stay exempt: it paints nothing, so its hint is
+    /// being read against a background it did not choose, and changing it would
+    /// break the one promise that preset makes.
+    #[test]
+    fn a_preset_that_paints_picks_a_hint_that_carries_on_it() {
+        for palette in [DARK, LIGHT] {
+            assert_ne!(palette.hint, AUTO.hint, "a painting preset inheriting Auto's hint is the unreadable pairing");
+            assert_ne!(palette.hint, palette.background);
+            assert_ne!(palette.hint, palette.text, "a hint the same as the body ink is not a secondary ink");
+        }
     }
 
     /// The whole point of the light preset: nothing in it may be a colour that

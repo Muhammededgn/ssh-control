@@ -340,9 +340,13 @@ impl ScriptRunState {
             } else {
                 strings.script_run_hint_running
             };
-            let style =
-                if self.is_scrolled_back() { Style::default().fg(theme::warning()) } else { Style::default().fg(theme::hint()) };
-            Line::from(Span::styled(hint, style))
+            // Scrolled back is a *state*, not a binding list: it is warned
+            // about in one colour rather than split into keys and actions.
+            if self.is_scrolled_back() {
+                Line::from(Span::styled(hint, Style::default().fg(theme::warning())))
+            } else {
+                widgets::hint_line(hint)
+            }
         };
 
         let body = chrome::render(frame, area, strings.script_run_title, vec![footer_line], strings);

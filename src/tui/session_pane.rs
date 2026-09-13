@@ -25,7 +25,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use tui_term::vt100;
 use tui_term::widget::{Cursor, PseudoTerminal};
 
@@ -334,7 +334,7 @@ pub fn footer(prefix_armed: bool, alt_screen: bool, strings: &Strings) -> Vec<Li
         (false, true) => strings.session_pane_hint_alt_screen,
         (false, false) => strings.session_pane_hint,
     };
-    vec![Line::from(Span::styled(hint, Style::default().fg(theme::hint())))]
+    vec![widgets::hint_line(hint)]
 }
 
 /// The footer for the phase before the shell exists: a `run_on_connect` script
@@ -350,7 +350,7 @@ pub fn footer(prefix_armed: bool, alt_screen: bool, strings: &Strings) -> Vec<Li
 /// It names only `Ctrl+B d`, because that is the only binding live in this
 /// phase: there is no shell to send anything else to.
 pub fn script_footer(width: u16, strings: &Strings) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(Span::styled(strings.session_pane_hint_script, Style::default().fg(theme::hint())))];
+    let mut lines = vec![widgets::hint_line(strings.session_pane_hint_script)];
     // The same width `chrome::footer_height` measures against — the block's
     // two border columns are not text.
     let inner = width.saturating_sub(2);
