@@ -470,6 +470,8 @@ pub fn qr_lines(data: &str) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     /// The row a spinner sits on must not change width between frames, or the
     /// server list would jitter for the whole of a ten-second connect.
@@ -509,6 +511,40 @@ mod tests {
             }
         }
         assert!(offenders.is_empty(), "these build their own block instead of using widgets::panel: {offenders:?}");
+    }
+
+    /// `Block::title` appends; it does not replace. A panel built with its
+    /// title already on it and then handed to `render_lines_scrolled` — which
+    /// titles it again, to carry the scroll markers — drew the title twice on
+    /// one border row, and only the second copy got the markers, so a scrolled
+    /// panel read `X ─ X↑↓`.
+    ///
+    /// The whole existing suite was blind to this: every render assertion
+    /// anywhere is a `contains`, and a doubled title contains everything a
+    /// single one does. Counting is the only form of the check that catches it.
+    #[test]
+    fn a_panel_draws_its_title_once() {
+        let title = " Authenticator code ";
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).expect("test backend");
+        terminal
+            .draw(|frame| render_panel(frame, frame.area(), 52, title, vec![Line::from("Code: _")], 0, "too small"))
+            .expect("render");
+        let rendered: String = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert_eq!(rendered.matches(title.trim()).count(), 1, "the title is on the border more than once:\n{rendered}");
+    }
+
+    /// And the markers still land on that one title — the copy that carried
+    /// them was the one removed, so a fix that drops the wrong title silently
+    /// takes the only "there is more below" signal with it.
+    #[test]
+    fn a_scrolled_panel_keeps_its_markers_on_the_single_title() {
+        let title = " Security mode ";
+        let lines: Vec<Line<'static>> = (0..40).map(|i| Line::from(format!("line {i}"))).collect();
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).expect("test backend");
+        terminal.draw(|frame| render_panel(frame, frame.area(), 52, title, lines, 0, "too small")).expect("render");
+        let rendered: String = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert_eq!(rendered.matches(title.trim()).count(), 1, "the title is on the border more than once:\n{rendered}");
+        assert!(rendered.contains('\u{2193}'), "a panel with forty lines in twelve rows has to say there is more below:\n{rendered}");
     }
 
     #[test]
