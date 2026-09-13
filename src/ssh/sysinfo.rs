@@ -63,6 +63,23 @@ impl Usage {
 /// prefixed line. Every probe degrades to an empty value (never fails the
 /// whole command) so a restricted shell/missing tool just yields blanks
 /// rather than aborting the others — `2>/dev/null` and `|| true` throughout.
+///
+/// The GPU probe is the one that is not an `echo`, and there are three
+/// deliberate things in it:
+///
+/// - **No `head -1`.** It emits one prefixed line per card. The integrated
+///   adapter usually sorts first by PCI address, so taking the first was
+///   taking exactly the card nobody asks about and dropping the discrete ones.
+/// - **The address is stripped as a whole token**, not cut on colons.
+///   `cut -d: -f3-` worked only because an `lspci` line happens to hold two
+///   colons; under `lspci -D`, or anywhere the host has more than one PCI
+///   domain, the address is `0000:00:02.0` and the third field lands inside
+///   the device name. `s/^[^ ]* [^:]*: //` drops the address token and the
+///   class regardless of how many colons the address carries.
+/// - **`nvidia-smi` is deliberately not preferred over this.** It gives the
+///   marketing name, but it only knows about NVIDIA cards — on the host this
+///   was reported from, an Intel iGPU beside two RTX cards, it would answer
+///   two where the answer is three. Completeness wins over prettier names.
 fn probe_command() -> String {
     format!(
         "echo '{CPU_MODEL}'$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed 's/^ *//'); \
@@ -71,7 +88,7 @@ fn probe_command() -> String {
          echo '{MEM_USED}'$(free -b 2>/dev/null | awk '/^Mem:/{{print $3}}'); \
          echo '{DISK_TOTAL}'$(df -B1 --total 2>/dev/null | awk '/^total/{{print $2}}'); \
          echo '{DISK_USED}'$(df -B1 --total 2>/dev/null | awk '/^total/{{print $3}}'); \
-         echo '{GPU_MODEL}'$(lspci 2>/dev/null | grep -Ei 'vga|3d controller|display controller' | head -1 | cut -d: -f3- | sed 's/^ *//')"
+         lspci 2>/dev/null | grep -Ei 'vga|3d controller|display controller' | sed 's/^[^ ]* [^:]*: //; s/ (rev [^)]*)$//; s/^/{GPU_MODEL}/'"
     )
 }
 
@@ -141,7 +158,17 @@ fn field<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
     text.lines().find_map(|line| line.strip_prefix(prefix)).map(str::trim).filter(|s| !s.is_empty())
 }
 
+/// `field`'s sibling for the one probe that answers more than once.
+///
+/// Separate rather than `field` being redefined in terms of it: every other
+/// marker is single-valued by construction, and a probe that started emitting
+/// two `SSHCTL_CPU_MODEL:` lines would be a bug, not a list.
+fn fields<'a>(text: &'a str, prefix: &str) -> Vec<&'a str> {
+    text.lines().filter_map(|line| line.strip_prefix(prefix)).map(str::trim).filter(|s| !s.is_empty()).collect()
+}
+
 fn parse(text: &str) -> SystemInfo {
+    let gpus: Vec<String> = fields(text, GPU_MODEL).into_iter().map(str::to_string).collect();
     SystemInfo {
         cpu_model: field(text, CPU_MODEL).map(str::to_string),
         cpu_cores: field(text, CPU_CORES).and_then(|s| s.parse().ok()),
@@ -149,7 +176,8 @@ fn parse(text: &str) -> SystemInfo {
         mem_used_bytes: field(text, MEM_USED).and_then(|s| s.parse().ok()),
         disk_total_bytes: field(text, DISK_TOTAL).and_then(|s| s.parse().ok()),
         disk_used_bytes: field(text, DISK_USED).and_then(|s| s.parse().ok()),
-        gpu_model: field(text, GPU_MODEL).map(str::to_string),
+        gpu_model: gpus.first().cloned(),
+        gpus,
         fetched_at_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -182,6 +210,47 @@ mod tests {
         assert_eq!(info.disk_total_bytes, Some(500_000_000_000));
         assert_eq!(info.disk_used_bytes, Some(100_000_000_000));
         assert_eq!(info.gpu_model.as_deref(), Some("NVIDIA GeForce RTX 3080"));
+        assert_eq!(info.gpus, vec!["NVIDIA GeForce RTX 3080"]);
+    }
+
+    /// The reported case: an integrated Intel adapter beside two discrete
+    /// NVIDIA cards. `head -1` reported the integrated one, which is the only
+    /// one nobody asks about.
+    #[test]
+    fn every_card_is_reported_and_the_first_still_answers_for_the_old_field() {
+        let text = format!(
+            "{GPU_MODEL}Intel Corporation Arrow Lake-S [Intel Graphics]\n\
+             {GPU_MODEL}NVIDIA Corporation GA102 [GeForce RTX 3090]\n\
+             {GPU_MODEL}NVIDIA Corporation GA106 [GeForce RTX 3060]\n"
+        );
+        let info = parse(&text);
+        assert_eq!(info.gpus.len(), 3);
+        assert_eq!(info.gpus[2], "NVIDIA Corporation GA106 [GeForce RTX 3060]");
+        // Whatever reads the old field reads the same card it always did.
+        assert_eq!(info.gpu_model.as_deref(), Some("Intel Corporation Arrow Lake-S [Intel Graphics]"));
+    }
+
+    /// A host with no `lspci` emits no GPU line at all, which is not the same
+    /// thing as a failure: the probe is best-effort by construction and every
+    /// other figure still has to come back.
+    #[test]
+    fn a_host_without_lspci_reports_no_gpu_rather_than_failing() {
+        let info = parse(&format!("{CPU_CORES}4
+"));
+        assert!(info.gpus.is_empty());
+        assert_eq!(info.gpu_model, None);
+        assert_eq!(info.cpu_cores, Some(4));
+    }
+
+    /// The probe must not go back to taking one card, and it must not go back
+    /// to cutting the line on colons: under `lspci -D`, or on a host with more
+    /// than one PCI domain, the address is `0000:00:02.0` and the third
+    /// colon-field lands inside the device name.
+    #[test]
+    fn the_probe_takes_every_card_and_survives_a_domain_prefixed_address() {
+        let command = probe_command();
+        assert!(!command.contains("head -1"), "taking the first card is the bug");
+        assert!(!command.contains("-f3-"), "an lspci address is not a reliable colon count");
     }
 
     #[test]
@@ -213,5 +282,6 @@ mod tests {
         assert_eq!(info.cpu_cores, Some(4));
         assert_eq!(info.mem_total_bytes, None);
         assert_eq!(info.gpu_model, None);
+        assert!(info.gpus.is_empty());
     }
 }

@@ -69,7 +69,7 @@ fn detail_parts(entry: &ServerEntry, now: u64, strings: &Strings) -> Vec<String>
         // The row never carries a live figure: it is the fallback for a
         // terminal too narrow for the card, and it is the stored snapshot it
         // has always been.
-        details.push(system_info_parts(info, None, strings).join("  |  "));
+        details.push(system_info_parts(info, None, true, strings).join("  |  "));
     }
     details
 }
@@ -89,7 +89,13 @@ const DETAIL_WIDTH: u16 = 40;
 ///
 /// Missing fields are skipped rather than shown as errors: not every remote
 /// shell has `lspci`, `free` or `df`.
-fn system_info_parts(info: &SystemInfo, live: Option<Usage>, strings: &Strings) -> Vec<String> {
+///
+/// `brief` is the narrow-terminal row, which is one dim line that the border
+/// truncates. There, a machine with three cards is reported as `GPU: 3` — a
+/// count survives being cut off where the first of three names does not, and
+/// the fact that there is more than one is the part that would otherwise be
+/// lost entirely.
+fn system_info_parts(info: &SystemInfo, live: Option<Usage>, brief: bool, strings: &Strings) -> Vec<String> {
     let mut parts = Vec::new();
 
     if info.cpu_model.is_some() || info.cpu_cores.is_some() {
@@ -123,7 +129,20 @@ fn system_info_parts(info: &SystemInfo, live: Option<Usage>, strings: &Strings) 
         parts.push(marked(widgets::used_of_total(strings.sysinfo_disk_label, used, total), disk_live.is_some(), strings));
     }
 
-    if let Some(gpu) = &info.gpu_model {
+    // A vault written before `gpus` existed has only `gpu_model`, so it still
+    // answers for one card — this is the whole reason that field was kept
+    // rather than retyped.
+    let gpus: Vec<&str> =
+        if info.gpus.is_empty() { info.gpu_model.as_deref().into_iter().collect() } else { info.gpus.iter().map(String::as_str).collect() };
+    if brief && gpus.len() > 1 {
+        parts.push(format!("{}: {}", strings.sysinfo_gpu_label, gpus.len()));
+    } else if gpus.len() > 1 {
+        // Numbered rather than three identical labels: the card gives each
+        // card its own row, and "GPU: … GPU: … GPU: …" reads as a repeat.
+        for (i, gpu) in gpus.iter().enumerate() {
+            parts.push(format!("{} {}: {gpu}", strings.sysinfo_gpu_label, i + 1));
+        }
+    } else if let Some(gpu) = gpus.first() {
         parts.push(format!("{}: {gpu}", strings.sysinfo_gpu_label));
     }
 
@@ -647,7 +666,7 @@ impl MainMenuState {
             // memory.
             let live = live.filter(|(id, _)| *id == entry.id).map(|(_, usage)| usage);
             lines.push(Line::from(""));
-            for part in system_info_parts(info, live, strings) {
+            for part in system_info_parts(info, live, false, strings) {
                 lines.push(Line::from(Span::styled(part, Style::default().fg(theme::hint()))));
             }
         }
@@ -1116,9 +1135,53 @@ mod tests {
             disk_total_bytes: Some(500 * 1_073_741_824),
             disk_used_bytes: Some(100 * 1_073_741_824),
             gpu_model: None,
+            gpus: Vec::new(),
             fetched_at_unix: 0,
         });
         entries
+    }
+
+    /// A machine with an integrated adapter and two discrete cards used to
+    /// report only the integrated one, because it sorts first by PCI address
+    /// and the probe took the first line. All three now reach the card, each
+    /// on its own numbered row.
+    #[test]
+    fn every_gpu_reaches_the_detail_card() {
+        let mut entries = snapshotted();
+        let info = entries[0].system_info.as_mut().expect("the fixture carries a snapshot");
+        info.gpus = vec!["Intel Arrow Lake-S".into(), "GeForce RTX 3090".into(), "GeForce RTX 3060".into()];
+        info.gpu_model = info.gpus.first().cloned();
+
+        let parts = system_info_parts(entries[0].system_info.as_ref().expect("a snapshot"), None, false, &EN);
+        let gpu_parts: Vec<&String> = parts.iter().filter(|p| p.starts_with(EN.sysinfo_gpu_label)).collect();
+        assert_eq!(gpu_parts.len(), 3, "three cards, three rows: {parts:?}");
+        assert!(gpu_parts[2].contains("GeForce RTX 3060"), "the last card is the one `head -1` threw away");
+    }
+
+    /// The narrow-terminal row is one dim line the border truncates, so it
+    /// reports how many rather than the first of three names — a count
+    /// survives being cut off where a name does not.
+    #[test]
+    fn the_narrow_row_counts_the_cards_instead_of_naming_one() {
+        let mut entries = snapshotted();
+        let info = entries[0].system_info.as_mut().expect("the fixture carries a snapshot");
+        info.gpus = vec!["Intel Arrow Lake-S".into(), "GeForce RTX 3090".into(), "GeForce RTX 3060".into()];
+
+        let line = detail_parts(&entries[0], 0, &EN).join("  |  ");
+        assert!(line.contains(&format!("{}: 3", EN.sysinfo_gpu_label)), "{line}");
+        assert!(!line.contains("GeForce"), "naming one of three on a line that truncates is the old bug wearing a plural");
+    }
+
+    /// A snapshot from before `gpus` existed still names its one card, which
+    /// is the whole reason `gpu_model` was kept rather than retyped.
+    #[test]
+    fn an_older_snapshot_still_names_its_one_gpu() {
+        let mut entries = snapshotted();
+        let info = entries[0].system_info.as_mut().expect("the fixture carries a snapshot");
+        info.gpu_model = Some("GeForce RTX 3080".into());
+
+        let parts = system_info_parts(entries[0].system_info.as_ref().expect("a snapshot"), None, false, &EN);
+        assert!(parts.iter().any(|p| p == &format!("{}: GeForce RTX 3080", EN.sysinfo_gpu_label)), "{parts:?}");
     }
 
     /// The point of the whole feature: while a session is open the card shows

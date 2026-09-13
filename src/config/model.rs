@@ -345,7 +345,19 @@ pub struct SystemInfo {
     pub mem_used_bytes: Option<u64>,
     pub disk_total_bytes: Option<u64>,
     pub disk_used_bytes: Option<u64>,
+    /// The first entry of `gpus`, kept for vaults written before that field
+    /// existed and for anything still reading one card.
     pub gpu_model: Option<String>,
+    /// Every display adapter the probe found, in the order `lspci` lists them
+    /// — which is PCI address order, so the integrated one usually comes
+    /// first and the discrete cards, the ones anybody asks about, come after.
+    ///
+    /// Additive, hence `serde(default)` and no `schema_version` bump: a vault
+    /// written before this field simply deserializes to an empty vector, and
+    /// `gpu_model` still answers for it. Changing `gpu_model`'s type instead
+    /// would not have been additive.
+    #[serde(default)]
+    pub gpus: Vec<String>,
     pub fetched_at_unix: u64,
 }
 
@@ -475,6 +487,19 @@ mod tests {
         let step: ScriptStep =
             serde_json::from_str(r#"{"command":"uptime","condition":"Always"}"#).expect("an existing step must still deserialize");
         assert_eq!(step.timeout_secs, None);
+    }
+
+    /// `gpus` arrived after `gpu_model` and is purely additive, so a snapshot
+    /// written by any earlier build has to keep deserializing — and its one
+    /// card has to keep answering, which is the whole reason `gpu_model` was
+    /// left in place rather than retyped.
+    #[test]
+    fn a_system_info_written_before_multiple_gpus_still_loads() {
+        let info: SystemInfo = serde_json::from_str(r#"{"cpu_cores":8,"gpu_model":"NVIDIA GeForce RTX 3080","fetched_at_unix":1}"#)
+            .expect("an existing snapshot must still deserialize");
+        assert!(info.gpus.is_empty());
+        assert_eq!(info.gpu_model.as_deref(), Some("NVIDIA GeForce RTX 3080"));
+        assert_eq!(info.cpu_cores, Some(8));
     }
 
     #[test]

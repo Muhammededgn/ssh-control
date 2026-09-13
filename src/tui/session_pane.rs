@@ -637,6 +637,7 @@ mod tests {
             disk_total_bytes: Some(500 * 1_073_741_824),
             disk_used_bytes: Some(100 * 1_073_741_824),
             gpu_model: None,
+            gpus: Vec::new(),
             fetched_at_unix: 0,
         }
     }
