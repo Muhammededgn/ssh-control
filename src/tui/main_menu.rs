@@ -38,6 +38,16 @@ pub struct ListStatus<'a> {
 /// GPU: ..." line from whatever fields were actually fetched. Missing fields
 /// are simply skipped rather than shown as errors — some remote shells lack
 /// `lspci`/`free`/etc.
+/// The address exactly as the row and the detail card write it.
+///
+/// One function because three places need the same string: the two that draw
+/// it and `matches`, which searches it. A filter that rebuilt the format
+/// itself would be a second opinion about what is on screen, and the whole
+/// point of searching it is that it is what the user can see and copy.
+fn address(entry: &ServerEntry) -> String {
+    format!("{}@{}:{}", entry.username, entry.host, entry.port)
+}
+
 /// Everything known about an entry beyond its address, in the order it is
 /// worth reading: the grouping first, then when it was last reached, then what
 /// the machine is.
@@ -163,10 +173,16 @@ pub struct MainMenuState {
     typing: bool,
 }
 
-/// Case-insensitive substring over the fields the user would type: the name
-/// they gave it, the `user@host` they would otherwise have to remember, and
-/// its tags. Port and auth kind are deliberately not searched — nobody looks
-/// for "22".
+/// Case-insensitive substring over the name, the tags, and the address
+/// **as the row writes it**.
+///
+/// The address goes through `address` rather than being searched field by
+/// field, and that is the whole of it: per-field matching can never match a
+/// needle that spans a boundary, so `tester@127` and `127.0.0.1:22001` — both
+/// of them plainly on screen, and both of them what `ssh-control list` prints
+/// for copying — silently found nothing. Searching the composed string covers
+/// those and the bare port in one go. The individual fields still match
+/// because they are substrings of it.
 ///
 /// Tags go through this same needle rather than a filter of their own. That is
 /// what "composes with the text filter" means in practice: `/prod` narrows to
@@ -174,8 +190,7 @@ pub struct MainMenuState {
 fn matches(entry: &ServerEntry, needle: &str) -> bool {
     let needle = needle.to_lowercase();
     entry.name.to_lowercase().contains(&needle)
-        || entry.host.to_lowercase().contains(&needle)
-        || entry.username.to_lowercase().contains(&needle)
+        || address(entry).to_lowercase().contains(&needle)
         || entry.tags.iter().any(|t| t.to_lowercase().contains(&needle))
 }
 
@@ -512,7 +527,7 @@ impl MainMenuState {
                 let mut spans = vec![
                     Span::raw(format!("{:<name_width$}", s.name)),
                     Span::raw("  "),
-                    Span::styled(format!("{}@{}:{}", s.username, s.host, s.port), Style::default().fg(theme::hint())),
+                    Span::styled(address(s), Style::default().fg(theme::hint())),
                     Span::styled(format!("  {auth_label}"), Style::default().fg(theme::hint())),
                 ];
                 // On the row rather than in the footer: the list is where the
@@ -589,7 +604,7 @@ impl MainMenuState {
             // card nobody can edit, and a new string for a word already on
             // screen would be four translations for nothing.
             Line::from(vec![
-                Span::raw(format!("{}@{}:{}", entry.username, entry.host, entry.port)),
+                Span::raw(address(entry)),
                 Span::styled(format!("  ·  {auth_label}"), Style::default().fg(theme::hint())),
             ]),
         ];
@@ -915,6 +930,27 @@ mod tests {
         let state = MainMenuState { selected: 0, list_state: ListState::default(), filter: "ALPHA".to_string(), typing: false };
 
         assert_eq!(state.visible_indices(&entries, ServerSort::Name), vec![0, 1, 2]);
+    }
+
+    /// Every needle here is a substring of the row the user is looking at, and
+    /// of the line `ssh-control list` prints for copying. Per-field matching
+    /// failed all three of the composed ones: nothing the filter could see
+    /// contained an `@` or a `:` at all.
+    #[test]
+    fn the_filter_matches_the_address_as_it_is_written_on_the_row() {
+        let mut entries = servers(1);
+        entries[0].name = "alpha".to_string();
+        entries[0].username = "tester".to_string();
+        entries[0].host = "127.0.0.1".to_string();
+        entries[0].port = 22001;
+
+        for needle in ["tester", "127.0.0.1", "tester@127", "127.0.0.1:22001", "22001", "TESTER@127"] {
+            let state = MainMenuState { selected: 0, list_state: ListState::default(), filter: needle.to_string(), typing: false };
+            assert_eq!(state.visible_indices(&entries, ServerSort::Name), vec![0], "{needle:?} is on the row and has to match");
+        }
+
+        let state = MainMenuState { selected: 0, list_state: ListState::default(), filter: "beta@".to_string(), typing: false };
+        assert!(state.visible_indices(&entries, ServerSort::Name).is_empty(), "a wider filter is not a filter that matches everything");
     }
 
     /// While `/` is held open every character is filter text — otherwise typing
